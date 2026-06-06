@@ -151,6 +151,7 @@ impl Lowering {
             mold_defs: std::collections::HashMap::new(),
             enum_defs: std::collections::HashMap::new(),
             enum_type_ids: std::collections::HashMap::new(),
+            shadow_kind_vars: std::collections::HashSet::new(),
             type_parents: std::collections::HashMap::new(),
             mold_solidify_funcs: std::collections::HashMap::new(),
             string_returning_funcs: std::collections::HashSet::new(),

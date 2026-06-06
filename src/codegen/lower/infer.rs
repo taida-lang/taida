@@ -512,6 +512,41 @@ impl Lowering {
         }
     }
 
+    /// Value-tag track: capture a runtime "shadow kind" for an unmold
+    /// target whose payload kind is only known at runtime — i.e. the
+    /// source is a Lax-returning list accessor over a possibly mixed
+    /// list. The companion `__ekind__<name>` IR variable holds the kind
+    /// the runtime recorded on the Lax's `__value` field; tagged poly
+    /// comparisons read it back so e.g. a Float pulled out of
+    /// `@[1, 1.0]` compares to an Int literal under f64 semantics.
+    /// Restricted to a method whitelist to keep IR noise out of the
+    /// (much more common) Async-await unmolds.
+    pub(super) fn maybe_capture_shadow_kind(
+        &mut self,
+        func: &mut IrFunction,
+        target: &str,
+        source: &Expr,
+        source_var: IrVar,
+    ) {
+        // A rebind always invalidates a previous shadow for this name.
+        self.shadow_kind_vars.remove(target);
+        let is_lax_accessor = matches!(
+            source,
+            Expr::MethodCall(_, m, _, _) if matches!(m.as_str(), "get" | "first" | "last" | "max" | "min")
+        );
+        if !is_lax_accessor {
+            return;
+        }
+        let kind_var = func.alloc_var();
+        func.push(IrInst::Call(
+            kind_var,
+            "taida_lax_value_ekind".to_string(),
+            vec![source_var],
+        ));
+        func.push(IrInst::DefVar(format!("__ekind__{}", target), kind_var));
+        self.shadow_kind_vars.insert(target.to_string());
+    }
+
     /// Unmold 先の変数に型情報を伝播する
     /// MoldInst("Str",...) >=> x の場合、x を string_vars に追加
     pub(super) fn track_unmold_type(&mut self, target: &str, source: &Expr) {

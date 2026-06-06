@@ -743,7 +743,13 @@ mod tests {
         //   kind-aware Set operations + tagged membership/insertion entry
         //   points + the EKIND stamp bridge (see F1_LEN history).
         //   F1 364,649 -> 371,286. Total -> 1,239,113.
-        const EXPECTED_TOTAL_LEN: usize = 1_239_113;
+        // 2026-06-06 value-tag track step 5: +2,382 bytes in core.c F1 for
+        //   the runtime shadow-kind plumbing — kind-stamped Lax payloads
+        //   (list get/first/last record the element's kind on __value),
+        //   taida_lax_value_ekind read-back, and the tagged poly
+        //   comparisons used when an unmolded payload's kind is only
+        //   known at runtime. F1 371,286 -> 373,668. Total -> 1,241,495.
+        const EXPECTED_TOTAL_LEN: usize = 1_241_495;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1381,7 +1387,12 @@ mod tests {
         // taking the probe argument's EKIND from codegen) plus the
         // taida_list_note_push_ekind / taida_collection_has_tagged
         // bridges. F1_LEN 364,649 -> 371,286.
-        const F1_LEN: usize = 371_286;
+        // Value-tag track step 5 (2026-06-06): +2,382 before the marker —
+        // kind-stamped Lax constructor wired into list get/first/last,
+        // taida_lax_value_ekind, and taida_poly_eq/neq_tagged (unknown
+        // sides fall back to the legacy poly comparison).
+        // F1_LEN 371,286 -> 373,668.
+        const F1_LEN: usize = 373_668;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

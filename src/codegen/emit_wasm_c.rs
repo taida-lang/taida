@@ -662,6 +662,17 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             "int64_t taida_collection_has_tagged(int64_t ptr, int64_t item, int64_t ekind);"
                 .to_string()
         }
+        "taida_lax_value_ekind" => {
+            "int64_t taida_lax_value_ekind(int64_t maybe_lax);".to_string()
+        }
+        "taida_poly_eq_tagged" => {
+            "int64_t taida_poly_eq_tagged(int64_t a, int64_t eka, int64_t b, int64_t ekb);"
+                .to_string()
+        }
+        "taida_poly_neq_tagged" => {
+            "int64_t taida_poly_neq_tagged(int64_t a, int64_t eka, int64_t b, int64_t ekb);"
+                .to_string()
+        }
         // W-4: HashMap runtime functions
         "taida_hashmap_new" => "int64_t taida_hashmap_new(void);".to_string(),
         "taida_hashmap_set" => {

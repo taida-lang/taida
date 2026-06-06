@@ -101,6 +101,12 @@ pub struct Lowering {
     /// "no aux"). Carried in the upper bits of per-element kind entries so
     /// same-ordinal variants of different enums stay distinct at runtime.
     pub(crate) enum_type_ids: std::collections::HashMap<String, i64>,
+    /// Value-tag track: variables bound by unmolding a Lax whose payload
+    /// kind is only known at runtime (mixed-list get / first / last ...).
+    /// Each carries a companion `__ekind__<name>` IR variable holding the
+    /// payload's recorded kind, which tagged poly comparisons consume.
+    /// Cleared per function body; a plain rebind of the name drops it.
+    pub(crate) shadow_kind_vars: std::collections::HashSet<String>,
     /// B11-6d: Inheritance parent map (child_name -> parent_name) for TypeExtends resolution.
     pub(crate) type_parents: std::collections::HashMap<String, String>,
     /// Mold 名 → solidify ヘルパー関数シンボル（mangled）

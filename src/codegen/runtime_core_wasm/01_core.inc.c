@@ -3501,6 +3501,21 @@ int64_t taida_set_has_tagged(int64_t set_ptr, int64_t item, int64_t ekind) {
     return taida_set_has(set_ptr, item);
 }
 
+int64_t taida_lax_value_ekind(int64_t maybe_lax) {
+    (void)maybe_lax;
+    return 0xFF; /* unknown — WASM has no per-element kinds yet */
+}
+
+int64_t taida_poly_eq_tagged(int64_t a, int64_t eka, int64_t b, int64_t ekb) {
+    (void)eka; (void)ekb;
+    return taida_poly_eq(a, b);
+}
+
+int64_t taida_poly_neq_tagged(int64_t a, int64_t eka, int64_t b, int64_t ekb) {
+    (void)eka; (void)ekb;
+    return taida_poly_eq(a, b) ? 0 : 1;
+}
+
 int64_t taida_set_add(int64_t set_ptr, int64_t item) {
     if (taida_set_has(set_ptr, item)) return set_ptr;
     /* Create a new set (copy elements) to preserve immutable semantics.

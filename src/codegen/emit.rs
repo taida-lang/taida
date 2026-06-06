@@ -348,6 +348,18 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Val, Val],
             returns: &[Val],
         },
+        "taida_lax_value_ekind" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_poly_eq_tagged" => RuntimeAbi {
+            params: &[Val, Val, Val, Val],
+            returns: &[Val],
+        },
+        "taida_poly_neq_tagged" => RuntimeAbi {
+            params: &[Val, Val, Val, Val],
+            returns: &[Val],
+        },
         "taida_list_push" => RuntimeAbi {
             params: &[Ptr, Val],
             returns: &[Ptr],

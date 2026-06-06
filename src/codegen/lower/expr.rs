@@ -1441,7 +1441,16 @@ impl Lowering {
             // _to_double). Raw i64 comparison of f64 bit patterns made
             // `3 == 3.0` false and inverted negative-float ordering.
             BinOp::Eq => {
-                if lhs_is_str || rhs_is_str {
+                // Value-tag track: an operand carrying a runtime shadow
+                // kind (an unmolded Lax payload from a possibly mixed
+                // list) must not take a static fast path — its actual
+                // kind is only known at runtime, so the comparison goes
+                // through the tagged poly engine which reads the shadow.
+                if self.operand_shadow_kind(lhs).is_some()
+                    || self.operand_shadow_kind(rhs).is_some()
+                {
+                    "taida_poly_eq_tagged"
+                } else if lhs_is_str || rhs_is_str {
                     "taida_str_eq"
                 } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
                     "taida_float_eq"
@@ -1456,7 +1465,11 @@ impl Lowering {
                 }
             }
             BinOp::NotEq => {
-                if lhs_is_str || rhs_is_str {
+                if self.operand_shadow_kind(lhs).is_some()
+                    || self.operand_shadow_kind(rhs).is_some()
+                {
+                    "taida_poly_neq_tagged"
+                } else if lhs_is_str || rhs_is_str {
                     "taida_str_neq"
                 } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
                     "taida_float_neq"
@@ -1495,6 +1508,21 @@ impl Lowering {
             BinOp::Or => "taida_bool_or",
             BinOp::Concat => "taida_str_concat",
         };
+        // Value-tag track: the tagged poly comparisons take four arguments
+        // (each operand rides with its kind — a shadow IR variable when
+        // the operand is an unmolded Lax payload, a compile-time EKIND
+        // constant otherwise).
+        if runtime_fn == "taida_poly_eq_tagged" || runtime_fn == "taida_poly_neq_tagged" {
+            let lhs_kind = self.emit_operand_ekind(func, lhs);
+            let rhs_kind = self.emit_operand_ekind(func, rhs);
+            let result = func.alloc_var();
+            func.push(IrInst::Call(
+                result,
+                runtime_fn.to_string(),
+                vec![lhs_var, lhs_kind, rhs_var, rhs_kind],
+            ));
+            return Ok(result);
+        }
         // When a float-family helper was selected, lift any operand that is
         // statically known to be Int to an f64 bit pattern at the call site
         // (`taida_int_to_float` — the conversion the runtime's own comment
@@ -1521,6 +1549,32 @@ impl Lowering {
             vec![lhs_var, rhs_var],
         ));
         Ok(result)
+    }
+
+    /// Value-tag track: the shadow-kind variable name for an operand, when
+    /// the operand is an identifier bound by a runtime-kind unmold.
+    fn operand_shadow_kind(&self, expr: &Expr) -> Option<String> {
+        if let Expr::Ident(name, _) = expr
+            && self.shadow_kind_vars.contains(name)
+        {
+            return Some(format!("__ekind__{}", name));
+        }
+        None
+    }
+
+    /// Emit the kind argument for one operand of a tagged poly comparison:
+    /// the shadow IR variable when one exists, otherwise the compile-time
+    /// EKIND constant.
+    fn emit_operand_ekind(&mut self, func: &mut IrFunction, expr: &Expr) -> IrVar {
+        if let Some(shadow_name) = self.operand_shadow_kind(expr) {
+            let v = func.alloc_var();
+            func.push(IrInst::UseVar(v, shadow_name));
+            v
+        } else {
+            let v = func.alloc_var();
+            func.push(IrInst::ConstInt(v, self.expr_ekind(expr)));
+            v
+        }
     }
 
     /// Lift an operand of a float-family binary op to an f64 bit pattern

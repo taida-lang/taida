@@ -3795,27 +3795,44 @@ taida_val taida_list_length(taida_val list_ptr) {
     return ((taida_val*)list_ptr)[2];
 }
 
+// Kind-stamped Lax constructor: identical to taida_lax_new but records
+// the payload's known scalar kind on the __value field tag, so an
+// unmolding call site can read it back (taida_lax_value_ekind) and run
+// exact pair comparisons on the payload. Heap kinds keep whatever the
+// retain-and-tag heuristic classified; ENUM stays on the heuristic path
+// too for now (the pack field tag's existing consumers only understand
+// the legacy scalar tags — recording 9 there would change rendering).
+static taida_val taida_lax_new_k(taida_val value, taida_val default_value, uint32_t ekind) {
+    taida_val pack = taida_lax_new(value, default_value);
+    uint32_t k = ekind & 0xFFu;
+    if (k == (uint32_t)TAIDA_TAG_INT || k == (uint32_t)TAIDA_TAG_FLOAT
+        || k == (uint32_t)TAIDA_TAG_BOOL) {
+        taida_pack_set_tag(pack, 1, (taida_val)k);
+    }
+    return pack;
+}
+
 taida_val taida_list_get(taida_val list_ptr, taida_val index) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     if (index < 0 || index >= len) {
         return taida_lax_empty(0);  // OOB returns empty Lax (v0.5.0)
     }
-    return taida_lax_new(list[4 + index], 0);
+    return taida_lax_new_k(list[4 + index], 0, taida_elem_kind_at(list, index));
 }
 
 taida_val taida_list_first(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     if (len == 0) return taida_lax_empty(0);
-    return taida_lax_new(list[4], 0);
+    return taida_lax_new_k(list[4], 0, taida_elem_kind_at(list, 0));
 }
 
 taida_val taida_list_last(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     if (len == 0) return taida_lax_empty(0);
-    return taida_lax_new(list[4 + len - 1], 0);
+    return taida_lax_new_k(list[4 + len - 1], 0, taida_elem_kind_at(list, len - 1));
 }
 
 taida_val taida_list_sum(taida_val list_ptr) {
@@ -6106,6 +6123,32 @@ static int taida_ekind_hashable(taida_val v, uint32_t ekind) {
         default:
             return taida_value_hashable(v);
     }
+}
+
+// Read back the kind recorded on a Lax pack's __value field (EKIND form;
+// EKIND unknown when the input is not pack-shaped or the recorded tag is
+// not a scalar kind). Unmolding call sites use this to carry a runtime
+// "shadow kind" alongside the payload value.
+taida_val taida_lax_value_ekind(taida_val maybe_lax) {
+    if (!TAIDA_IS_PACK(maybe_lax)) return (taida_val)TAIDA_EKIND_UNKNOWN;
+    taida_val tag = taida_pack_get_field_tag((taida_ptr)maybe_lax, (taida_val)HASH___VALUE);
+    if (tag == TAIDA_TAG_INT || tag == TAIDA_TAG_FLOAT || tag == TAIDA_TAG_BOOL)
+        return tag;
+    return (taida_val)TAIDA_EKIND_UNKNOWN;
+}
+
+// Tagged polymorphic equality: when both operands carry a known kind the
+// pair semantics engine decides (Bool≠Int, Int↔Float f64 crossing at any
+// magnitude, ...); any unknown side falls back to the legacy poly
+// comparison so untagged call sites keep their historical behaviour.
+taida_val taida_poly_eq_tagged(taida_val a, taida_val eka, taida_val b, taida_val ekb) {
+    uint32_t ka = (uint32_t)eka & 0xFFu, kb = (uint32_t)ekb & 0xFFu;
+    if (ka == TAIDA_EKIND_UNKNOWN || kb == TAIDA_EKIND_UNKNOWN) return taida_poly_eq(a, b);
+    return taida_ekind_value_eq(a, (uint32_t)eka, b, (uint32_t)ekb) ? 1 : 0;
+}
+
+taida_val taida_poly_neq_tagged(taida_val a, taida_val eka, taida_val b, taida_val ekb) {
+    return taida_poly_eq_tagged(a, eka, b, ekb) ? 0 : 1;
 }
 
 typedef struct {
