@@ -499,7 +499,7 @@ pub fn hex_encode(data: &[u8]) -> String {
 /// non-hex characters by returning `None` (failure side of `Lax[Bytes]`).
 pub fn hex_decode(hex: &str) -> Option<Vec<u8>> {
     let bytes = hex.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
@@ -563,7 +563,7 @@ pub fn base64_encode(data: &[u8]) -> String {
 /// `None` (failure side of `Lax[Bytes]`). Whitespace is not accepted.
 pub fn base64_decode(b64: &str) -> Option<Vec<u8>> {
     let bytes = b64.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return None;
     }
     if bytes.is_empty() {

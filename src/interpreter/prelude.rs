@@ -269,11 +269,11 @@ impl Interpreter {
         // We intentionally do not provide prelude-level crypto compatibility:
         // the symbols resolve only through the `__crypto_builtin_*` sentinel
         // injected on import.
-        if let Some(Value::Str(tag)) = self.env.get(name) {
-            if let Some(sym) = tag.as_str().strip_prefix("__crypto_builtin_") {
-                let sym = sym.to_string();
-                return self.try_crypto_func(&sym, args).map(Some);
-            }
+        if let Some(Value::Str(tag)) = self.env.get(name)
+            && let Some(sym) = tag.as_str().strip_prefix("__crypto_builtin_")
+        {
+            let sym = sym.to_string();
+            return self.try_crypto_func(&sym, args).map(Some);
         }
 
         // taida-lang/pool runtime dispatch.

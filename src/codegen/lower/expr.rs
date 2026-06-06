@@ -1448,14 +1448,13 @@ impl Lowering {
                 // through the tagged poly engine which reads the shadow.
                 if self.operand_shadow_kind(lhs).is_some()
                     || self.operand_shadow_kind(rhs).is_some()
-                {
-                    "taida_poly_eq_tagged"
-                } else if self.expr_is_list(lhs) && self.expr_is_list(rhs) {
                     // Value-tag track: two statically-known lists compare
                     // structurally (kind-aware element walk) instead of
                     // by raw pointer identity, matching the interpreter's
                     // Value::eq. The untyped poly fallback below keeps the
                     // historical raw comparison for dynamic operands.
+                    || (self.expr_is_list(lhs) && self.expr_is_list(rhs))
+                {
                     "taida_poly_eq_tagged"
                 } else if lhs_is_str || rhs_is_str {
                     "taida_str_eq"
@@ -1474,9 +1473,8 @@ impl Lowering {
             BinOp::NotEq => {
                 if self.operand_shadow_kind(lhs).is_some()
                     || self.operand_shadow_kind(rhs).is_some()
+                    || (self.expr_is_list(lhs) && self.expr_is_list(rhs))
                 {
-                    "taida_poly_neq_tagged"
-                } else if self.expr_is_list(lhs) && self.expr_is_list(rhs) {
                     "taida_poly_neq_tagged"
                 } else if lhs_is_str || rhs_is_str {
                     "taida_str_neq"
