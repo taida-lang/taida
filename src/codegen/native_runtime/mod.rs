@@ -726,7 +726,16 @@ mod tests {
         //   Ints), and taida_addon_val_to_raw mirrors it for Float returns
         //   (top-level + pack fields). core.c fragments untouched, so F1/F2
         //   stay at 342,811 / 201,685. Total -> 1,210,638.
-        const EXPECTED_TOTAL_LEN: usize = 1_210_638;
+        // 2026-06-06 value-tag track: +5,841 bytes in core.c F1 for the
+        //   per-element kind array infrastructure (three-state elem-tag
+        //   slot + helper API; see the F1_LEN history below for details).
+        //   F1 342,811 -> 348,652. Total -> 1,216,479.
+        // 2026-06-06 value-tag track step 2: +3,567 bytes in core.c F1 —
+        //   slot reads rewritten onto the helper API, set_elem_tag
+        //   materialises/appends the kind array, release walks per-element
+        //   kinds and frees the array (List/Set), elem retain/release gain
+        //   BYTES. F1 348,652 -> 352,219. Total -> 1,220,046.
+        const EXPECTED_TOTAL_LEN: usize = 1_220_046;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1333,7 +1342,21 @@ mod tests {
         // actually-added b element and join leftover worker handles in the
         // Async release path (+584) before the marker: F1_LEN 342,227 ->
         // 342,811.
-        const F1_LEN: usize = 342_811;
+        // Value-tag track (2026-06-06): +5,841 before the marker for the
+        // per-element kind array infrastructure — TAIDA_TAG_ENUM/BYTES kind
+        // constants, the three-state elem-tag slot contract (homogeneous /
+        // UNKNOWN/HETEROGENEOUS / kind-array pointer) and its helper API
+        // (taida_elem_tag_kind / _for_propagation / _kind_at / _tags_free /
+        // _tags_append / _tags_materialise). F1_LEN 342,811 -> 348,652.
+        // Value-tag track step 2 (2026-06-06): +3,567 before the marker —
+        // every legacy elem-tag slot read goes through the helper API
+        // (propagation reads degrade an array carrier to HETEROGENEOUS
+        // instead of leaking the pointer into a derived container),
+        // taida_list_set_elem_tag materialises/appends the kind array at
+        // its pre-push call sites, release walks per-element kinds for
+        // array carriers (List + Set) and frees the array, and the elem
+        // retain/release helpers gained BYTES. F1_LEN 348,652 -> 352,219.
+        const F1_LEN: usize = 352_219;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
