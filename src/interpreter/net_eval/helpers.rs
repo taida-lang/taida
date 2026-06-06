@@ -145,9 +145,14 @@ pub(crate) fn write_vectored_all(
             }
             Ok(())
         }
-        ConnStream::Tls(_) => {
+        ConnStream::Tls(_) | ConnStream::Detached => {
             // TLS: concatenate all IoSlices into one buffer, then write once.
             // This produces a single TLS record instead of N records.
+            //
+            // Detached (F55 S2, HTTP/3 body-observation placeholder): falls
+            // through to the single write_all, whose Detached arm errors out
+            // — a 2-arg H3 handler must not drive the chunked-streaming writer
+            // API (H3 responses are one-shot packs).
             let total_len: usize = bufs.iter().map(|b| b.len()).sum();
             let mut combined = Vec::with_capacity(total_len);
             for buf in bufs {

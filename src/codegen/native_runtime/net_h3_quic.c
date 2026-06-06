@@ -1126,9 +1126,13 @@ static taida_val h3_dispatch_request(H3ServeCtx *ctx, taida_val request_pack) {
     return taida_invoke_callback1(ctx->handler, request_pack);
 }
 
+// F55 S2: `streaming` / `body_token` select the 2-arg handler shape (empty
+// body span + __body_stream / __body_token sentinels) so readBody* accepts the
+// pack, mirroring h2_build_request_pack. See net_h1_h2.c for the rationale.
 static taida_val h3_build_request_pack(H3RequestFields *fields,
                                         const unsigned char *body, size_t body_len,
-                                        const char *peer_host, int peer_port) {
+                                        const char *peer_host, int peer_port,
+                                        int streaming, uint64_t body_token) {
     // D29B-011 (Track-ζ Lock-H, 2026-04-27): mirror h2_build_request_pack.
     // QPACK has the same dynamic-table reallocation problem as HPACK, so
     // we copy decoded pseudo / regular header bytes into a per-request
@@ -1290,7 +1294,8 @@ static taida_val h3_build_request_pack(H3RequestFields *fields,
     taida_pack_set_tag(version_pack, 1, TAIDA_TAG_INT);
 
     // 14-field request pack (matches h2 structure for handler contract compatibility)
-    taida_val req = taida_pack_new(14);
+    // F55 S2: the streaming (2-arg) shape carries two extra sentinel fields.
+    taida_val req = taida_pack_new(streaming ? 16 : 14);
     int f = 0;
     #define SET_FIELD_H3(nm, val, tag) do { \
         taida_pack_set_hash(req, f, taida_str_hash((taida_val)(nm))); \
@@ -1312,8 +1317,11 @@ static taida_val h3_build_request_pack(H3RequestFields *fields,
     }
     SET_FIELD_H3("version",     version_pack,                                 TAIDA_TAG_PACK);
     SET_FIELD_H3("headers",     hdr_list,                                     TAIDA_TAG_LIST);
-    // body span references the leading body_len bytes of the arena (offset 0)
-    SET_FIELD_H3("body",        taida_net_make_span(0, (taida_val)body_len),  TAIDA_TAG_PACK);
+    // F55 S2: 2-arg (streaming) handlers see an empty body span; 1-arg handlers
+    // keep the eager span over the leading body_len bytes of the arena.
+    SET_FIELD_H3("body",
+                 taida_net_make_span(0, streaming ? (taida_val)0 : (taida_val)body_len),
+                 TAIDA_TAG_PACK);
     SET_FIELD_H3("bodyOffset",  (taida_val)0,                                 TAIDA_TAG_INT);
     SET_FIELD_H3("contentLength",(taida_val)(int64_t)body_len,                TAIDA_TAG_INT);
     // D29B-011: post-arena, body field is now a span pack (not a Bytes
@@ -1327,6 +1335,11 @@ static taida_val h3_build_request_pack(H3RequestFields *fields,
     // HTTP/3 never uses chunked TE (binary framing like H2)
     SET_FIELD_H3("chunked",     (taida_val)0,                                 TAIDA_TAG_BOOL);
     SET_FIELD_H3("protocol",    (taida_val)taida_str_new_copy("h3"),            TAIDA_TAG_STR);
+    // F55 S2: v4 sentinel + token for 2-arg streaming handlers (see net_h1_h2.c).
+    if (streaming) {
+        SET_FIELD_H3("__body_stream", (taida_val)"__v4_body_stream",          TAIDA_TAG_STR);
+        SET_FIELD_H3("__body_token",  (taida_val)body_token,                  TAIDA_TAG_INT);
+    }
     #undef SET_FIELD_H3
     return req;
 }
@@ -2664,25 +2677,100 @@ static int h3_process_stream(QuicConnSlot *slot, QuicConnPool *pool,
     inet_ntop(AF_INET, &slot->peer_addr.sin_addr, peer_host, sizeof(peer_host));
     int peer_port = ntohs(slot->peer_addr.sin_port);
 
-    taida_val request_pack = h3_build_request_pack(
-        &req_fields,
-        request_body ? request_body : (const unsigned char*)"",
-        request_body_len,
-        peer_host, peer_port
-    );
-    free(req_fields.regular_headers);
-    req_fields.regular_headers = NULL;
+    // F55 S2: branch on handler arity. The 1-arg path keeps the eager request
+    // pack (body completed value). The 2-arg path activates the streaming-body
+    // observation contract shared with H1/H2 (option (b),
+    // `.dev/F55_S2_STREAMING_DESIGN.md` §5): the H3 DATA frames have already
+    // been collected (request_body, bounded by the 64 KiB stream buffer), so
+    // we pre-load a copy into a Content-Length-style Net4BodyState whose
+    // `leftover` holds the whole body. readBody* drains `leftover`
+    // (taida_net4_read_body_bytes pulls leftover before any socket) and —
+    // because content_length == leftover_len exactly — never touches the QUIC
+    // transport (which is owned by this serve loop and unreachable from the
+    // synchronous read APIs anyway). req.body is an empty span; the handler
+    // reads via readBody / readBodyChunk / readBodyAll, identical to H1/H2.
+    int h3_streaming = (pool->handler_arity >= 2) ? 1 : 0;
 
-    // Dispatch to the Taida handler (same contract as h1/h2).
-    H3ServeCtx ctx;
-    ctx.handler = pool->handler;
-    ctx.handler_arity = pool->handler_arity;
-    ctx.request_count = &pool->request_count;
-    ctx.max_requests = pool->max_requests;
-    snprintf(ctx.peer_host, sizeof(ctx.peer_host), "%s", peer_host);
-    ctx.peer_port = peer_port;
+    taida_val request_pack;
+    taida_val response;
+    if (h3_streaming) {
+        const unsigned char *body_src =
+            request_body ? request_body : (const unsigned char*)"";
+        size_t supply_len = request_body_len;
+        unsigned char *supply = NULL;
+        if (supply_len > 0) {
+            supply = (unsigned char*)TAIDA_MALLOC(supply_len, "net_h3_v4_body_supply");
+            if (supply) {
+                memcpy(supply, body_src, supply_len);
+            } else {
+                supply_len = 0; // transient OOM: empty supply, still dispatch
+            }
+        }
 
-    taida_val response = h3_dispatch_request(&ctx, request_pack);
+        Net4BodyState body_state;
+        memset(&body_state, 0, sizeof(body_state));
+        body_state.is_chunked = 0;            // H3 has no chunked TE
+        body_state.content_length = (int64_t)supply_len;
+        body_state.bytes_consumed = 0;
+        body_state.fully_read = (supply_len == 0) ? 1 : 0;
+        body_state.any_read_started = 0;
+        body_state.leftover = supply;
+        body_state.leftover_len = supply_len;
+        body_state.leftover_pos = 0;
+        body_state.chunked_state = NET4_CHUNKED_WAIT_SIZE;
+        body_state.chunked_remaining = 0;
+        body_state.request_token = taida_net4_alloc_token();
+        body_state.ws_closed = 0;
+        body_state.ws_token = 0;
+        body_state.ws_close_code = 0;
+        body_state.aborted = 0;
+
+        request_pack = h3_build_request_pack(
+            &req_fields, body_src, request_body_len,
+            peer_host, peer_port,
+            1 /*streaming*/, body_state.request_token
+        );
+        free(req_fields.regular_headers);
+        req_fields.regular_headers = NULL;
+
+        // Install per-request body state for readBody*. tl_net3_client_fd is
+        // set to -1: H3 has no readable socket fd here (the transport is QUIC),
+        // and the leftover supply means the socket fallback is never reached.
+        // tl_net3_writer stays NULL so any accidental writeChunk aborts cleanly
+        // rather than writing H1 framing into the QUIC stream; readBody*
+        // tolerates a NULL writer. H3 2-arg handlers return a one-shot pack.
+        tl_net3_client_fd = -1;
+        tl_net4_body = &body_state;
+
+        taida_val writer_token = taida_net3_create_writer_token();
+        response = taida_invoke_callback2(pool->handler, request_pack, writer_token);
+
+        tl_net4_body = NULL;
+
+        taida_release(writer_token);
+        if (supply) free(supply);
+    } else {
+        request_pack = h3_build_request_pack(
+            &req_fields,
+            request_body ? request_body : (const unsigned char*)"",
+            request_body_len,
+            peer_host, peer_port,
+            0 /*streaming*/, 0 /*body_token*/
+        );
+        free(req_fields.regular_headers);
+        req_fields.regular_headers = NULL;
+
+        // Dispatch to the Taida handler (same contract as h1/h2).
+        H3ServeCtx ctx;
+        ctx.handler = pool->handler;
+        ctx.handler_arity = pool->handler_arity;
+        ctx.request_count = &pool->request_count;
+        ctx.max_requests = pool->max_requests;
+        snprintf(ctx.peer_host, sizeof(ctx.peer_host), "%s", peer_host);
+        ctx.peer_port = peer_port;
+
+        response = h3_dispatch_request(&ctx, request_pack);
+    }
 
     // ── Extract response and encode H3 frames ──
     // Reuse H2ResponseFields — same handler response contract.

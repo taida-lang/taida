@@ -6184,9 +6184,21 @@ static taida_val h2_dispatch_request(H2ServeCtx *ctx, taida_val request_pack) {
 
 // Build a taida_val BuchiPack representing the HTTP/2 request.
 // This mirrors the Interpreter's request pack in serve_h2().
+//
+// F55 S2: `streaming` selects the 2-arg handler shape (option (b) from
+// `.dev/F55_S2_STREAMING_DESIGN.md` §5). When `streaming` is non-zero the
+// `body` field is published as an empty span (the handler reads the bytes via
+// readBody / readBodyChunk / readBodyAll instead of seeing them eagerly) and
+// two sentinel fields — `__body_stream` + `__body_token` — are appended so the
+// readBody* identity check accepts the pack. `body_token` must equal the
+// Net4BodyState.request_token installed around the handler call. The arena is
+// built identically to the 1-arg path (body still lives at offset 0 of
+// `req.raw`), so the D29B-001 arena shape is unchanged for both arities. When
+// `streaming` is zero the legacy eager 14-field pack is produced verbatim.
 static taida_val h2_build_request_pack(H2RequestFields *fields,
                                         const unsigned char *body, size_t body_len,
-                                        const char *peer_host, int peer_port) {
+                                        const char *peer_host, int peer_port,
+                                        int streaming, uint64_t body_token) {
     // D29B-001 (Track-ζ Lock-H, 2026-04-27): build a per-request arena
     // [body | method | path | query | n1 v1 n2 v2 ... | "host" authority]
     // and surface every Str-shaped pseudo / regular header field as
@@ -6356,7 +6368,9 @@ static taida_val h2_build_request_pack(H2RequestFields *fields,
 
     // NB6-28: Request pack: 14 fields (was 13 — missing "chunked")
     // Matches Interpreter's 14-field request pack.
-    taida_val req = taida_pack_new(14);
+    // F55 S2: the streaming (2-arg) shape carries two extra sentinel fields
+    // (__body_stream / __body_token), so size the pack accordingly.
+    taida_val req = taida_pack_new(streaming ? 16 : 14);
     int f = 0;
     #define SET_FIELD(nm, val, tag) do { \
         taida_pack_set_hash(req, f, taida_str_hash((taida_val)(nm))); \
@@ -6379,8 +6393,13 @@ static taida_val h2_build_request_pack(H2RequestFields *fields,
     SET_FIELD("version",     version_pack,                                 TAIDA_TAG_PACK);
     SET_FIELD("headers",     hdr_list,                                     TAIDA_TAG_LIST);
     // NB6-26: Use TAIDA_TAG_PACK for Bytes (consistent with h1 path — Bytes use PACK tag in Native)
-    // body span references the leading body_len bytes of the arena (offset 0)
-    SET_FIELD("body",        taida_net_make_span(0, (taida_val)body_len),  TAIDA_TAG_PACK);
+    // F55 S2: 2-arg (streaming) handlers see an empty body span; 1-arg handlers
+    // keep the eager span over the leading body_len bytes of the arena
+    // (offset 0). Either way `req.raw` / Slice[req.raw, ...] stay valid because
+    // the arena layout is identical.
+    SET_FIELD("body",
+              taida_net_make_span(0, streaming ? (taida_val)0 : (taida_val)body_len),
+              TAIDA_TAG_PACK);
     SET_FIELD("bodyOffset",  (taida_val)0,                                 TAIDA_TAG_INT);
     SET_FIELD("contentLength",(taida_val)(int64_t)body_len,                TAIDA_TAG_INT);
     // D29B-001 (Track-ζ): post-arena, body field is now a span pack (not a
@@ -6395,6 +6414,13 @@ static taida_val h2_build_request_pack(H2RequestFields *fields,
     // NB6-28: Add missing "chunked" field (HTTP/2 never uses chunked TE)
     SET_FIELD("chunked",     (taida_val)0,                                 TAIDA_TAG_BOOL);
     SET_FIELD("protocol",    (taida_val)taida_str_new_copy("h2"),            TAIDA_TAG_STR);
+    // F55 S2: v4 sentinel + request-scoped token for 2-arg streaming handlers.
+    // These mirror the H1 2-arg pack (net_h1_h2.c v4 path) so readBody* accepts
+    // the pack and validates identity against the active Net4BodyState.
+    if (streaming) {
+        SET_FIELD("__body_stream", (taida_val)"__v4_body_stream",          TAIDA_TAG_STR);
+        SET_FIELD("__body_token",  (taida_val)body_token,                  TAIDA_TAG_INT);
+    }
     #undef SET_FIELD
 
     return req;
@@ -6818,15 +6844,109 @@ static void taida_net_h2_serve_connection(int client_fd, H2ServeCtx *ctx) {
                     continue;
                 }
 
-                // Build request pack and call handler
-                taida_val req_pack = h2_build_request_pack(
-                    &req_fields,
-                    s->request_body, s->request_body_len,
-                    ctx->peer_host, ctx->peer_port
-                );
-                free(req_fields.regular_headers);
+                // F55 S2: branch on handler arity. The 1-arg path is the
+                // pre-existing eager contract (body completed value, arena
+                // shape pinned by D29B-001). The 2-arg path activates the same
+                // streaming-body observation contract H1 already implements:
+                // req.body is an empty span and the handler pulls bytes via
+                // readBody / readBodyChunk / readBodyAll.
+                //
+                // Streaming form: option (b) from the S2 design
+                // (`.dev/F55_S2_STREAMING_DESIGN.md` §5). The DATA frames for
+                // this stream were already read to END_STREAM into
+                // s->request_body (which is what triggers dispatch here and is
+                // bounded by H2_MAX_REQUEST_BODY_SIZE during accumulation), so
+                // the per-stream queue is pre-materialised. We pre-load a copy
+                // of it into a Content-Length-style Net4BodyState whose
+                // `leftover` holds the whole body; readBody* drains `leftover`
+                // (taida_net4_read_body_bytes pulls leftover before the socket)
+                // and — because content_length == leftover_len exactly — never
+                // touches the H2 socket, so no re-entrant frame reading is
+                // needed and the framing stays intact. The 16 MiB cap therefore
+                // still bounds memory; the handler observes the identical
+                // streaming contract to H1, only the supply timing differs.
+                taida_val req_pack;
+                taida_val response;
+                if (ctx->handler_arity >= 2) {
+                    // Copy the already-capped body into a dedicated leftover
+                    // buffer (mirrors the H1 v4 "net_v4_leftover" copy). The
+                    // stream still owns s->request_body and frees it on close,
+                    // so this copy is independently owned and freed below — no
+                    // double free.
+                    size_t supply_len = s->request_body_len;
+                    unsigned char *supply = NULL;
+                    if (supply_len > 0) {
+                        supply = (unsigned char*)TAIDA_MALLOC(supply_len, "net_h2_v4_body_supply");
+                        if (supply) {
+                            memcpy(supply, s->request_body, supply_len);
+                        } else {
+                            // Transient OOM: fall back to an empty supply so the
+                            // handler still dispatches (readBody* yields empty).
+                            supply_len = 0;
+                        }
+                    }
 
-                taida_val response = h2_dispatch_request(ctx, req_pack);
+                    Net4BodyState body_state;
+                    memset(&body_state, 0, sizeof(body_state));
+                    body_state.is_chunked = 0;            // H2 has no chunked TE
+                    body_state.content_length = (int64_t)supply_len;
+                    body_state.bytes_consumed = 0;
+                    body_state.fully_read = (supply_len == 0) ? 1 : 0;
+                    body_state.any_read_started = 0;
+                    body_state.leftover = supply;
+                    body_state.leftover_len = supply_len;
+                    body_state.leftover_pos = 0;
+                    body_state.chunked_state = NET4_CHUNKED_WAIT_SIZE;
+                    body_state.chunked_remaining = 0;
+                    body_state.request_token = taida_net4_alloc_token();
+                    body_state.ws_closed = 0;
+                    body_state.ws_token = 0;
+                    body_state.ws_close_code = 0;
+                    body_state.aborted = 0;
+
+                    req_pack = h2_build_request_pack(
+                        &req_fields,
+                        s->request_body, s->request_body_len,
+                        ctx->peer_host, ctx->peer_port,
+                        1 /*streaming*/, body_state.request_token
+                    );
+                    free(req_fields.regular_headers);
+
+                    // Install the per-request body state for readBody*. The
+                    // client fd is exposed so the read APIs accept the call,
+                    // but the socket is never read (leftover holds everything).
+                    // tl_net3_writer stays NULL: H2 2-arg handlers return a
+                    // one-shot response pack (the v3 chunked writer targets H1
+                    // wire framing), so leaving the writer unset makes any
+                    // accidental writeChunk abort cleanly instead of corrupting
+                    // the H2 framing, while readBody* tolerates a NULL writer.
+                    tl_net3_client_fd = client_fd;
+                    tl_net4_body = &body_state;
+
+                    taida_val writer_token = taida_net3_create_writer_token();
+                    response = taida_invoke_callback2(ctx->handler, req_pack, writer_token);
+
+                    tl_net3_client_fd = -1;
+                    tl_net4_body = NULL;
+
+                    // Any unread bytes still in leftover are simply discarded
+                    // here — the stream is closed below, so the design's "drain
+                    // remaining DATA, no RST" rule holds trivially (all DATA was
+                    // already consumed off the wire by the frame loop).
+                    taida_release(writer_token);
+                    if (supply) free(supply);
+                } else {
+                    // Build request pack and call handler (1-arg eager path).
+                    req_pack = h2_build_request_pack(
+                        &req_fields,
+                        s->request_body, s->request_body_len,
+                        ctx->peer_host, ctx->peer_port,
+                        0 /*streaming*/, 0 /*body_token*/
+                    );
+                    free(req_fields.regular_headers);
+
+                    response = h2_dispatch_request(ctx, req_pack);
+                }
                 (*ctx->request_count)++;
 
                 // Extract and send response

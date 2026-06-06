@@ -505,6 +505,15 @@ impl RequestBodyState {
 pub(crate) enum ConnStream {
     Plain(std::net::TcpStream),
     Tls(Box<super::super::net_transport::TlsTransport>),
+    /// F55 S2: a transport-less placeholder used when an
+    /// `ActiveStreamingWriter` must be installed for body observation but no
+    /// socket-backed stream exists (HTTP/3, whose body is supplied entirely
+    /// from a pre-read queue via `RequestBodyState.leftover`). Reads return
+    /// clean EOF and writes error out, so this variant never silently
+    /// fabricates body bytes nor swallows a response write. The H3 2-arg path
+    /// pre-loads the full body into `leftover`, so the read path is satisfied
+    /// without ever touching this stream (option (b) of the S2 design).
+    Detached,
 }
 
 impl std::io::Read for ConnStream {
@@ -512,6 +521,11 @@ impl std::io::Read for ConnStream {
         match self {
             ConnStream::Plain(s) => std::io::Read::read(s, buf),
             ConnStream::Tls(t) => super::super::net_transport::Transport::read(t.as_mut(), buf),
+            // Clean EOF: a Detached stream has no further bytes. The H3 2-arg
+            // body supply is fully buffered in RequestBodyState.leftover, so
+            // this arm is reached only if a caller reads past the buffered
+            // body — in which case EOF is the correct end-of-body signal.
+            ConnStream::Detached => Ok(0),
         }
     }
 }
@@ -524,6 +538,10 @@ impl std::io::Write for ConnStream {
                 super::super::net_transport::Transport::write_all(t.as_mut(), buf)?;
                 Ok(buf.len())
             }
+            ConnStream::Detached => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "write to a detached stream is not supported (HTTP/3 streaming response writer)",
+            )),
         }
     }
 
@@ -531,6 +549,7 @@ impl std::io::Write for ConnStream {
         match self {
             ConnStream::Plain(s) => std::io::Write::flush(s),
             ConnStream::Tls(t) => super::super::net_transport::Transport::flush(t.as_mut()),
+            ConnStream::Detached => Ok(()),
         }
     }
 
@@ -540,6 +559,10 @@ impl std::io::Write for ConnStream {
             ConnStream::Tls(t) => {
                 super::super::net_transport::Transport::write_all(t.as_mut(), buf)
             }
+            ConnStream::Detached => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "write to a detached stream is not supported (HTTP/3 streaming response writer)",
+            )),
         }
     }
 }
@@ -549,6 +572,7 @@ impl ConnStream {
         match self {
             ConnStream::Plain(s) => s.set_read_timeout(dur),
             ConnStream::Tls(t) => t.stream_ref().set_read_timeout(dur),
+            ConnStream::Detached => Ok(()),
         }
     }
 
@@ -566,6 +590,7 @@ impl ConnStream {
             ConnStream::Tls(t) => {
                 super::super::net_transport::Transport::shutdown_write(t.as_mut())
             }
+            ConnStream::Detached => Ok(()),
         }
     }
 

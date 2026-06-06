@@ -765,7 +765,17 @@ mod tests {
         //   bytes in core.c F1 — cross-tagged composition projection +
         //   pre-push union latch + flatten full projection + map_k (see
         //   F1_LEN history). F1 383,539 -> 384,554. Total -> 1,252,787.
-        const EXPECTED_TOTAL_LEN: usize = 1_252_787;
+        // 2026-06-06 F55 S2 (H2/H3 request-body streaming for 2-arg handlers):
+        //   +11,582 bytes total across the two net fragments for the option (b)
+        //   streaming branch (arity dispatch in taida_net_h2_serve_connection /
+        //   the H3 serve path, the Net4BodyState leftover supply that pre-loads
+        //   the already-accumulated body, the streaming/body_token params on
+        //   h{2,3}_build_request_pack, and the empty-body-span +
+        //   __body_stream / __body_token sentinel fields). Split as
+        //   net_h1_h2.c +7,229 (F6, after the HTTP/2 divider) and
+        //   net_h3_quic.c +4,353. core.c is untouched, so F1_LEN / F2_LEN are
+        //   unchanged. Total 1,252,787 -> 1,264,369.
+        const EXPECTED_TOTAL_LEN: usize = 1_264_369;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1640,14 +1650,16 @@ mod tests {
         //   server, after the divider): the H2_MAX_REQUEST_BODY_SIZE guard +
         //   ENHANCE_YOUR_CALM reset + the two new #defines net to +1,113 bytes.
         //   F6 grows: 106,128 + 1,113 = 107,241.
+        // F55 S2 (2026-06-06): the H2 server's 2-arg streaming body branch
+        //   (option (b): arity branch in taida_net_h2_serve_connection, the
+        //   Net4BodyState leftover supply, the streaming/body_token params on
+        //   h2_build_request_pack, and the empty-body-span + __body_stream /
+        //   __body_token fields) adds +7,229 bytes after the HTTP/2 divider.
+        //   All edits sit in F6; F5_LEN and the F6_PREFIX anchor are unaffected.
+        //   F6: 107,388 + 7,229 = 114,617.
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            // F6 = 107,388. The previous 107_241 was stale on HEAD: a net_h2
-            // change added 147 bytes after the divider without refreshing this
-            // sub-assert (EXPECTED_TOTAL_LEN already tracked the true total, so
-            // c13_4 had been failing on net_h1_h2.c independently of G4). F5_LEN
-            // and the F6_PREFIX anchor are unaffected.
-            224_556 + 107_388,
+            224_556 + 114_617,
             "net_h1_h2.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";

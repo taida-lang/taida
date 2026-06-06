@@ -29228,18 +29228,23 @@ fn test_nb6_26_27_28_native_h2_request_pack_parity() {
         .take(220)
         .collect::<Vec<_>>()
         .join("\n");
+    // F55 S2 (2026-06-06): the `body` span is now arity-aware — the 1-arg
+    // (eager) path keeps offset 0 / len body_len, while the 2-arg (streaming)
+    // path empties it (`streaming ? (taida_val)0 : (taida_val)body_len`) so the
+    // handler reads via readBody*. Either way it is still a span pack into
+    // req.raw at offset 0, preserving the D29B-001 arena shape for 1-arg.
     assert!(
         h2_build_section
-            .contains("SET_FIELD(\"body\",        taida_net_make_span(0, (taida_val)body_len)")
-            || h2_build_section
-                .contains("SET_FIELD(\"body\", taida_net_make_span(0, (taida_val)body_len)"),
-        "D29B-001 (Track-ζ Lock-H): h2 `body` field must be a span pack into req.raw at offset 0, len = body_len. Pre-fix Native h2 wrote `body = raw_bytes` (Bytes ref), which forced taida_retain(raw_bytes); post-fix the body span makes the second retain unnecessary and incorrect."
+            .contains("taida_net_make_span(0, streaming ? (taida_val)0 : (taida_val)body_len)"),
+        "D29B-001 (Track-ζ Lock-H) + F55 S2: h2 `body` field must be a span pack into req.raw at offset 0; the 1-arg path keeps len = body_len and only the 2-arg streaming path empties it. Pre-fix Native h2 wrote `body = raw_bytes` (Bytes ref), which forced taida_retain(raw_bytes); post-fix the body span makes the second retain unnecessary and incorrect."
     );
 
-    // NB6-28: Must allocate 14 fields (was 13, missing 'chunked')
+    // NB6-28 + F55 S2: must allocate 14 fields for 1-arg (eager) handlers and
+    // 16 for 2-arg (streaming) handlers (the extra __body_stream / __body_token
+    // sentinels). 'chunked' is among the base 14 (was 13 pre-NB6-28).
     assert!(
-        source.contains("taida_pack_new(14)"),
-        "NB6-28: Native h2 request pack must have 14 fields (including chunked)"
+        source.contains("taida_pack_new(streaming ? 16 : 14)"),
+        "NB6-28 + F55 S2: Native h2 request pack must allocate 14 fields (eager) / 16 fields (streaming, +__body_stream/__body_token)"
     );
 
     // NB6-28: 'chunked' field must be present

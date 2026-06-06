@@ -16,6 +16,7 @@ use super::helpers::{
     extract_response_fields, make_fulfilled_async, make_result_failure_msg, make_result_success,
     make_span,
 };
+use super::types::{ActiveStreamingWriter, ConnStream, RequestBodyState, StreamingWriter};
 
 impl Interpreter {
     /// HTTP/3 serve entry point (: Interpreter parity backend).
@@ -202,34 +203,107 @@ impl Interpreter {
             }
             request_fields.push(("headers".into(), Value::list(header_values)));
 
-            // Body span still references the leading `body_len` bytes of the
-            // arena (offset 0). bodyOffset = 0 keeps existing addons that
-            // slice via `Slice[req.raw, bodyOffset, bodyOffset + contentLength]`
-            // pointing at the body region.
-            request_fields.push(("body".into(), make_span(0, body_len)));
-            request_fields.push(("bodyOffset".into(), Value::Int(0)));
-            request_fields.push(("contentLength".into(), Value::Int(body_len as i64)));
-            // raw = arena (body + headers concat). Track-ε's Arc<BytesValue>
-            // interior wrapping keeps `req.raw` zero-copy on subsequent
-            // clones; the arena allocation cost is a single Vec::with_capacity
-            // sized exactly for the request, no re-alloc during build.
-            request_fields.push(("raw".into(), Value::bytes(arena)));
-            request_fields.push((
-                "remoteHost".into(),
-                Value::str(req.remote_addr.ip().to_string()),
-            ));
-            request_fields.push((
-                "remotePort".into(),
-                Value::Int(req.remote_addr.port() as i64),
-            ));
-            request_fields.push(("keepAlive".into(), Value::Bool(true)));
-            request_fields.push(("chunked".into(), Value::Bool(false)));
-            request_fields.push(("protocol".into(), Value::str("h3".into())));
+            // F55 S2: branch on handler arity. The 1-arg path is the
+            // pre-existing eager contract (body completed value, arena shape
+            // pinned by D29B-011). The 2-arg path activates the streaming body
+            // observation contract H1/H2 implement: req.body span is empty and
+            // the handler pulls bytes via readBody / readBodyChunk /
+            // readBodyAll.
+            //
+            // Streaming form chosen: option (b) from the S2 design
+            // (`.dev/F55_S2_STREAMING_DESIGN.md` §4 step 3). H3 collects every
+            // DATA-frame body byte in `read_request_stream` *before* this
+            // closure runs (`req.body` is already complete), so there is no
+            // recv stream to defer here — and the quinn RecvStream is owned by
+            // the async serve loop, not reachable from this synchronous
+            // closure without restructuring block_on re-entry. The body is
+            // therefore pre-loaded into `RequestBodyState.leftover` and
+            // readBody* pops it from there (the ActiveStreamingWriter's stream
+            // is a transport-less `ConnStream::Detached`, never read because
+            // the body is fully buffered). The handler observes the identical
+            // streaming contract; only the supply timing differs.
+            let handler_result = if handler.params.len() >= 2 {
+                // body span is empty (H1/H2 2-arg parity).
+                request_fields.push(("body".into(), make_span(0, 0)));
+                request_fields.push(("bodyOffset".into(), Value::Int(0)));
+                request_fields.push(("contentLength".into(), Value::Int(body_len as i64)));
+                request_fields.push(("raw".into(), Value::bytes(arena)));
+                request_fields.push((
+                    "remoteHost".into(),
+                    Value::str(req.remote_addr.ip().to_string()),
+                ));
+                request_fields.push((
+                    "remotePort".into(),
+                    Value::Int(req.remote_addr.port() as i64),
+                ));
+                request_fields.push(("keepAlive".into(), Value::Bool(true)));
+                request_fields.push(("chunked".into(), Value::Bool(false)));
+                request_fields.push(("protocol".into(), Value::str("h3".into())));
 
-            let request_pack = Value::pack(request_fields);
+                // Pre-load the full body into a fixed-length RequestBodyState.
+                let mut writer = StreamingWriter::new();
+                let mut body_state =
+                    RequestBodyState::new(false, body_len as i64, true, req.body.clone());
+                let mut detached = ConnStream::Detached;
 
-            // Call handler with request pack (1-arg path, same as h2).
-            let handler_result = self.call_function_with_values(&handler, &[request_pack]);
+                request_fields.push((
+                    "__body_stream".into(),
+                    Value::str("__v4_body_stream".into()),
+                ));
+                request_fields.push((
+                    "__body_token".into(),
+                    Value::Int(body_state.request_token as i64),
+                ));
+                let request_pack = Value::pack(request_fields);
+
+                let writer_pack = Value::pack(vec![(
+                    "__writer_id".into(),
+                    Value::str("__v3_streaming_writer".into()),
+                )]);
+
+                self.active_streaming_writer = Some(ActiveStreamingWriter {
+                    writer: &mut writer as *mut StreamingWriter,
+                    stream: &mut detached as *mut ConnStream,
+                    borrowed: false,
+                    body_state: &mut body_state as *mut RequestBodyState,
+                    ws_closed: false,
+                    ws_token: 0,
+                    ws_close_code: 0,
+                });
+
+                let result = self.call_function_with_values(&handler, &[request_pack, writer_pack]);
+                self.active_streaming_writer = None;
+                result
+            } else {
+                // Body span still references the leading `body_len` bytes of the
+                // arena (offset 0). bodyOffset = 0 keeps existing addons that
+                // slice via `Slice[req.raw, bodyOffset, bodyOffset + contentLength]`
+                // pointing at the body region.
+                request_fields.push(("body".into(), make_span(0, body_len)));
+                request_fields.push(("bodyOffset".into(), Value::Int(0)));
+                request_fields.push(("contentLength".into(), Value::Int(body_len as i64)));
+                // raw = arena (body + headers concat). Track-ε's Arc<BytesValue>
+                // interior wrapping keeps `req.raw` zero-copy on subsequent
+                // clones; the arena allocation cost is a single Vec::with_capacity
+                // sized exactly for the request, no re-alloc during build.
+                request_fields.push(("raw".into(), Value::bytes(arena)));
+                request_fields.push((
+                    "remoteHost".into(),
+                    Value::str(req.remote_addr.ip().to_string()),
+                ));
+                request_fields.push((
+                    "remotePort".into(),
+                    Value::Int(req.remote_addr.port() as i64),
+                ));
+                request_fields.push(("keepAlive".into(), Value::Bool(true)));
+                request_fields.push(("chunked".into(), Value::Bool(false)));
+                request_fields.push(("protocol".into(), Value::str("h3".into())));
+
+                let request_pack = Value::pack(request_fields);
+
+                // Call handler with request pack (1-arg path, same as h2).
+                self.call_function_with_values(&handler, &[request_pack])
+            };
 
             match handler_result {
                 Ok(response) => {

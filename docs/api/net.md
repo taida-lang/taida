@@ -88,11 +88,16 @@ handler req: Request  writer: Writer => :Int
 > で設計されており、ハンドラ呼び出し時点では body を読まずに `req.body`
 > の `len` は `0` です。body を読む場合は必ず `readBody(req)` /
 > `readBodyChunk(req)` / `readBodyAll(req)` のいずれかを使ってください。
+> この契約は HTTP/1.1 / HTTP/2 / HTTP/3 のすべてで同一です（単引数
+> ハンドラは従来どおり全プロトコルで `req.body` に完成値が入ります）。
 >
 > - `readBody(req)` — 単引数 / 双引数いずれにも対応。双引数では body を
 >   最後まで読む `readBodyAll` と同等。
 > - `readBodyChunk(req)` — 双引数専用。chunk 単位で `Lax[Bytes]` を返し、
 >   残り chunk が無くなった時点で `has_value <= false` になる。
+>   **chunk の分割粒度はプロトコル・実装依存で無保証**です（HTTP/1.1 と
+>   HTTP/2 / HTTP/3 では分割位置が異なり得ます）。chunk 境界に意味を
+>   持たせず、連結した全体だけを契約として扱ってください。
 > - `readBodyAll(req)` — 双引数専用。body を最後まで読み切って `Bytes` を
 >   返す。
 >
@@ -679,10 +684,11 @@ forwardChunks req: Request  writer: Writer =
 ### 8.4 なぜ双引数の `req.body` は空 span か
 
 双引数ハンドラは streaming 前提のため、ハンドラ呼び出し時点では body を
-socket 上に残したままにします。そのため `req.body` は
-`@(start: bodyOffset, len: 0)` として渡されます (単引数の
-「buffered body 全体に対する span」とは形が異なります)。`readBody*` を
-呼べば、`req` の内部状態に応じて socket から透過的に読み出されます。
+ハンドラへ渡さず保留します（保留位置はプロトコル実装に依存します —
+HTTP/1.1 では socket 上、HTTP/2 / HTTP/3 ではフレーム受信バッファ）。
+そのため `req.body` は `@(start: bodyOffset, len: 0)` として渡されます
+(単引数の「buffered body 全体に対する span」とは形が異なります)。
+`readBody*` を呼べば、`req` の内部状態に応じて透過的に読み出されます。
 
 ---
 

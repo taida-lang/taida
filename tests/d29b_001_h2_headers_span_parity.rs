@@ -214,14 +214,16 @@ fn native_h2_request_pack_uses_arena_with_span_headers() {
         "Native h2 `query` field must be a span pack into req.raw."
     );
 
-    // Body field is a span (not a Bytes ref)
+    // Body field is a span (not a Bytes ref). F55 S2 (2026-06-06) made the
+    // span length arity-aware: the 1-arg (eager) path keeps body_len, the 2-arg
+    // (streaming) path empties it. The offset stays 0 either way, so the
+    // D29B-001 arena shape is unchanged for 1-arg handlers.
     assert!(
         h2_section
-            .contains("SET_FIELD(\"body\",        taida_net_make_span(0, (taida_val)body_len)")
-            || h2_section
-                .contains("SET_FIELD(\"body\", taida_net_make_span(0, (taida_val)body_len)"),
-        "Native h2 `body` field must be a span pack `make_span(0, body_len)` \
-         into req.raw at offset 0 — matches h1 reference shape."
+            .contains("taida_net_make_span(0, streaming ? (taida_val)0 : (taida_val)body_len)"),
+        "Native h2 `body` field must be a span pack into req.raw at offset 0 \
+         (1-arg keeps len body_len; only the 2-arg streaming path empties it) — \
+         matches h1 reference shape."
     );
 
     // OOM fallback: legacy Str-pack form is retained for graceful

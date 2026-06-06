@@ -195,14 +195,16 @@ fn native_h3_request_pack_uses_arena_with_span_headers() {
         "Native h3 `query` field must be a span pack."
     );
 
-    // body field span (not Bytes ref)
+    // body field span (not Bytes ref). F55 S2 (2026-06-06) made the span
+    // length arity-aware: the 1-arg (eager) path keeps body_len, the 2-arg
+    // (streaming) path empties it. Offset stays 0, so the arena shape is
+    // unchanged for 1-arg handlers.
     assert!(
         h3_section
-            .contains("SET_FIELD_H3(\"body\",        taida_net_make_span(0, (taida_val)body_len)")
-            || h3_section
-                .contains("SET_FIELD_H3(\"body\", taida_net_make_span(0, (taida_val)body_len)"),
-        "Native h3 `body` field must be a span pack `make_span(0, body_len)` \
-         into req.raw at offset 0 — matches h1/h2 reference shape."
+            .contains("taida_net_make_span(0, streaming ? (taida_val)0 : (taida_val)body_len)"),
+        "Native h3 `body` field must be a span pack into req.raw at offset 0 \
+         (1-arg keeps len body_len; only the 2-arg streaming path empties it) \
+         — matches h1/h2 reference shape."
     );
 
     // OOM-tolerant fallback present
