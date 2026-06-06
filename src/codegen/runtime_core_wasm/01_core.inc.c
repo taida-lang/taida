@@ -476,6 +476,13 @@ static int64_t _wasm_list_project_push(int64_t dst, int64_t item,
     return taida_list_push(dst, item);
 }
 
+/* True when two single-tag containers pin DIFFERENT concrete tags
+   (native taida_elem_tags_cross mirror). */
+static int _wasm_elem_tags_cross(const int64_t *a, const int64_t *b) {
+    int64_t ta = a[2], tb = b[2];
+    return ta >= 0 && tb >= 0 && ta != tb;
+}
+
 /* Kind entry → pack field tag domain (native mirror): known kinds map
    directly except ENUM, which falls back to the caller's legacy tag. */
 static int64_t _wasm_ekind_to_pack_tag(uint32_t ek, int64_t fallback) {
@@ -4124,7 +4131,8 @@ int64_t taida_set_union(int64_t set_a, int64_t set_b) {
     int64_t *b = (int64_t *)(intptr_t)set_b;
     int64_t a_len = a[1];
     int64_t b_len = b[1];
-    if (_wasm_elem_slot_is_array(a[2]) || _wasm_elem_slot_is_array(b[2])) {
+    if (_wasm_elem_slot_is_array(a[2]) || _wasm_elem_slot_is_array(b[2])
+        || _wasm_elem_tags_cross(a, b)) {
         /* Kind-aware linear union (mirror of native). Array-carrying sets
            are literal-sized, so the O(|a|·|b|) pair scan keeps exact
            (value, kind) semantics without a hash path; the result rebuilds
@@ -4171,13 +4179,15 @@ int64_t taida_set_union(int64_t set_a, int64_t set_b) {
             dup = taida_set_has(result, b[WASM_LIST_ELEMS + i]);
         }
         if (!dup) {
-            result = taida_list_push(result, b[WASM_LIST_ELEMS + i]);
             /* F54 tier 2: every actually-added b element stamps its tag
-               through the shared latch — an UNKNOWN-tagged result (empty-a
-               union) promotes to tag_b, a matching tag is a no-op, and a
-               genuine cross-domain add downgrades to HETEROGENEOUS
-               (mirrors native taida_set_union). */
+               through the shared latch — BEFORE the push (the latch's
+               materialise path indexes the element about to be pushed,
+               so a post-push call would mis-index the kind array). An
+               UNKNOWN-tagged result (empty-a union) promotes to tag_b;
+               genuine cross-tag unions are owned by the kind-aware
+               branch above (mirrors native taida_set_union). */
             taida_list_set_elem_tag(result, tag_b);
+            result = taida_list_push(result, b[WASM_LIST_ELEMS + i]);
         }
     }
     return result;
@@ -4188,7 +4198,8 @@ int64_t taida_set_intersect(int64_t set_a, int64_t set_b) {
     int64_t *a = (int64_t *)(intptr_t)set_a;
     int64_t a_len = a[1];
     int64_t *b = (int64_t *)(intptr_t)set_b;
-    if (_wasm_elem_slot_is_array(a[2]) || _wasm_elem_slot_is_array(b[2])) {
+    if (_wasm_elem_slot_is_array(a[2]) || _wasm_elem_slot_is_array(b[2])
+        || _wasm_elem_tags_cross(a, b)) {
         /* Kind-aware linear intersection (mirror of native; see union for
            rationale). The result holds a-side elements only, projected with
            their recorded kinds. */
@@ -4232,7 +4243,8 @@ int64_t taida_set_diff(int64_t set_a, int64_t set_b) {
     int64_t *a = (int64_t *)(intptr_t)set_a;
     int64_t a_len = a[1];
     int64_t *b = (int64_t *)(intptr_t)set_b;
-    if (_wasm_elem_slot_is_array(a[2]) || _wasm_elem_slot_is_array(b[2])) {
+    if (_wasm_elem_slot_is_array(a[2]) || _wasm_elem_slot_is_array(b[2])
+        || _wasm_elem_tags_cross(a, b)) {
         /* Kind-aware linear difference (mirror of native; see union for
            rationale). */
         int64_t result = taida_set_new();

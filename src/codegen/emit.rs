@@ -404,6 +404,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, FnPtr],
             returns: &[Ptr],
         },
+        "taida_list_map_k" => RuntimeAbi {
+            params: &[Ptr, FnPtr, Val],
+            returns: &[Ptr],
+        },
         "taida_list_filter" => RuntimeAbi {
             params: &[Ptr, FnPtr],
             returns: &[Ptr],

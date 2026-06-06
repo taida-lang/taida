@@ -1622,11 +1622,25 @@ impl Lowering {
                 }
                 let list = self.lower_expr(func, &type_args[0])?;
                 let fn_var = self.lower_expr(func, &type_args[1])?;
+                // Value-tag track: supply the callback's statically known
+                // return kind so a type-changing map keeps exact container
+                // kinds. An identity-ish lambda (body kind unknown at this
+                // point — params are not yet in scope) passes UNKNOWN and
+                // the result stays kindless, which is the documented
+                // residual (dynamic return kinds need a function-return
+                // shadow mechanism out of S1 scope).
+                let ret_ekind = if let Expr::Lambda(_, body, _) = &type_args[1] {
+                    self.expr_ekind(body)
+                } else {
+                    0xFF
+                };
+                let ek_var = func.alloc_var();
+                func.push(IrInst::ConstInt(ek_var, ret_ekind));
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
-                    "taida_list_map".to_string(),
-                    vec![list, fn_var],
+                    "taida_list_map_k".to_string(),
+                    vec![list, fn_var, ek_var],
                 ));
                 Ok(result)
             }

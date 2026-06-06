@@ -2240,6 +2240,10 @@ impl Lowering {
         let prev_lambda_vars = self.lambda_vars.clone();
         let prev_closure_vars = self.closure_vars.clone();
         let prev_int_vars = self.int_vars.clone();
+        // Value-tag track: shadow kinds are IR variables of the ENCLOSING
+        // body — a lambda body must not UseVar a parent's shadow (and its
+        // params must not inherit one by name collision).
+        let prev_shadow_kinds = std::mem::take(&mut self.shadow_kind_vars);
         let prev_float_vars = self.float_vars.clone();
         let prev_string_vars = self.string_vars.clone();
         let prev_bool_vars = self.bool_vars.clone();
@@ -2385,6 +2389,7 @@ impl Lowering {
             self.lambda_vars = prev_lambda_vars;
             self.closure_vars = prev_closure_vars;
             self.int_vars = prev_int_vars;
+            self.shadow_kind_vars = prev_shadow_kinds;
             self.float_vars = prev_float_vars;
             self.string_vars = prev_string_vars;
             self.bool_vars = prev_bool_vars;

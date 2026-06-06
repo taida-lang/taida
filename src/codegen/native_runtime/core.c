@@ -299,6 +299,15 @@ static taida_val taida_list_project_push(taida_val dst, taida_val item,
     return taida_list_push(dst, item);
 }
 
+// True when two single-tag containers pin DIFFERENT concrete tags — the
+// projection must go per-element even though neither side carries an
+// array (the "homogeneous but cross-tagged" composition hole: e.g.
+// concat/union of an INT container with a BOOL container).
+static int taida_elem_tags_cross(const taida_val *a, const taida_val *b) {
+    taida_val ta = a[3], tb = b[3];
+    return ta >= 0 && tb >= 0 && ta != tb;
+}
+
 // Kind entry → pack field tag domain: known kinds map directly except
 // ENUM (the pack tag's display consumers don't understand 9 — fall back
 // to the caller-supplied legacy propagation tag).
@@ -3921,6 +3930,20 @@ taida_val taida_list_map(taida_val list_ptr, taida_val fn_ptr) {
     return new_list;
 }
 
+// Kind-supplying map: codegen passes the callback's statically known
+// return kind so a type-changing map keeps an exact container kind; an
+// UNKNOWN entry leaves the result kindless (documented residual — a
+// dynamically-kinded callback return needs a function-return shadow).
+taida_val taida_list_map_k(taida_val list_ptr, taida_val fn_ptr, taida_val ret_ekind) {
+    taida_val result = taida_list_map(list_ptr, fn_ptr);
+    uint32_t k = (uint32_t)ret_ekind & 0xFFu;
+    if (k != TAIDA_EKIND_UNKNOWN) {
+        taida_val *r = (taida_val*)result;
+        if (!taida_elem_slot_is_array(r[3])) r[3] = (taida_val)k;
+    }
+    return result;
+}
+
 // list.filter(fn_ptr) - fn_ptr takes (taida_val) -> taida_val (truthy/falsy)
 taida_val taida_list_filter(taida_val list_ptr, taida_val fn_ptr) {
     taida_val *list = (taida_val*)list_ptr;
@@ -5772,7 +5795,8 @@ taida_val taida_list_concat(taida_val list1, taida_val list2) {
     taida_val *l1 = (taida_val*)list1;
     taida_val *l2 = (taida_val*)list2;
     taida_val len1 = l1[2], len2 = l2[2];
-    int src_tagged = taida_elem_slot_is_array(l1[3]) || taida_elem_slot_is_array(l2[3]);
+    int src_tagged = taida_elem_slot_is_array(l1[3]) || taida_elem_slot_is_array(l2[3])
+                  || taida_elem_tags_cross(l1, l2);
     taida_val elem_tag = taida_elem_tag_for_propagation(l1);
     taida_val new_list = taida_list_new();
     if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag from first list
@@ -6428,21 +6452,12 @@ taida_val taida_list_flatten(taida_val list_ptr) {
         if (TAIDA_IS_LIST(item)) {
             taida_val *sub = (taida_val*)item;
             taida_val slen = sub[2];
-            int sub_tagged = taida_elem_slot_is_array(sub[3]);
-            taida_val sub_tag = taida_elem_tag_for_propagation(sub);
-            // Propagate inner list's elem_tag to result (array carriers
-            // project per element below instead of stamping one tag).
-            if (i == 0 && !sub_tagged) {
-                taida_val *nl = (taida_val*)new_list;
-                nl[3] = sub_tag;
-            }
+            // Every inner element projects through the latch under its
+            // recorded kind — a single i==0 stamp can't represent
+            // cross-tagged sibling sublists (@[@[1], @[true]]), and the
+            // latch naturally keeps a same-kind result homogeneous.
             for (taida_val j = 0; j < slen; j++) {
-                if (sub_tagged) {
-                    new_list = taida_list_project_push(new_list, sub[4 + j], sub, j);
-                } else {
-                    taida_list_elem_retain(sub[4 + j], sub_tag);
-                    new_list = taida_list_push(new_list, sub[4 + j]);
-                }
+                new_list = taida_list_project_push(new_list, sub[4 + j], sub, j);
             }
         } else {
             // Non-list element: project under its recorded kind so an
@@ -8049,7 +8064,8 @@ taida_val taida_set_union(taida_val set_a, taida_val set_b) {
     taida_val *b = (taida_val*)set_b;
     taida_val a_len = a[2];  // length at index 2
     taida_val b_len = b[2];
-    if (taida_elem_slot_is_array(a[3]) || taida_elem_slot_is_array(b[3])) {
+    if (taida_elem_slot_is_array(a[3]) || taida_elem_slot_is_array(b[3])
+        || taida_elem_tags_cross(a, b)) {
         // Kind-aware linear union. Array-carrying sets are literal-sized,
         // so the O(|a|·|b|) pair scan keeps exact (value, kind) semantics
         // without a hash path; the result rebuilds its own kind entries.
@@ -8102,15 +8118,17 @@ taida_val taida_set_union(taida_val set_a, taida_val set_b) {
             dup = taida_set_contains(result, b[4 + i]);
         }
         if (!dup) {
+            // F54 tier 2: every actually-added b element stamps its tag
+            // through the shared latch — BEFORE the push (the latch's
+            // materialise path indexes the element about to be pushed at
+            // result[2], so a post-push call would mis-index the kind
+            // array). An UNKNOWN-tagged result (empty-a union) promotes
+            // to tag_b and a matching tag is a no-op; genuine cross-tag
+            // unions never reach here any more (the kind-aware branch
+            // above owns them).
+            taida_list_set_elem_tag(result, tag_b);
             taida_list_elem_retain(b[4 + i], tag_b);  // NO-2: retain-on-copy
             result = taida_list_push(result, b[4 + i]);
-            // F54 tier 2: every actually-added b element stamps its tag
-            // through the shared latch. An UNKNOWN-tagged result (empty-a
-            // union) promotes to tag_b, a matching tag is a no-op, and a
-            // genuine cross-domain add downgrades to HETEROGENEOUS
-            // (structural engine + no-op elem release: leak-not-crash,
-            // same policy as the rest of the tag system).
-            taida_list_set_elem_tag(result, tag_b);
         }
     }
     if (use_hash) taida_seen_free(&seen);
@@ -8121,7 +8139,8 @@ taida_val taida_set_intersect(taida_val set_a, taida_val set_b) {
     taida_val *a = (taida_val*)set_a;
     taida_val a_len = a[2];  // length at index 2
     taida_val *b = (taida_val*)set_b;
-    if (taida_elem_slot_is_array(a[3]) || taida_elem_slot_is_array(b[3])) {
+    if (taida_elem_slot_is_array(a[3]) || taida_elem_slot_is_array(b[3])
+        || taida_elem_tags_cross(a, b)) {
         // Kind-aware linear intersection (see union above for rationale).
         // The result holds a-side elements only, projected with their
         // recorded kinds.
@@ -8169,7 +8188,8 @@ taida_val taida_set_diff(taida_val set_a, taida_val set_b) {
     taida_val *a = (taida_val*)set_a;
     taida_val a_len = a[2];  // length at index 2
     taida_val *b = (taida_val*)set_b;
-    if (taida_elem_slot_is_array(a[3]) || taida_elem_slot_is_array(b[3])) {
+    if (taida_elem_slot_is_array(a[3]) || taida_elem_slot_is_array(b[3])
+        || taida_elem_tags_cross(a, b)) {
         // Kind-aware linear difference (see union above for rationale).
         taida_val result = taida_set_new();
         for (taida_val i = 0; i < a_len; i++) {

@@ -389,10 +389,15 @@ impl Lowering {
                     }
                 }
                 BinOp::Sub | BinOp::Mul => {
+                    // Unlike Add (which falls back to the runtime poly
+                    // helper), Sub/Mul lower onto the int helper whenever
+                    // no Float is statically visible — the produced VALUE
+                    // is an Int result regardless of how vague the operand
+                    // types were, so reporting INT here matches the actual
+                    // dispatch (reporting UNKNOWN made downstream pair
+                    // comparisons treat a genuine Int as kindless).
                     if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
                         1
-                    } else if self.expr_type_is_unknown(lhs) || self.expr_type_is_unknown(rhs) {
-                        -1
                     } else {
                         0
                     }

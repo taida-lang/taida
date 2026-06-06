@@ -761,7 +761,11 @@ mod tests {
         //   bytes in core.c F1 — derived list operations project
         //   per-element kinds end to end (see F1_LEN history).
         //   F1 375,639 -> 383,945. Total -> 1,251,772.
-        const EXPECTED_TOTAL_LEN: usize = 1_251_772;
+        // 2026-06-06 value-tag track step 9 (/so review Must Fix): +1,015
+        //   bytes in core.c F1 — cross-tagged composition projection +
+        //   pre-push union latch + flatten full projection + map_k (see
+        //   F1_LEN history). F1 383,539 -> 384,554. Total -> 1,252,787.
+        const EXPECTED_TOTAL_LEN: usize = 1_252_787;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1429,7 +1433,16 @@ mod tests {
         // taida_collection_remove_tagged). +7,900 lands before the marker
         // and +406 after it (taida_collection_remove_tagged sits in the
         // F2 collection-dispatch region): F1_LEN 375,639 -> 383,539.
-        const F1_LEN: usize = 383_539;
+        // Value-tag track step 9 (2026-06-06, /so review Must Fix): +1,015
+        // before the marker — cross-tagged homogeneous compositions
+        // (union/intersect/diff/concat of two single-tag containers with
+        // different tags) take the kind-aware projection, the union latch
+        // stamps tags before the push (the materialise path indexes the
+        // about-to-be-pushed element), flatten projects every inner
+        // element instead of an i==0 stamp, and taida_list_map_k records
+        // a statically-known callback return kind. F1_LEN 383,539 ->
+        // 384,554.
+        const F1_LEN: usize = 384_554;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1444,7 +1457,7 @@ mod tests {
         // const above.
         assert_eq!(
             CORE_SECTION.len(),
-            F1_LEN + 202_586,
+            F1_LEN + 202_586, // F2 unchanged in step 9
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

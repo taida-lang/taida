@@ -992,6 +992,11 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_list_map" | "taida_list_filter" => {
             format!("int64_t {}(int64_t list, int64_t fn_ptr);", name)
         }
+        // Value-tag track: kind-supplying map (callback's static return kind).
+        "taida_list_map_k" => {
+            "int64_t taida_list_map_k(int64_t list, int64_t fn_ptr, int64_t ret_ekind);"
+                .to_string()
+        }
         "taida_list_fold" | "taida_list_foldr" => {
             format!("int64_t {}(int64_t list, int64_t init, int64_t fn_ptr);", name)
         }

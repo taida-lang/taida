@@ -42853,3 +42853,60 @@ stdout(u.length())
         );
     }
 }
+
+/// Regression: composing two HOMOGENEOUS containers with different
+/// concrete tags (union/concat of an INT container with a BOOL/Float
+/// container) slipped past the array-carrier check and produced a
+/// result claiming one homogeneous tag while holding foreign elements
+/// — and the union latch stamped tags after the push, mis-indexing
+/// the materialised kind array. Cross-tagged compositions now take
+/// the kind-aware projection (latch stamps pre-push), an unmolded
+/// payload's shadow no longer leaks into a same-named lambda
+/// parameter, and Sub/Mul results report the INT kind their actual
+/// int-helper dispatch produces.
+/// Expected: 2 true false 2 true true 2
+#[test]
+fn test_value_tag_cross_tagged_composition_parity() {
+    let source = r#"
+s1 <= setOf(@[1])
+s2 <= setOf(@[true])
+u <= s1.union(s2)
+stdout(u.size())
+stdout(u.has(true))
+stdout(u.has(2))
+Concat[@[1], @[true]]() >=> c
+stdout(setOf(c).size())
+xs <= @[1, 1.0]
+xs.get(1) >=> a
+check <= _ a: Int = (a == 1)
+stdout(check(1).toString())
+stdout((a == 1).toString())
+@[2, 5].min() >=> m
+stdout(setOf(@[m - 1, true]).size())
+"#;
+    let label = "value_tag_cross_tagged_composition";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["2", "true", "false", "2", "true", "true", "2"],
+        "interpreter cross-tagged composition reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native cross-tagged composition parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js cross-tagged composition parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min cross-tagged composition parity"
+        );
+    }
+}
