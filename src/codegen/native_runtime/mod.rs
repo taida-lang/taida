@@ -735,7 +735,11 @@ mod tests {
         //   materialises/appends the kind array, release walks per-element
         //   kinds and frees the array (List/Set), elem retain/release gain
         //   BYTES. F1 348,652 -> 352,219. Total -> 1,220,046.
-        const EXPECTED_TOTAL_LEN: usize = 1_220_046;
+        // 2026-06-06 value-tag track step 3: +12,430 bytes in core.c F1 for
+        //   the kind-aware equality engine (pair equality / fingerprints /
+        //   seen-set + array-carrier unique & set_from_list; see F1_LEN
+        //   history). F1 352,219 -> 364,649. Total -> 1,232,476.
+        const EXPECTED_TOTAL_LEN: usize = 1_232_476;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1356,7 +1360,17 @@ mod tests {
         // its pre-push call sites, release walks per-element kinds for
         // array carriers (List + Set) and frees the array, and the elem
         // retain/release helpers gained BYTES. F1_LEN 348,652 -> 352,219.
-        const F1_LEN: usize = 352_219;
+        // Value-tag track step 3 (2026-06-06): +12,430 before the marker
+        // for the kind-aware equality engine — taida_ekind_value_eq
+        // (interp-parity pair semantics: Bool≠Int, Int↔Float f64 crossing,
+        // enum type-id equality with the deliberate Int(n) crossing),
+        // kind-aware fingerprints (Bool gets its own tag byte; Int/Enum
+        // share tag 0 + ordinal like ValueKey), the taida_seen_k pair
+        // seen-set, note_push_ek projection, and the array-carrier paths
+        // of taida_list_unique / taida_set_from_list. struct_eq's LIST
+        // walk is now kind-aware end-to-end (nested containers included).
+        // F1_LEN 352,219 -> 364,649.
+        const F1_LEN: usize = 364_649;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

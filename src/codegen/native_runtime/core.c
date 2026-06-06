@@ -283,6 +283,37 @@ static taida_val taida_ekind_to_tag(uint32_t ek) {
     return k == TAIDA_EKIND_UNKNOWN ? TAIDA_TAG_UNKNOWN : (taida_val)k;
 }
 
+// Record the kind entry for the element about to be pushed (pre-push
+// contract: the append index is c[2]). Mirrors taida_list_set_elem_tag
+// but takes a full kind|aux entry so enum type ids survive container
+// projection. A fresh container stays homogeneous as long as entries are
+// plain same-kind tags; an aux-carrying entry (enum) or a kind conflict
+// materialises the array. Used by the runtime-internal builders
+// (unique / set_from_list / Set ops) when projecting from an
+// array-carrying source.
+static void taida_elem_tags_note_push_ek(taida_val *c, uint32_t ek) {
+    taida_val existing = c[3];
+    if (taida_elem_slot_is_array(existing)) {
+        taida_elem_tags_append(c, c[2], ek);
+        return;
+    }
+    if (existing == TAIDA_TAG_HETEROGENEOUS) return; // degraded: stay degraded
+    uint32_t k = TAIDA_EKIND_KIND(ek);
+    taida_val tag = (k == TAIDA_EKIND_UNKNOWN) ? TAIDA_TAG_UNKNOWN : (taida_val)k;
+    if (TAIDA_EKIND_AUX(ek) == 0) {
+        if (existing == TAIDA_TAG_UNKNOWN || existing == tag) {
+            c[3] = tag;
+            return;
+        }
+        taida_elem_tags_materialise(c, existing, c[2], ek);
+        return;
+    }
+    // Aux-carrying (enum) entry: the single slot cannot hold the type id,
+    // so go straight to the array form (existing elements keep their
+    // homogeneous tag, or UNKNOWN on a fresh container).
+    taida_elem_tags_materialise(c, existing, c[2], ek);
+}
+
 // ============================================================================
 // NO-4: Native Ownership Rules (runtime helper 監査ルール)
 // See docs/NATIVE_OWNERSHIP_AUDIT.md for the full specification.
@@ -5803,6 +5834,7 @@ static unsigned char taida_bytes_byte_at(taida_val v, size_t i) {
 
 // Structural equality aligned with `ValueKey::eq` over the key-eligible subset;
 // raw identity for everything else.
+static int taida_list_struct_eq_k(taida_val *la, taida_val *lb); // kind-aware list walk (below)
 static int taida_value_struct_eq(taida_val a, taida_val b) {
     if (a == b) return 1;
     taida_value_kind_t ka = taida_value_kind(a);
@@ -5824,12 +5856,12 @@ static int taida_value_struct_eq(taida_val a, taida_val b) {
             return 1;
         }
         case TKIND_LIST: {
+            // Value-tag track: element pairs compare under their recorded
+            // kinds (single-tag containers report it via taida_elem_kind_at),
+            // so nested Bool↔Int stops colliding and nested Int↔Float
+            // crosses over like the interpreter's Value::eq.
             taida_val *la = (taida_val*)a, *lb = (taida_val*)b;
-            taida_val n = la[2];
-            if (n != lb[2]) return 0;
-            for (taida_val i = 0; i < n; i++)
-                if (!taida_value_struct_eq(la[4 + i], lb[4 + i])) return 0;
-            return 1;
+            return taida_list_struct_eq_k(la, lb);
         }
         case TKIND_PACK: {
             taida_val *pa = (taida_val*)a, *pb = (taida_val*)b;
@@ -5873,6 +5905,11 @@ static void taida_fnv_bytes(uint64_t *h, const void *p, size_t n) {
     for (size_t i = 0; i < n; i++) { *h ^= b[i]; *h *= TAIDA_FNV_PRIME; }
 }
 
+// Forward declaration: the structural accumulator and the kind-aware one
+// are mutually recursive (lists hash their elements under recorded kinds;
+// non-scalar kinds delegate back to the structural walk).
+static void taida_fp_accum_k(taida_val v, uint32_t ekind, uint64_t *h);
+
 static void taida_fp_accum(taida_val v, uint64_t *h) {
     switch (taida_value_kind(v)) {
         case TKIND_STR: {
@@ -5894,7 +5931,12 @@ static void taida_fp_accum(taida_val v, uint64_t *h) {
             unsigned char tag = 7; taida_fnv_bytes(h, &tag, 1);
             taida_val *l = (taida_val*)v; taida_val n = l[2];
             uint64_t nn = (uint64_t)n; taida_fnv_bytes(h, &nn, sizeof(nn));
-            for (taida_val i = 0; i < n; i++) taida_fp_accum(l[4 + i], h);
+            // Value-tag track: elements hash under their recorded kind so a
+            // nested Bool no longer collides with Int (homogeneous lists
+            // report their single tag through taida_elem_kind_at, which
+            // keeps the legacy fingerprints for Int/Str/... lists stable).
+            for (taida_val i = 0; i < n; i++)
+                taida_fp_accum_k(l[4 + i], taida_elem_kind_at(l, i), h);
             break;
         }
         case TKIND_PACK: {
@@ -5942,6 +5984,123 @@ static int taida_value_hashable(taida_val v) {
     }
 }
 
+// -- Value-tag track: kind-aware equality / fingerprint / membership --------
+// When a container carries a per-element kind array, dedup and membership
+// run on (value, ekind) pairs: Bool stops colliding with Int, the
+// Int↔Float crossing follows f64 semantics regardless of magnitude, and
+// same-ordinal variants of different enums stay distinct (type id in the
+// aux bits) while still crossing over to Int(n)/Float(n) the way the
+// interpreter's equality does. A side without kind information (EKIND
+// unknown) degrades to the legacy structural comparison so old containers
+// stay bit-compatible.
+static double _l2d(taida_val v); // defined with the float helpers below
+
+static int taida_ekind_value_eq(taida_val a, uint32_t eka, taida_val b, uint32_t ekb);
+
+// Kind-aware list equality: element pairs compare under their recorded
+// kinds. taida_elem_kind_at reports the single tag for homogeneous
+// containers, so this is also the engine for plain nested lists.
+static int taida_list_struct_eq_k(taida_val *la, taida_val *lb) {
+    taida_val n = la[2];
+    if (n != lb[2]) return 0;
+    for (taida_val i = 0; i < n; i++) {
+        if (!taida_ekind_value_eq(la[4 + i], taida_elem_kind_at(la, i), lb[4 + i],
+                                  taida_elem_kind_at(lb, i)))
+            return 0;
+    }
+    return 1;
+}
+
+static int taida_ekind_value_eq(taida_val a, uint32_t eka, taida_val b, uint32_t ekb) {
+    uint32_t ka = TAIDA_EKIND_KIND(eka), kb = TAIDA_EKIND_KIND(ekb);
+    if (ka == TAIDA_EKIND_UNKNOWN || kb == TAIDA_EKIND_UNKNOWN)
+        return taida_value_struct_eq(a, b);
+    switch (ka) {
+        case TAIDA_TAG_INT:
+            switch (kb) {
+                case TAIDA_TAG_INT:
+                case TAIDA_TAG_ENUM:  return a == b; // Int(n) == ordinal n (interp crossing)
+                case TAIDA_TAG_FLOAT: return (double)a == _l2d(b);
+                default: return 0; // BOOL and every heap kind: unequal
+            }
+        case TAIDA_TAG_BOOL:
+            return kb == TAIDA_TAG_BOOL ? (a == b) : 0;
+        case TAIDA_TAG_FLOAT:
+            switch (kb) {
+                case TAIDA_TAG_FLOAT: return _l2d(a) == _l2d(b); // IEEE: NaN!=NaN, +0==-0
+                case TAIDA_TAG_INT:
+                case TAIDA_TAG_ENUM:  return _l2d(a) == (double)b;
+                default: return 0;
+            }
+        case TAIDA_TAG_ENUM:
+            switch (kb) {
+                case TAIDA_TAG_ENUM:
+                    // Type id (aux) AND ordinal must match. Note the
+                    // deliberate non-transitivity inherited from the
+                    // interpreter: two same-ordinal enums of different
+                    // types are unequal to each other yet each equal to
+                    // the bare Int(ordinal).
+                    return eka == ekb && a == b;
+                case TAIDA_TAG_INT:   return a == b;
+                case TAIDA_TAG_FLOAT: return (double)a == _l2d(b);
+                default: return 0;
+            }
+        case TAIDA_TAG_LIST:
+            if (kb != TAIDA_TAG_LIST) return 0;
+            if (a == b) return 1;
+            if (!TAIDA_IS_LIST(a) || !TAIDA_IS_LIST(b)) return taida_value_struct_eq(a, b);
+            return taida_list_struct_eq_k((taida_val*)a, (taida_val*)b);
+        default:
+            // Remaining heap kinds (STR / BYTES / PACK / SET / HMAP /
+            // CLOSURE): same-kind structural equality, cross-kind unequal.
+            if (ka != kb) return 0;
+            return taida_value_struct_eq(a, b);
+    }
+}
+
+// Kind-aware fingerprint. Int and Enum share tag 0 + ordinal — mirroring
+// the interpreter's ValueKey, which deliberately leaves the enum type id
+// out of the hash and lets equality confirmation distinguish same-ordinal
+// enums — while Bool gets its own tag byte so it stops colliding with
+// Int(0/1). Everything else reuses the structural accumulator.
+static void taida_fp_accum_k(taida_val v, uint32_t ekind, uint64_t *h) {
+    switch (TAIDA_EKIND_KIND(ekind)) {
+        case TAIDA_TAG_INT:
+        case TAIDA_TAG_ENUM: {
+            unsigned char tag = 0; taida_fnv_bytes(h, &tag, 1);
+            int64_t s = (int64_t)v; taida_fnv_bytes(h, &s, sizeof(s));
+            break;
+        }
+        case TAIDA_TAG_BOOL: {
+            unsigned char tag = 1; taida_fnv_bytes(h, &tag, 1);
+            int64_t s = (int64_t)v; taida_fnv_bytes(h, &s, sizeof(s));
+            break;
+        }
+        default:
+            taida_fp_accum(v, h);
+            break;
+    }
+}
+
+// Kind-aware hashability gate. Float is never hashable (interp parity:
+// NaN / ±0.0 / Int↔Float crossing force the linear path), and an unknown
+// kind also forces the linear path so legacy-fingerprint values and
+// kind-fingerprint values can never share one seen-set inconsistently.
+static int taida_ekind_hashable(taida_val v, uint32_t ekind) {
+    switch (TAIDA_EKIND_KIND(ekind)) {
+        case TAIDA_TAG_INT:
+        case TAIDA_TAG_BOOL:
+        case TAIDA_TAG_ENUM:
+            return 1;
+        case TAIDA_TAG_FLOAT:
+            return 0;
+        case TAIDA_EKIND_UNKNOWN:
+            return 0;
+        default:
+            return taida_value_hashable(v);
+    }
+}
+
 typedef struct {
     uint64_t *fps; taida_val *vals; unsigned char *used; size_t mask;
 } taida_seen;
@@ -5985,6 +6144,50 @@ static int taida_seen_contains(taida_seen *s, taida_val v) {
     }
 }
 
+// Kind-aware seen-set: entries carry (value, ekind) pairs so collision
+// confirmation runs under taida_ekind_value_eq. Engaged only when every
+// element kind passes taida_ekind_hashable — Float or unknown kinds fall
+// back to the linear pair-equality scan, matching the interpreter's
+// all-or-nothing ValueKey gating (and its complexity profile).
+typedef struct {
+    uint64_t *fps; taida_val *vals; uint32_t *eks; unsigned char *used; size_t mask;
+} taida_seen_k;
+
+static int taida_seen_k_init(taida_seen_k *s, taida_val hint) {
+    size_t cap = 16, want = (size_t)(hint > 0 ? hint : 1) * 2 + 1;
+    while (cap < want) cap <<= 1;
+    s->mask = cap - 1;
+    s->fps  = (uint64_t*)calloc(cap, sizeof(uint64_t));
+    s->vals = (taida_val*)calloc(cap, sizeof(taida_val));
+    s->eks  = (uint32_t*)calloc(cap, sizeof(uint32_t));
+    s->used = (unsigned char*)calloc(cap, sizeof(unsigned char));
+    if (!s->fps || !s->vals || !s->eks || !s->used) {
+        free(s->fps); free(s->vals); free(s->eks); free(s->used);
+        s->fps = NULL; s->vals = NULL; s->eks = NULL; s->used = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+static void taida_seen_k_free(taida_seen_k *s) {
+    free(s->fps); free(s->vals); free(s->eks); free(s->used);
+    s->fps = NULL; s->vals = NULL; s->eks = NULL; s->used = NULL;
+}
+
+static int taida_seen_k_add(taida_seen_k *s, taida_val v, uint32_t ek) {
+    uint64_t fp = TAIDA_FNV_OFFSET;
+    taida_fp_accum_k(v, ek, &fp);
+    size_t i = (size_t)fp & s->mask;
+    for (;;) {
+        if (!s->used[i]) {
+            s->used[i] = 1; s->fps[i] = fp; s->vals[i] = v; s->eks[i] = ek;
+            return 1;
+        }
+        if (s->fps[i] == fp && taida_ekind_value_eq(s->vals[i], s->eks[i], v, ek)) return 0;
+        i = (i + 1) & s->mask;
+    }
+}
+
 static int taida_list_all_hashable(taida_val *list) {
     taida_val n = list[2];
     for (taida_val i = 0; i < n; i++) if (!taida_value_hashable(list[4 + i])) return 0;
@@ -5994,6 +6197,44 @@ static int taida_list_all_hashable(taida_val *list) {
 taida_val taida_list_unique(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
+    if (taida_elem_slot_is_array(list[3])) {
+        // Kind-aware dedup over (value, recorded kind) pairs. The result
+        // rebuilds its own kind entries for the surviving elements (and
+        // naturally re-homogenises when only one kind survives). The hash
+        // path engages only when every element kind is hashable — Float
+        // or unknown kinds fall back to the linear pair scan.
+        taida_val new_list = taida_list_new();
+        taida_seen_k seen;
+        int all_h = 1;
+        for (taida_val i = 0; i < len && all_h; i++)
+            all_h = taida_ekind_hashable(list[4 + i], taida_elem_kind_at(list, i));
+        int use_hash = all_h && taida_seen_k_init(&seen, len);
+        for (taida_val i = 0; i < len; i++) {
+            taida_val item = list[4 + i];
+            uint32_t ek = taida_elem_kind_at(list, i);
+            int dup;
+            if (use_hash) {
+                dup = !taida_seen_k_add(&seen, item, ek);
+            } else {
+                taida_val *nl = (taida_val*)new_list;
+                taida_val nlen = nl[2];
+                dup = 0;
+                for (taida_val j = 0; j < nlen; j++) {
+                    if (taida_ekind_value_eq(nl[4 + j], taida_elem_kind_at(nl, j), item, ek)) {
+                        dup = 1;
+                        break;
+                    }
+                }
+            }
+            if (!dup) {
+                taida_list_elem_retain(item, taida_ekind_to_tag(ek));
+                taida_elem_tags_note_push_ek((taida_val*)new_list, ek);
+                new_list = taida_list_push(new_list, item);
+            }
+        }
+        if (use_hash) taida_seen_k_free(&seen);
+        return new_list;
+    }
     taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
     taida_val *nl_init = (taida_val*)new_list;
@@ -7385,6 +7626,42 @@ static int taida_tagged_set_contains(const taida_val *container, taida_val conta
 taida_val taida_set_from_list(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];  // length at index 2
+    if (taida_elem_slot_is_array(list[3])) {
+        // Kind-aware dedup over (value, recorded kind) pairs — see
+        // taida_list_unique for the same projection. The resulting Set
+        // keeps per-element kinds so later membership tests stay exact.
+        taida_val new_set = taida_set_new();
+        taida_seen_k seen;
+        int all_h = 1;
+        for (taida_val i = 0; i < len && all_h; i++)
+            all_h = taida_ekind_hashable(list[4 + i], taida_elem_kind_at(list, i));
+        int use_hash = all_h && taida_seen_k_init(&seen, len);
+        for (taida_val i = 0; i < len; i++) {
+            taida_val item = list[4 + i];
+            uint32_t ek = taida_elem_kind_at(list, i);
+            int dup;
+            if (use_hash) {
+                dup = !taida_seen_k_add(&seen, item, ek);
+            } else {
+                taida_val *ns = (taida_val*)new_set;
+                taida_val nlen = ns[2];
+                dup = 0;
+                for (taida_val j = 0; j < nlen; j++) {
+                    if (taida_ekind_value_eq(ns[4 + j], taida_elem_kind_at(ns, j), item, ek)) {
+                        dup = 1;
+                        break;
+                    }
+                }
+            }
+            if (!dup) {
+                taida_list_elem_retain(item, taida_ekind_to_tag(ek));
+                taida_elem_tags_note_push_ek((taida_val*)new_set, ek);
+                new_set = taida_list_push(new_set, item);
+            }
+        }
+        if (use_hash) taida_seen_k_free(&seen);
+        return new_set;
+    }
     taida_val elem_tag = taida_elem_tag_for_propagation(list);  // NO-2: propagate elem_type_tag from source list
     taida_val new_set = taida_set_new();
     ((taida_val*)new_set)[3] = elem_tag;  // NO-2: set elem_type_tag
