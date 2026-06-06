@@ -502,26 +502,72 @@ fn pipeline_excess_args_use_e1301() {
     }
 }
 
+/// The injected pipe value is the call's first argument, so it must also
+/// satisfy the per-symbol argument-type rule. A mistyped piped value used
+/// to pass the checker (the interpreter then failed at runtime while
+/// native built and silently misran — e.g. a Bool piped into sha256
+/// hashed the empty string). Such calls must be rejected with `[E1506]`
+/// at check time.
+#[test]
+fn pipeline_injected_arg_type_errors_use_e1506() {
+    for (label, source) in [
+        (
+            "bool_into_sha256",
+            ">>> taida-lang/crypto => @(sha256)\ntrue => sha256() => stdout(_)\n",
+        ),
+        (
+            "str_into_random_bytes",
+            ">>> taida-lang/crypto => @(randomBytes)\n\"abc\" => randomBytes() => stdout(_.length().toString())\n",
+        ),
+        (
+            "int_into_hmac",
+            ">>> taida-lang/crypto => @(hmacSha256)\n1 => hmacSha256(\"key\") => stdout(_)\n",
+        ),
+    ] {
+        let td = write_td(label, source);
+        let out = Command::new(taida_bin())
+            .arg(&td)
+            .output()
+            .expect("spawn taida");
+        let _ = std::fs::remove_file(&td);
+        assert!(
+            !out.status.success(),
+            "[{}] mistyped piped value must reject",
+            label
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("[E1506]"),
+            "[{}] expected [E1506], got: {}",
+            label,
+            stderr
+        );
+    }
+}
+
 /// A placeholder-free pipeline stage call receives the piped value as an
 /// implicit first argument at runtime (`"abc" => sha256()` runs as
 /// `sha256("abc")`). The fixed-arity validation must count that injection
 /// instead of rejecting the stage call, the substitution form
 /// (`sha256(_)`) must keep working, and the injected call must agree with
 /// the direct call on every backend. (The injected forms here return
-/// `Str` so the pinned output is display-stable across backends.)
+/// `Str` — plus a length-only randomBytes probe — so the pinned output is
+/// display-stable across backends.)
 #[test]
 fn pipeline_first_arg_injection_parity() {
     assert_parity(
         "pipe_inject",
-        r#">>> taida-lang/crypto => @(sha256, hmacSha256)
+        r#">>> taida-lang/crypto => @(sha256, hmacSha256, randomBytes)
 "abc" => sha256() => stdout(_)
 "abc" => sha256(_) => stdout(_)
 "data" => hmacSha256("key") => stdout(_)
 stdout(hmacSha256("data", "key"))
+32 => randomBytes() => stdout(_.length().toString())
 "#,
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n\
          ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n\
          fc4696cc790452088a25939f0befe2f1d960b7f8ed37266d5c84a6d8cbbbba31\n\
-         fc4696cc790452088a25939f0befe2f1d960b7f8ed37266d5c84a6d8cbbbba31",
+         fc4696cc790452088a25939f0befe2f1d960b7f8ed37266d5c84a6d8cbbbba31\n\
+         32",
     );
 }

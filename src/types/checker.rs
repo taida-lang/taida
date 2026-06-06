@@ -363,13 +363,15 @@ pub struct TypeChecker {
     /// restored at every scope boundary (function body, lambda, error
     /// ceiling, branch arm).
     descriptor_scope_shadows: HashSet<String>,
-    /// True exactly while `infer_expr_type` descends into a `FuncCall`
-    /// that is itself a pipeline stage (`data => f(...)`). Consumed
-    /// (taken) by the FuncCall arm so calls nested inside the stage's
-    /// arguments do not inherit it. When the stage call carries no
-    /// placeholder, the runtime injects the piped value as the implicit
-    /// first argument — arity validation must count that argument.
-    pipeline_stage_call: bool,
+    /// While `infer_expr_type` descends into a `FuncCall` that is itself
+    /// a pipeline stage (`data => f(...)`), this holds the *previous
+    /// stage's* result type — the value the runtime injects as the
+    /// implicit first argument when the stage call carries no
+    /// placeholder. Consumed (taken) by the FuncCall arm so calls nested
+    /// inside the stage's arguments do not inherit it; arity *and* type
+    /// validation must count / check that injected argument. `None`
+    /// outside pipeline stages.
+    pipeline_stage_injected_type: Option<Type>,
     /// Typed HIR / expression type table. `infer_expr_type` records
     /// every observed `Expr` here so codegen lowering can answer
     /// "is this expression Bool?" by looking up the recorded type.
@@ -473,7 +475,7 @@ impl TypeChecker {
             descriptor_binding_names: HashSet::new(),
             descriptor_shadow_names: HashSet::new(),
             descriptor_scope_shadows: HashSet::new(),
-            pipeline_stage_call: false,
+            pipeline_stage_injected_type: None,
             typed_expr_table: super::typed_hir::TypedExprTable::new(),
         };
         // C19B-002 (import-less): the C19 interactive variants are core-bundled
@@ -1589,8 +1591,9 @@ impl TypeChecker {
         kind: CryptoSym,
         args: &[Expr],
         span: &Span,
-        pipeline_injects_first_arg: bool,
+        injected_first_arg: Option<&Type>,
     ) {
+        let pipeline_injects_first_arg = injected_first_arg.is_some();
         let (arity, expected_label): (usize, &str) = match kind {
             // 1 arg: Str | Bytes
             CryptoSym::Hash | CryptoSym::Encode => (1, "Str or Bytes"),
@@ -1636,7 +1639,35 @@ impl TypeChecker {
             });
         }
 
-        for (i, arg) in args.iter().take(arity).enumerate() {
+        // The injected pipe value *is* the first argument — apply the same
+        // per-symbol type rule to it that the written arguments get below.
+        // Unknown stays permissive, matching the written-argument loop.
+        let type_ok = |actual_ty: &Type| match kind {
+            CryptoSym::Hash | CryptoSym::Encode | CryptoSym::Hmac | CryptoSym::Equals => {
+                Self::is_crypto_hash_input_type(actual_ty)
+            }
+            CryptoSym::Decode => matches!(actual_ty, Type::Str),
+            CryptoSym::Random => matches!(actual_ty, Type::Int),
+        };
+        if let Some(injected_ty) = injected_first_arg
+            && *injected_ty != Type::Unknown
+            && !type_ok(injected_ty)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1506] Argument 1 of '{}' has type {}, expected {} (the piped value is the first argument).",
+                    name, injected_ty, expected_label
+                ),
+                span: span.clone(),
+            });
+        }
+
+        // Written arguments fill the slots after the injected one, so cap
+        // the walk at the remaining arity and report 1-based positions
+        // shifted by the injection.
+        let written_slots = arity.saturating_sub(usize::from(pipeline_injects_first_arg));
+        let position_base = 1 + usize::from(pipeline_injects_first_arg);
+        for (i, arg) in args.iter().take(written_slots).enumerate() {
             if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
                 continue;
             }
@@ -1644,18 +1675,11 @@ impl TypeChecker {
             if actual_ty == Type::Unknown {
                 continue;
             }
-            let ok = match kind {
-                CryptoSym::Hash | CryptoSym::Encode | CryptoSym::Hmac | CryptoSym::Equals => {
-                    Self::is_crypto_hash_input_type(&actual_ty)
-                }
-                CryptoSym::Decode => matches!(actual_ty, Type::Str),
-                CryptoSym::Random => matches!(actual_ty, Type::Int),
-            };
-            if !ok {
+            if !type_ok(&actual_ty) {
                 self.errors.push(TypeError {
                     message: format!(
                         "[E1506] Argument {} of '{}' has type {}, expected {}.",
-                        i + 1,
+                        i + position_base,
                         name,
                         actual_ty,
                         expected_label
@@ -1671,8 +1695,9 @@ impl TypeChecker {
         name: &str,
         args: &[Expr],
         span: &Span,
-        pipeline_injects_first_arg: bool,
+        injected_first_arg: Option<&Type>,
     ) {
+        let pipeline_injects_first_arg = injected_first_arg.is_some();
         // Same fixed-arity rule as `validate_crypto_call`: a missing
         // argument must never reach lowering. A placeholder-free pipeline
         // stage call (`data => sha256()`) receives the piped value as its
@@ -1700,7 +1725,27 @@ impl TypeChecker {
                 span: span.clone(),
             });
         }
-        for (i, arg) in args.iter().take(1).enumerate() {
+        // The injected pipe value is the single argument — apply the same
+        // Str | Bytes rule the written argument gets. Unknown stays
+        // permissive, matching the written-argument loop.
+        if let Some(injected_ty) = injected_first_arg
+            && *injected_ty != Type::Unknown
+            && !Self::is_crypto_hash_input_type(injected_ty)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1506] Argument 1 of '{}' has type {}, expected Str or Bytes \
+                     (the piped value is the first argument). \
+                     Hint: use `Bytes[...]()` and unmold the Lax value with `>=>` before hashing raw bytes.",
+                    name, injected_ty
+                ),
+                span: span.clone(),
+            });
+        }
+        // With the injection in place the single slot is taken; without it
+        // the written argument fills slot 1.
+        let written_slots = usize::from(!pipeline_injects_first_arg);
+        for (i, arg) in args.iter().take(written_slots).enumerate() {
             if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
                 continue;
             }
@@ -8217,11 +8262,18 @@ defaulted fields must be provided via `()`",
                 // A placeholder-free call that is itself a pipeline stage
                 // receives the piped value as an implicit first argument
                 // at runtime (`data => f()` runs as `f(data)`). Take
-                // (consume) the stage flag here so calls nested inside
-                // the arguments don't see it, and remember whether the
-                // injection applies for arity validation below.
-                let pipeline_injects_first_arg = std::mem::take(&mut self.pipeline_stage_call)
-                    && !args.iter().any(expr_contains_placeholder);
+                // (consume) the stage state here so calls nested inside
+                // the arguments don't see it; when the injection applies,
+                // keep the previous stage's result type so arity and
+                // argument-type validation below can cover the injected
+                // value.
+                let pipeline_stage_type = std::mem::take(&mut self.pipeline_stage_injected_type);
+                let injected_first_arg: Option<Type> = if args.iter().any(expr_contains_placeholder)
+                {
+                    None
+                } else {
+                    pipeline_stage_type
+                };
                 // C-5c: Reject old `_` partial application syntax in function call args.
                 // Pipeline context (`data => f(_)`) is allowed — `_` refers to pipe value.
                 if !self.in_pipeline {
@@ -8423,20 +8475,11 @@ defaulted fields must be provided via `()`",
                             }
                         }
                         if self.crypto_sha256_funcs.contains(name) {
-                            self.validate_crypto_sha256_call(
-                                name,
-                                args,
-                                span,
-                                pipeline_injects_first_arg,
-                            );
+                            let injected = injected_first_arg.clone();
+                            self.validate_crypto_sha256_call(name, args, span, injected.as_ref());
                         } else if let Some(kind) = self.crypto_funcs.get(name).copied() {
-                            self.validate_crypto_call(
-                                name,
-                                kind,
-                                args,
-                                span,
-                                pipeline_injects_first_arg,
-                            );
+                            let injected = injected_first_arg.clone();
+                            self.validate_crypto_call(name, kind, args, span, injected.as_ref());
                         }
                         // E1506: Check argument types against registered parameter types
                         if let Some(param_types) = self.func_param_types.get(name).cloned() {
@@ -9013,12 +9056,14 @@ defaulted fields must be provided via `()`",
                     if i > 0 && matches!(pipe_expr, Expr::FuncCall(..)) {
                         // The runtime hands the piped value to a
                         // placeholder-free stage call as its implicit
-                        // first argument — let the FuncCall arm know it
-                        // is a stage call (it takes/consumes the flag).
-                        self.pipeline_stage_call = true;
+                        // first argument — pass the previous stage's
+                        // result type to the FuncCall arm (which
+                        // takes/consumes it) so arity and argument-type
+                        // validation can cover the injected value.
+                        self.pipeline_stage_injected_type = Some(result_type.clone());
                     }
                     result_type = self.infer_expr_type(pipe_expr);
-                    self.pipeline_stage_call = false;
+                    self.pipeline_stage_injected_type = None;
                 }
                 self.pop_scope();
                 self.in_pipeline = old_in_pipeline;
