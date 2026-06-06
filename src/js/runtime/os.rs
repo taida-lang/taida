@@ -1541,8 +1541,7 @@ function constantTimeEquals(a, b) {
   const bb = __taida_crypto_to_buffer(b, 'constantTimeEquals');
   // Length mismatch -> false, but walk the full length of `a` so timing
   // does not depend on mismatch position.
-  let lx = (ba.length ^ bb.length) >>> 0;
-  let diff = (lx | (lx >>> 8) | (lx >>> 16)) & 0xff;
+  let diff = ba.length !== bb.length ? 1 : 0;
   for (let i = 0; i < ba.length; i++) {
     const x = bb.length === 0 ? 0 : bb[i % bb.length];
     diff |= ba[i] ^ x;

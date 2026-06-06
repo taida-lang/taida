@@ -209,3 +209,76 @@ fn build_descriptor(project: &Path, args: &[&str]) -> std::process::Output {
         .output()
         .expect("taida build descriptor")
 }
+
+// ── scope shadowing (review follow-up) ──────────────────────────────
+
+/// Valid #4: a function parameter with the same name as a top-level
+/// descriptor binding shadows it — the parameter is an ordinary runtime
+/// value and must not be flagged.
+#[test]
+fn e1532_allows_function_param_shadowing_descriptor_name() {
+    let output = run_interp(
+        "f55_s3_param_shadow",
+        r#"serverMain <= "x"
+unit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
+useName unit: Str = unit => :Str
+stdout(useName("hello"))
+<<< unit
+"#,
+    );
+    assert_no_e1532(&output, "function param shadow");
+    assert!(
+        output.status.success(),
+        "a Str parameter named like a descriptor binding must type-check and run\nstdout={}\nstderr={}",
+        stdout_text(&output),
+        stderr_text(&output)
+    );
+    assert!(
+        stdout_text(&output).contains("hello"),
+        "the shadowing parameter must carry the runtime argument, got: {}",
+        stdout_text(&output)
+    );
+}
+
+/// Valid #5: a lambda parameter with a descriptor binding's name shadows it
+/// inside the lambda body.
+#[test]
+fn e1532_allows_lambda_param_shadowing_descriptor_name() {
+    let output = run_interp(
+        "f55_s3_lambda_shadow",
+        r#"serverMain <= "x"
+unit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
+shout <= _ unit: Str = unit + "!"
+stdout(shout("hey"))
+<<< unit
+"#,
+    );
+    assert_no_e1532(&output, "lambda param shadow");
+    assert!(
+        output.status.success(),
+        "a lambda parameter named like a descriptor binding must type-check and run\nstdout={}\nstderr={}",
+        stdout_text(&output),
+        stderr_text(&output)
+    );
+    assert!(
+        stdout_text(&output).contains("hey!"),
+        "the shadowing lambda parameter must carry the runtime argument, got: {}",
+        stdout_text(&output)
+    );
+}
+
+/// Invalid #5: the scope-shadow allowance must not leak — a function body
+/// that reaches the *top-level* descriptor binding (no shadow in scope) is
+/// still a runtime use.
+#[test]
+fn e1532_still_rejects_descriptor_use_inside_function_without_shadow() {
+    let output = run_interp(
+        "f55_s3_fn_body_no_shadow",
+        r#"serverMain <= "x"
+unit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
+leak x: Str = Str[unit]() => :Str
+stdout(leak("hi"))
+"#,
+    );
+    assert_e1532(&output, "function body without shadow");
+}

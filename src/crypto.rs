@@ -463,12 +463,11 @@ pub fn hmac_sha256_hex(key: &[u8], data: &[u8]) -> String {
 /// depend on where a mismatch occurs within the compared region. The
 /// length itself is not hidden (a length mismatch is observable).
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    // Accumulate the length mismatch into the difference so that a
-    // length-mismatch can never short-circuit to an early `true`.
-    let mut diff: u8 = (a.len() as u64 ^ b.len() as u64) as u8
-        | ((a.len() as u64 ^ b.len() as u64) >> 8) as u8
-        | ((a.len() as u64 ^ b.len() as u64) >> 16) as u8
-        | ((a.len() as u64 ^ b.len() as u64) >> 32) as u8;
+    // Fold the length mismatch into the difference so that a length
+    // mismatch can never short-circuit to an early `true`. The lengths
+    // themselves are public (see above), so a plain comparison is fine;
+    // only the byte walk below must stay constant-time.
+    let mut diff: u8 = u8::from(a.len() != b.len());
     let n = a.len();
     for i in 0..n {
         // `b` is indexed modulo its length (with a guard for empty `b`) so
@@ -792,6 +791,25 @@ mod tests {
         assert!(constant_time_eq(b"", b""));
         assert!(!constant_time_eq(b"", b"x"));
         assert!(!constant_time_eq(b"x", b""));
+    }
+
+    /// Regression: a shift-based length fold used to drop bits 24-31 /
+    /// 40-63 of the length XOR, so inputs whose length difference sat
+    /// only in those bits (e.g. 0 vs 2^24 bytes) compared *equal* — with
+    /// an empty `a` the byte walk never runs, so the verdict came from
+    /// the (broken) fold alone. The same shape doubled as an HMAC
+    /// verification bypass: a 32-byte expected MAC vs "same 32-byte
+    /// prefix + 2^24 padding" walked only the matching prefix.
+    #[test]
+    fn constant_time_eq_length_fold_regression() {
+        let big = vec![0u8; 1 << 24];
+        assert!(!constant_time_eq(b"", &big));
+        assert!(!constant_time_eq(&big, b""));
+
+        let prefix = [0xabu8; 32];
+        let mut padded = vec![0xabu8; 32];
+        padded.resize(32 + (1 << 24), 0u8);
+        assert!(!constant_time_eq(&prefix, &padded));
     }
 
     // ── hex round-trip + RFC vectors ───────────────────────────────────

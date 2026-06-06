@@ -227,7 +227,7 @@ method / path / query / headers の各 span は `Request.raw` 上の view です
 
 | Field | 単引数ハンドラ | 双引数ハンドラ |
 |-------|----------------|----------------|
-| `body` | buffered body 全体に対する span | `@(start: bodyOffset, len: 0)` (body は未読) |
+| `body` | buffered body 全体に対する span | `@(start: 0, len: 0)` の空 span (body は未読)。body の読み出しは `readBody*` 経由で、raw 上の位置は `bodyOffset` フィールドが指す |
 | `contentLength` | 確定値 | ヘッダ値そのまま (>0 でも body は未読) |
 
 他のフィールドは単引数と同じです。

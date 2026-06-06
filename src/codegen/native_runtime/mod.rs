@@ -786,7 +786,14 @@ mod tests {
         //   `taida_crypto_` prefix so they cannot collide with the static
         //   WebSocket base64 helpers in net_h1_h2.c). Other fragments
         //   untouched. Total 1,264,369 -> 1,284,726.
-        const EXPECTED_TOTAL_LEN: usize = 1_284_726;
+        // 2026-06-06 F55 S4 review follow-up: the constant-time-equality
+        //   length fold dropped bits 24-31 / 40-63 of the length XOR, so
+        //   two inputs whose length difference sat only in those bits
+        //   (e.g. 0 vs 2^24) compared equal. Replaced the shift-fold with
+        //   a direct `(a_len != b_len)` seed in core.c (lengths are
+        //   public; only the byte walk must be constant-time): -86 bytes
+        //   in F2. Total 1,284,726 -> 1,284,640.
+        const EXPECTED_TOTAL_LEN: usize = 1_284_640;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1481,11 +1488,14 @@ mod tests {
         // F55 S4 (2026-06-06) adds the extended crypto helpers + public ABI
         // functions next to taida_sha256 (which sits after the marker):
         // F2 202,586 -> 222,774.
+        // F55 S4 review follow-up (2026-06-06): the constant-time-equality
+        // length fold is replaced by a direct `(a_len != b_len)` seed (the
+        // shift-fold dropped bits 24-31 / 40-63): F2 222,774 -> 222,688.
         // Express it as F1_LEN + F2 so the F1 side stays in lockstep with the
         // const above.
         assert_eq!(
             CORE_SECTION.len(),
-            F1_LEN + 222_774, // F2 grew by +20,188 in F55 S4 (crypto surface)
+            F1_LEN + 222_688, // F2 shrank by -86 in the F55 S4 review follow-up
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

@@ -13412,8 +13412,7 @@ taida_val taida_crypto_constant_time_equals(taida_val a_val, taida_val b_val) {
     if (!taida_crypto_materialize(b_val, &b, &b_len)) {
         taida_crypto_materialize((taida_val)"", &b, &b_len);
     }
-    uint64_t lx = (uint64_t)a_len ^ (uint64_t)b_len;
-    unsigned char diff = (unsigned char)(lx | (lx >> 8) | (lx >> 16) | (lx >> 32));
+    unsigned char diff = (a_len != b_len) ? 1 : 0;
     for (size_t i = 0; i < a_len; i++) {
         unsigned char bb = (b_len == 0) ? 0 : b[i % b_len];
         diff |= a[i] ^ bb;

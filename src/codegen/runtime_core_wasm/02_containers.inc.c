@@ -2011,8 +2011,7 @@ int64_t taida_crypto_constant_time_equals(int64_t a_val, int64_t b_val) {
     unsigned char *b = (unsigned char *)0; int64_t b_len = 0;
     taida_wasm_crypto_materialize(a_val, &a, &a_len);
     taida_wasm_crypto_materialize(b_val, &b, &b_len);
-    uint64_t lx = (uint64_t)a_len ^ (uint64_t)b_len;
-    unsigned char diff = (unsigned char)(lx | (lx >> 8) | (lx >> 16) | (lx >> 32));
+    unsigned char diff = (a_len != b_len) ? 1 : 0;
     for (int64_t i = 0; i < a_len; i++) {
         unsigned char bb = (b_len == 0) ? 0 : b[i % b_len];
         diff |= a[i] ^ bb;

@@ -85,7 +85,11 @@ mod tests {
         // constructor is needed). The Bytes-producing decode / randomBytes
         // symbols live in runtime_wasi_io.c (wasm-wasi / wasm-full only), so
         // they do not affect this core total.
-        const EXPECTED_TOTAL_LEN: usize = 449_171;
+        // F55 S4 review follow-up (2026-06-06): the constant-time-equality
+        // length fold dropped bits 24-31 / 40-63 of the length XOR;
+        // replaced with a direct `(a_len != b_len)` seed in
+        // 02_containers.inc.c: -86 bytes. Total 449,171 -> 449,085.
+        const EXPECTED_TOTAL_LEN: usize = 449_085;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

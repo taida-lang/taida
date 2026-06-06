@@ -400,3 +400,47 @@ fn argument_type_errors_use_e1506() {
         );
     }
 }
+
+/// Checker-level arity shortfall: crypto functions have a fixed ABI on
+/// every backend, so a hole-free call with missing arguments must be
+/// rejected at compile time (`[E1301]`) instead of reaching lowering.
+#[test]
+fn arity_shortfall_errors_use_e1301() {
+    for (label, source) in [
+        (
+            "hmac_one_arg",
+            ">>> taida-lang/crypto => @(hmacSha256)\nstdout(hmacSha256(\"key\"))\n",
+        ),
+        (
+            "cteq_one_arg",
+            ">>> taida-lang/crypto => @(constantTimeEquals)\nstdout(constantTimeEquals(\"a\").toString())\n",
+        ),
+        (
+            "random_zero_arg",
+            ">>> taida-lang/crypto => @(randomBytes)\na <= randomBytes()\nstdout(a.length().toString())\n",
+        ),
+        (
+            "sha256_zero_arg",
+            ">>> taida-lang/crypto => @(sha256)\nstdout(sha256())\n",
+        ),
+    ] {
+        let td = write_td(label, source);
+        let out = Command::new(taida_bin())
+            .arg(&td)
+            .output()
+            .expect("spawn taida");
+        let _ = std::fs::remove_file(&td);
+        assert!(
+            !out.status.success(),
+            "[{}] arity shortfall must reject",
+            label
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("[E1301]"),
+            "[{}] expected [E1301], got: {}",
+            label,
+            stderr
+        );
+    }
+}

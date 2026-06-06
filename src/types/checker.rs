@@ -356,6 +356,13 @@ pub struct TypeChecker {
     /// the user's own type, not a build descriptor, so it is excluded from
     /// `[E1532]` detection.
     descriptor_shadow_names: HashSet<String>,
+    /// Names currently shadowed by a function parameter / lambda parameter /
+    /// local binding while the `[E1532]` descriptor-use pass walks a nested
+    /// scope. A local `unit: Str` argument must not be mistaken for a
+    /// same-named top-level `unit <= BuildUnit(...)` binding. Saved and
+    /// restored at every scope boundary (function body, lambda, error
+    /// ceiling, branch arm).
+    descriptor_scope_shadows: HashSet<String>,
     /// Typed HIR / expression type table. `infer_expr_type` records
     /// every observed `Expr` here so codegen lowering can answer
     /// "is this expression Bool?" by looking up the recorded type.
@@ -458,6 +465,7 @@ impl TypeChecker {
             hinted_func_stack: Vec::new(),
             descriptor_binding_names: HashSet::new(),
             descriptor_shadow_names: HashSet::new(),
+            descriptor_scope_shadows: HashSet::new(),
             typed_expr_table: super::typed_hir::TypedExprTable::new(),
         };
         // C19B-002 (import-less): the C19 interactive variants are core-bundled
@@ -1579,6 +1587,23 @@ impl TypeChecker {
             CryptoSym::Hmac | CryptoSym::Equals => (2, "Str or Bytes"),
         };
 
+        // Reject an arity shortfall outright: crypto builtins have a fixed
+        // ABI on every backend, so a missing argument must never reach
+        // lowering (the interpreter guards at runtime; native / WASM expect
+        // the full argument list). Hole-bearing calls are partial
+        // application and are slot-checked by the [E1505] pass instead.
+        if args.len() < arity && !args.iter().any(|a| matches!(a, Expr::Hole(_))) {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1301] Function '{}' expects exactly {} argument(s), got {}. Hint: Pass the missing argument(s); crypto functions have a fixed arity.",
+                    name,
+                    arity,
+                    args.len()
+                ),
+                span: span.clone(),
+            });
+        }
+
         for (i, arg) in args.iter().take(arity).enumerate() {
             if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
                 continue;
@@ -1610,6 +1635,17 @@ impl TypeChecker {
     }
 
     fn validate_crypto_sha256_call(&mut self, name: &str, args: &[Expr], span: &Span) {
+        // Same fixed-arity rule as `validate_crypto_call`: a missing
+        // argument must never reach lowering.
+        if args.is_empty() {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1301] Function '{}' expects exactly 1 argument(s), got 0. Hint: Pass the missing argument(s); crypto functions have a fixed arity.",
+                    name
+                ),
+                span: span.clone(),
+            });
+        }
         for (i, arg) in args.iter().take(1).enumerate() {
             if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
                 continue;
@@ -5307,7 +5343,10 @@ defaulted fields must be provided via `()`",
     fn descriptor_value_name(&self, expr: &Expr) -> Option<String> {
         match expr {
             Expr::TypeInst(name, _, _) if self.is_descriptor_type_name(name) => Some(name.clone()),
-            Expr::Ident(name, _) if self.descriptor_binding_names.contains(name) => {
+            Expr::Ident(name, _)
+                if self.descriptor_binding_names.contains(name)
+                    && !self.descriptor_scope_shadows.contains(name) =>
+            {
                 Some(name.clone())
             }
             _ => None,
@@ -5346,6 +5385,7 @@ defaulted fields must be provided via `()`",
         // outermost descriptor binding form is tracked (the allow-listed
         // indirection); the RHS itself is still validated as a binding context.
         self.descriptor_binding_names.clear();
+        self.descriptor_scope_shadows.clear();
         for stmt in &program.statements {
             if let Statement::Assignment(assign) = stmt
                 && self.descriptor_value_name(&assign.value).is_some()
@@ -5377,6 +5417,12 @@ defaulted fields must be provided via `()`",
                     DescriptorUseCtx::Runtime
                 };
                 self.check_descriptor_use_in_expr(&assign.value, rhs_ctx);
+                if !top_level {
+                    // A nested-scope binding shadows a same-named top-level
+                    // descriptor binding for the rest of the enclosing scope
+                    // (the RHS above still sees the outer name).
+                    self.descriptor_scope_shadows.insert(assign.target.clone());
+                }
             }
             Statement::Expr(e) => {
                 self.check_descriptor_use_in_expr(e, DescriptorUseCtx::Runtime);
@@ -5384,20 +5430,39 @@ defaulted fields must be provided via `()`",
             Statement::FuncDef(fd) => {
                 // A descriptor returned / used inside a function body is a
                 // runtime use (functions are not the descriptor build path).
+                // Parameters (and the nested function's own name) shadow
+                // same-named top-level descriptor bindings within the body.
+                if !top_level {
+                    self.descriptor_scope_shadows.insert(fd.name.clone());
+                }
+                let saved = self.descriptor_scope_shadows.clone();
+                for p in &fd.params {
+                    self.descriptor_scope_shadows.insert(p.name.clone());
+                }
                 for s in &fd.body {
                     self.check_descriptor_use_in_stmt(s, false);
                 }
+                self.descriptor_scope_shadows = saved;
             }
             Statement::ErrorCeiling(ec) => {
+                let saved = self.descriptor_scope_shadows.clone();
+                self.descriptor_scope_shadows.insert(ec.error_param.clone());
                 for s in &ec.handler_body {
                     self.check_descriptor_use_in_stmt(s, false);
                 }
+                self.descriptor_scope_shadows = saved;
             }
             Statement::UnmoldForward(u) => {
                 self.check_descriptor_use_in_expr(&u.source, DescriptorUseCtx::Runtime);
+                if !top_level {
+                    self.descriptor_scope_shadows.insert(u.target.clone());
+                }
             }
             Statement::UnmoldBackward(u) => {
                 self.check_descriptor_use_in_expr(&u.source, DescriptorUseCtx::Runtime);
+                if !top_level {
+                    self.descriptor_scope_shadows.insert(u.target.clone());
+                }
             }
             // Exports name symbols (`<<< @(name)`); the bound value was
             // validated at its binding site as the allow-listed RHS. Class /
@@ -5485,8 +5550,15 @@ defaulted fields must be provided via `()`",
             Expr::Throw(inner, _) => {
                 self.check_descriptor_use_in_expr(inner, DescriptorUseCtx::Runtime);
             }
-            Expr::Lambda(_, body, _) => {
+            Expr::Lambda(params, body, _) => {
+                // Lambda parameters shadow same-named top-level descriptor
+                // bindings within the lambda body.
+                let saved = self.descriptor_scope_shadows.clone();
+                for p in params {
+                    self.descriptor_scope_shadows.insert(p.name.clone());
+                }
                 self.check_descriptor_use_in_expr(body, DescriptorUseCtx::Runtime);
+                self.descriptor_scope_shadows = saved;
             }
             Expr::Pipeline(exprs, _) => {
                 for e in exprs {
@@ -5500,9 +5572,13 @@ defaulted fields must be provided via `()`",
                     if let Some(cond) = &arm.condition {
                         self.check_descriptor_use_in_expr(cond, DescriptorUseCtx::Runtime);
                     }
+                    // Bindings inside one arm do not shadow names in the
+                    // next arm — restore the shadow set per arm.
+                    let saved = self.descriptor_scope_shadows.clone();
                     for s in &arm.body {
                         self.check_descriptor_use_in_stmt(s, false);
                     }
+                    self.descriptor_scope_shadows = saved;
                 }
             }
             // Leaf expressions (handled above for the descriptor case).
