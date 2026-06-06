@@ -404,6 +404,9 @@ fn argument_type_errors_use_e1506() {
 /// Checker-level arity shortfall: crypto functions have a fixed ABI on
 /// every backend, so a hole-free call with missing arguments must be
 /// rejected at compile time (`[E1301]`) instead of reaching lowering.
+/// A pipeline stage call only counts the injected pipe value as one
+/// argument — a stage that is still short after the injection is
+/// rejected too.
 #[test]
 fn arity_shortfall_errors_use_e1301() {
     for (label, source) in [
@@ -422,6 +425,17 @@ fn arity_shortfall_errors_use_e1301() {
         (
             "sha256_zero_arg",
             ">>> taida-lang/crypto => @(sha256)\nstdout(sha256())\n",
+        ),
+        (
+            "hmac_pipeline_still_short",
+            ">>> taida-lang/crypto => @(hmacSha256)\n\"k\" => hmacSha256() => stdout(_)\n",
+        ),
+        (
+            "hex_encode_nested_in_stage_args",
+            // The implicit injection belongs to the stage call only — a
+            // zero-argument call nested in the stage's arguments is still
+            // an arity shortfall.
+            ">>> taida-lang/crypto => @(sha256, hexEncode)\n\"abc\" => sha256(hexEncode()) => stdout(_)\n",
         ),
     ] {
         let td = write_td(label, source);
@@ -443,4 +457,28 @@ fn arity_shortfall_errors_use_e1301() {
             stderr
         );
     }
+}
+
+/// A placeholder-free pipeline stage call receives the piped value as an
+/// implicit first argument at runtime (`"abc" => sha256()` runs as
+/// `sha256("abc")`). The fixed-arity validation must count that injection
+/// instead of rejecting the stage call, the substitution form
+/// (`sha256(_)`) must keep working, and the injected call must agree with
+/// the direct call on every backend. (The injected forms here return
+/// `Str` so the pinned output is display-stable across backends.)
+#[test]
+fn pipeline_first_arg_injection_parity() {
+    assert_parity(
+        "pipe_inject",
+        r#">>> taida-lang/crypto => @(sha256, hmacSha256)
+"abc" => sha256() => stdout(_)
+"abc" => sha256(_) => stdout(_)
+"data" => hmacSha256("key") => stdout(_)
+stdout(hmacSha256("data", "key"))
+"#,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n\
+         ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n\
+         fc4696cc790452088a25939f0befe2f1d960b7f8ed37266d5c84a6d8cbbbba31\n\
+         fc4696cc790452088a25939f0befe2f1d960b7f8ed37266d5c84a6d8cbbbba31",
+    );
 }

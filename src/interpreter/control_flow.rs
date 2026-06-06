@@ -178,80 +178,10 @@ fn rewrite_statement_placeholder(
     }
 }
 
-/// Check if an expression contains a Placeholder `_` anywhere in its tree.
-/// Used by pipeline MoldInst handling to detect nested placeholders like `_ > 3`.
-fn expr_contains_placeholder(expr: &Expr) -> bool {
-    match expr {
-        Expr::Placeholder(_) => true,
-        Expr::BuchiPack(fields, _) => fields
-            .iter()
-            .any(|field| expr_contains_placeholder(&field.value)),
-        Expr::ListLit(items, _) => items.iter().any(expr_contains_placeholder),
-        Expr::BinaryOp(lhs, _, rhs, _) => {
-            expr_contains_placeholder(lhs) || expr_contains_placeholder(rhs)
-        }
-        Expr::UnaryOp(_, inner, _) => expr_contains_placeholder(inner),
-        Expr::FuncCall(callee, args, _) => {
-            expr_contains_placeholder(callee) || args.iter().any(expr_contains_placeholder)
-        }
-        Expr::MethodCall(obj, _, args, _) => {
-            expr_contains_placeholder(obj) || args.iter().any(expr_contains_placeholder)
-        }
-        Expr::FieldAccess(obj, _, _) => expr_contains_placeholder(obj),
-        Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
-            arm.condition
-                .as_ref()
-                .is_some_and(expr_contains_placeholder)
-                || arm.body.iter().any(statement_contains_placeholder)
-        }),
-        Expr::Pipeline(steps, _) => steps.iter().any(expr_contains_placeholder),
-        Expr::MoldInst(_, type_args, fields, _) => {
-            type_args.iter().any(expr_contains_placeholder)
-                || fields
-                    .iter()
-                    .any(|field| expr_contains_placeholder(&field.value))
-        }
-        Expr::Unmold(inner, _) => expr_contains_placeholder(inner),
-        Expr::Lambda(params, body, _) => {
-            params.iter().any(|param| {
-                param
-                    .default_value
-                    .as_ref()
-                    .is_some_and(expr_contains_placeholder)
-            }) || expr_contains_placeholder(body)
-        }
-        Expr::TypeInst(_, fields, _) => fields
-            .iter()
-            .any(|field| expr_contains_placeholder(&field.value)),
-        Expr::Throw(inner, _) => expr_contains_placeholder(inner),
-        _ => false,
-    }
-}
-
-fn statement_contains_placeholder(stmt: &Statement) -> bool {
-    match stmt {
-        Statement::Expr(expr) => expr_contains_placeholder(expr),
-        Statement::Assignment(assign) => expr_contains_placeholder(&assign.value),
-        Statement::FuncDef(func) => func.body.iter().any(statement_contains_placeholder),
-        Statement::ErrorCeiling(ceiling) => ceiling
-            .handler_body
-            .iter()
-            .any(statement_contains_placeholder),
-        Statement::UnmoldForward(unmold) => expr_contains_placeholder(&unmold.source),
-        Statement::UnmoldBackward(unmold) => expr_contains_placeholder(&unmold.source),
-        Statement::ClassLikeDef(def) => def.fields.iter().any(|field| {
-            field
-                .default_value
-                .as_ref()
-                .is_some_and(expr_contains_placeholder)
-                || field
-                    .method_def
-                    .as_ref()
-                    .is_some_and(|func| func.body.iter().any(statement_contains_placeholder))
-        }),
-        Statement::EnumDef(_) | Statement::Import(_) | Statement::Export(_) => false,
-    }
-}
+// `expr_contains_placeholder` / `statement_contains_placeholder` moved to
+// `crate::parser::ast` (re-exported through `crate::parser::*`) so the
+// type checker shares the exact placeholder rule used here for pipeline
+// stage evaluation.
 
 impl Interpreter {
     /// Evaluate a single pipeline step, applying the current value.

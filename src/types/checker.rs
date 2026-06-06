@@ -363,6 +363,13 @@ pub struct TypeChecker {
     /// restored at every scope boundary (function body, lambda, error
     /// ceiling, branch arm).
     descriptor_scope_shadows: HashSet<String>,
+    /// True exactly while `infer_expr_type` descends into a `FuncCall`
+    /// that is itself a pipeline stage (`data => f(...)`). Consumed
+    /// (taken) by the FuncCall arm so calls nested inside the stage's
+    /// arguments do not inherit it. When the stage call carries no
+    /// placeholder, the runtime injects the piped value as the implicit
+    /// first argument — arity validation must count that argument.
+    pipeline_stage_call: bool,
     /// Typed HIR / expression type table. `infer_expr_type` records
     /// every observed `Expr` here so codegen lowering can answer
     /// "is this expression Bool?" by looking up the recorded type.
@@ -466,6 +473,7 @@ impl TypeChecker {
             descriptor_binding_names: HashSet::new(),
             descriptor_shadow_names: HashSet::new(),
             descriptor_scope_shadows: HashSet::new(),
+            pipeline_stage_call: false,
             typed_expr_table: super::typed_hir::TypedExprTable::new(),
         };
         // C19B-002 (import-less): the C19 interactive variants are core-bundled
@@ -1575,7 +1583,14 @@ impl TypeChecker {
     /// `[E1506]` diagnostics but is parameterized over the symbol kind so
     /// each function (hash / hmac / encode / decode / random / equals)
     /// enforces its own arity and per-argument type rule.
-    fn validate_crypto_call(&mut self, name: &str, kind: CryptoSym, args: &[Expr], span: &Span) {
+    fn validate_crypto_call(
+        &mut self,
+        name: &str,
+        kind: CryptoSym,
+        args: &[Expr],
+        span: &Span,
+        pipeline_injects_first_arg: bool,
+    ) {
         let (arity, expected_label): (usize, &str) = match kind {
             // 1 arg: Str | Bytes
             CryptoSym::Hash | CryptoSym::Encode => (1, "Str or Bytes"),
@@ -1590,15 +1605,16 @@ impl TypeChecker {
         // Reject an arity shortfall outright: crypto builtins have a fixed
         // ABI on every backend, so a missing argument must never reach
         // lowering (the interpreter guards at runtime; native / WASM expect
-        // the full argument list). Hole-bearing calls are partial
-        // application and are slot-checked by the [E1505] pass instead.
-        if args.len() < arity && !args.iter().any(|a| matches!(a, Expr::Hole(_))) {
+        // the full argument list). A placeholder-free pipeline stage call
+        // receives the piped value as an implicit first argument, so count
+        // it as supplied. Hole-bearing calls are partial application and
+        // are slot-checked by the [E1505] pass instead.
+        let effective_args = args.len() + usize::from(pipeline_injects_first_arg);
+        if effective_args < arity && !args.iter().any(|a| matches!(a, Expr::Hole(_))) {
             self.errors.push(TypeError {
                 message: format!(
                     "[E1301] Function '{}' expects exactly {} argument(s), got {}. Hint: Pass the missing argument(s); crypto functions have a fixed arity.",
-                    name,
-                    arity,
-                    args.len()
+                    name, arity, effective_args
                 ),
                 span: span.clone(),
             });
@@ -1634,10 +1650,18 @@ impl TypeChecker {
         }
     }
 
-    fn validate_crypto_sha256_call(&mut self, name: &str, args: &[Expr], span: &Span) {
+    fn validate_crypto_sha256_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        span: &Span,
+        pipeline_injects_first_arg: bool,
+    ) {
         // Same fixed-arity rule as `validate_crypto_call`: a missing
-        // argument must never reach lowering.
-        if args.is_empty() {
+        // argument must never reach lowering. A placeholder-free pipeline
+        // stage call (`data => sha256()`) receives the piped value as its
+        // implicit first argument and is therefore complete.
+        if args.is_empty() && !pipeline_injects_first_arg {
             self.errors.push(TypeError {
                 message: format!(
                     "[E1301] Function '{}' expects exactly 1 argument(s), got 0. Hint: Pass the missing argument(s); crypto functions have a fixed arity.",
@@ -8160,6 +8184,14 @@ defaulted fields must be provided via `()`",
             }
 
             Expr::FuncCall(func, args, span) => {
+                // A placeholder-free call that is itself a pipeline stage
+                // receives the piped value as an implicit first argument
+                // at runtime (`data => f()` runs as `f(data)`). Take
+                // (consume) the stage flag here so calls nested inside
+                // the arguments don't see it, and remember whether the
+                // injection applies for arity validation below.
+                let pipeline_injects_first_arg = std::mem::take(&mut self.pipeline_stage_call)
+                    && !args.iter().any(expr_contains_placeholder);
                 // C-5c: Reject old `_` partial application syntax in function call args.
                 // Pipeline context (`data => f(_)`) is allowed — `_` refers to pipe value.
                 if !self.in_pipeline {
@@ -8361,9 +8393,20 @@ defaulted fields must be provided via `()`",
                             }
                         }
                         if self.crypto_sha256_funcs.contains(name) {
-                            self.validate_crypto_sha256_call(name, args, span);
+                            self.validate_crypto_sha256_call(
+                                name,
+                                args,
+                                span,
+                                pipeline_injects_first_arg,
+                            );
                         } else if let Some(kind) = self.crypto_funcs.get(name).copied() {
-                            self.validate_crypto_call(name, kind, args, span);
+                            self.validate_crypto_call(
+                                name,
+                                kind,
+                                args,
+                                span,
+                                pipeline_injects_first_arg,
+                            );
                         }
                         // E1506: Check argument types against registered parameter types
                         if let Some(param_types) = self.func_param_types.get(name).cloned() {
@@ -8937,7 +8980,15 @@ defaulted fields must be provided via `()`",
                         self.define_var(name, result_type.clone());
                         continue;
                     }
+                    if i > 0 && matches!(pipe_expr, Expr::FuncCall(..)) {
+                        // The runtime hands the piped value to a
+                        // placeholder-free stage call as its implicit
+                        // first argument — let the FuncCall arm know it
+                        // is a stage call (it takes/consumes the flag).
+                        self.pipeline_stage_call = true;
+                    }
                     result_type = self.infer_expr_type(pipe_expr);
+                    self.pipeline_stage_call = false;
                 }
                 self.pop_scope();
                 self.in_pipeline = old_in_pipeline;
