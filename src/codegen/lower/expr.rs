@@ -1450,6 +1450,13 @@ impl Lowering {
                     || self.operand_shadow_kind(rhs).is_some()
                 {
                     "taida_poly_eq_tagged"
+                } else if self.expr_is_list(lhs) && self.expr_is_list(rhs) {
+                    // Value-tag track: two statically-known lists compare
+                    // structurally (kind-aware element walk) instead of
+                    // by raw pointer identity, matching the interpreter's
+                    // Value::eq. The untyped poly fallback below keeps the
+                    // historical raw comparison for dynamic operands.
+                    "taida_poly_eq_tagged"
                 } else if lhs_is_str || rhs_is_str {
                     "taida_str_eq"
                 } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
@@ -1468,6 +1475,8 @@ impl Lowering {
                 if self.operand_shadow_kind(lhs).is_some()
                     || self.operand_shadow_kind(rhs).is_some()
                 {
+                    "taida_poly_neq_tagged"
+                } else if self.expr_is_list(lhs) && self.expr_is_list(rhs) {
                     "taida_poly_neq_tagged"
                 } else if lhs_is_str || rhs_is_str {
                     "taida_str_neq"

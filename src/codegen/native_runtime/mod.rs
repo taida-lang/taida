@@ -749,7 +749,10 @@ mod tests {
         //   taida_lax_value_ekind read-back, and the tagged poly
         //   comparisons used when an unmolded payload's kind is only
         //   known at runtime. F1 371,286 -> 373,668. Total -> 1,241,495.
-        const EXPECTED_TOTAL_LEN: usize = 1_241_495;
+        // 2026-06-06 value-tag track step 6: +1,325 bytes in core.c F1 —
+        //   kind-aware hashability gate for nested lists (see F1_LEN
+        //   history). F1 373,668 -> 374,993. Total -> 1,242,820.
+        const EXPECTED_TOTAL_LEN: usize = 1_242_820;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1392,7 +1395,13 @@ mod tests {
         // taida_lax_value_ekind, and taida_poly_eq/neq_tagged (unknown
         // sides fall back to the legacy poly comparison).
         // F1_LEN 371,286 -> 373,668.
-        const F1_LEN: usize = 373_668;
+        // Value-tag track step 6 (2026-06-06): +1,325 before the marker —
+        // the legacy hashability gate consults each element's recorded
+        // kind, so a nested list containing a known Float takes the
+        // linear (kind-aware) dedup path like the interpreter instead of
+        // riding an order-sensitive fingerprint. Kind-less elements keep
+        // the structural classification. F1_LEN 373,668 -> 374,993.
+        const F1_LEN: usize = 374_993;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

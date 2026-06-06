@@ -5991,12 +5991,21 @@ static uint64_t taida_value_fingerprint(taida_val v) {
     uint64_t h = TAIDA_FNV_OFFSET; taida_fp_accum(v, &h); return h;
 }
 
+static int taida_elem_hashable_for_gate(taida_val v, uint32_t ekind); // below
+
 static int taida_value_hashable(taida_val v) {
     switch (taida_value_kind(v)) {
         case TKIND_SCALAR: case TKIND_STR: case TKIND_BYTES: return 1;
         case TKIND_LIST: {
+            // Value-tag track: gate on each element's recorded kind. A
+            // nested list whose elements include a Float must take the
+            // linear path (interp parity: Float is never hashable), and
+            // the legacy walk could not see that — a Float's bit pattern
+            // classifies as a plain scalar. Kind-less elements keep the
+            // legacy structural classification.
             taida_val *l = (taida_val*)v; taida_val n = l[2];
-            for (taida_val i = 0; i < n; i++) if (!taida_value_hashable(l[4 + i])) return 0;
+            for (taida_val i = 0; i < n; i++)
+                if (!taida_elem_hashable_for_gate(l[4 + i], taida_elem_kind_at(l, i))) return 0;
             return 1;
         }
         case TKIND_PACK: {
@@ -6005,6 +6014,27 @@ static int taida_value_hashable(taida_val v) {
             return 1;
         }
         default: return 0; // TKIND_OTHER (HashMap / Set / Closure / Async)
+    }
+}
+
+// Hashability of one element under its recorded kind, for the legacy
+// whole-container gate: a known Float forces the linear path, a known
+// scalar kind is hashable, a kind-less element falls back to the
+// structural classifier (so untagged containers keep their historical
+// behaviour bit-for-bit), and heap kinds recurse structurally.
+static int taida_elem_hashable_for_gate(taida_val v, uint32_t ekind) {
+    uint32_t k = TAIDA_EKIND_KIND(ekind);
+    switch (k) {
+        case TAIDA_TAG_INT:
+        case TAIDA_TAG_BOOL:
+        case TAIDA_TAG_ENUM:
+            return 1;
+        case TAIDA_TAG_FLOAT:
+            return 0;
+        case TAIDA_EKIND_UNKNOWN:
+            return taida_value_hashable(v);
+        default:
+            return taida_value_hashable(v);
     }
 }
 
