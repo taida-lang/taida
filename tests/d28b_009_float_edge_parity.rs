@@ -201,13 +201,13 @@ fn d28b_009_inf_arithmetic_4backend_parity() {
 /// Subnormal-bracket boolean behaviour. Avoids the textual rendering
 /// divergence (interpreter uses Rust `f64::Display` fixed-form, native
 /// / JS use shortest-form scientific) which is a separate, longer-term
-/// renderer-rewrite question and not in D28B-009 scope.
+/// renderer-rewrite question and out of scope here.
 #[test]
 fn d28b_009_denormal_compare_4backend_parity() {
     check_4backend("denormal_compare");
 }
 
-/// Regression: existing C26B-011 NaN/Inf 3-backend fixture is now
+/// Regression: the existing NaN/Inf 3-backend fixture is now
 /// 4-backend pin (wasi was previously skipped per `c26b011_float_parity.rs`).
 #[test]
 fn d28b_009_c26b011_nan_inf_pin_4backend() {
@@ -242,7 +242,7 @@ fn d28b_009_c26b011_nan_inf_pin_4backend() {
     assert_eq!(wasi_out, expected, "wasm-wasi parity (nan_inf_parity)");
 }
 
-/// Regression: C26B-011 signed-zero parity is now 4-backend.
+/// Regression: signed-zero parity is now 4-backend.
 #[test]
 fn d28b_009_c26b011_signed_zero_pin_4backend() {
     let td = Path::new(env!("CARGO_MANIFEST_DIR"))

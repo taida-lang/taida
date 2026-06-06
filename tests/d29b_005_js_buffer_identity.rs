@@ -118,7 +118,7 @@ fn build_js(td_path: &std::path::Path, out_js: &std::path::Path) -> bool {
 
 /// Wrap the Taida-emitted JS with a prelude that monkey-patches
 /// `net.Socket.prototype.write` to capture every argument's identity and
-/// emit a single `D29B-005-EVIDENCE: ...` line on stderr after the
+/// emit a single evidence line on stderr after the
 /// process has handled the request and the server is about to exit.
 fn write_wrapper(emitted_js: &std::path::Path, wrapper_js: &std::path::Path) {
     // The emitted JS already imports `net` and uses `net.createServer`.

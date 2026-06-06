@@ -158,7 +158,7 @@ fn parity_assert(tag: &str, source: &str, expected: &str) {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// C26B-023 P1: `readBody(req)` on a synthetic 1-arg-shape req pack with a
+/// P1: `readBody(req)` on a synthetic 1-arg-shape req pack with a
 /// buffered body span. All three backends should return the 5-byte "hello"
 /// slice. This pins the docs example in `net_api.md §8.1`.
 #[test]
@@ -176,7 +176,7 @@ stdout(bodyStr)
     parity_assert("readbody_buffered", source, "5\nhello");
 }
 
-/// C26B-023 P2: `readBody(req)` on a GET-shape pack (body span `len=0`).
+/// P2: `readBody(req)` on a GET-shape pack (body span `len=0`).
 /// All three backends should return empty Bytes.
 #[test]
 fn c26b_023_readbody_empty_body_parity() {
@@ -191,7 +191,7 @@ stdout(body.length())
     parity_assert("readbody_empty", source, "0");
 }
 
-/// C26B-023 P3: Anti-pattern regression guard — the *wrong* direct-slice path
+/// P3: Anti-pattern regression guard — the *wrong* direct-slice path
 /// on a 2-arg-shape req pack (body.len=0) returns empty Bytes across all 3
 /// backends. This is **silent breakage** (intentionally reproduced here so we
 /// have a docs-aligned fixture pinning the behavior). The correct fix is to

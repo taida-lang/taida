@@ -119,7 +119,7 @@ pub struct Lowering {
     param_type_check_funcs: std::collections::HashSet<String>,
     /// 戻り値が Float のユーザー定義関数名セット
     float_returning_funcs: std::collections::HashSet<String>,
-    /// NB-31: 戻り値が Int/Num のユーザー定義関数名セット
+    /// 戻り値が Int/Num のユーザー定義関数名セット
     int_returning_funcs: std::collections::HashSet<String>,
     /// BuchiPack/TypeInst を保持する変数名のセット（F-58 メソッド名衝突回避用）
     pack_vars: std::collections::HashSet<String>,
@@ -174,15 +174,15 @@ pub struct Lowering {
     /// When a name is here, stdlib_runtime_funcs dispatch for that name is skipped
     /// and the call is treated as a parameter/variable call instead.
     shadowed_net_builtins: std::collections::HashSet<String>,
-    /// NB-14: Parameter name -> IrVar holding the runtime type tag from the caller.
+    /// Parameter name -> IrVar holding the runtime type tag from the caller.
     /// Used to propagate Bool/Int distinction through function boundaries.
     /// Populated at function entry via taida_get_call_arg_tag().
     param_tag_vars: std::collections::HashMap<String, IrVar>,
-    /// NB-14: IrVar (CallUser result) -> IrVar (return type tag from that call).
+    /// IrVar (CallUser result) -> IrVar (return type tag from that call).
     /// Populated after CallUser by calling taida_get_return_tag().
     /// Used to propagate type tags through function return values.
     return_tag_vars: std::collections::HashMap<IrVar, IrVar>,
-    /// NB-14: When true, the current CallUser is in tail position (return value).
+    /// When true, the current CallUser is in tail position (return value).
     /// Skip get_return_tag to preserve C compiler tail call optimization (WASM/mutual recursion).
     in_tail_call_return: bool,
     /// Variable alias tracking for identity assignments (e.g., `h <= handler`).

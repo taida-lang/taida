@@ -343,7 +343,7 @@ const FIXTURES: &[&str] = &[
 /// Fixtures that interpreter + JS support but the other backends cannot
 /// currently exercise (backend lowering limitation, tracked outside C23).
 ///
-/// C25B-001 (2026-04-23): `str_from_stream` removed. Minimal native /
+/// `str_from_stream` removed. Minimal native /
 /// wasm Stream lowering landed in this phase — the fixture is now
 /// exercised on all 4 backends. See `taida_stream_new` in
 /// `src/codegen/native_runtime/core.c` and `_wasm_stream_new` in

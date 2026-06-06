@@ -279,7 +279,7 @@ fn c25b_025_transcendentals_interpreter_and_js() {
     }
 }
 
-/// C25B-025 Phase 5-I: native backend parity. Native links `-lm`
+/// Native backend parity. Native links `-lm`
 /// and calls the same glibc libm as Rust's `f64::*` — we expect
 /// bit-for-bit match with the interpreter.
 #[test]
@@ -312,7 +312,7 @@ fn c25b_025_transcendentals_native_parity() {
     );
 }
 
-/// C25B-025 Phase 5-I: wasm-wasi backend parity with tolerance.
+/// wasm-wasi backend parity with tolerance.
 /// The wasm runtime implements transcendentals manually (`-nostdlib`
 /// precludes libm) so bit-exact match is not achievable for e.g.
 /// `Exp[1.0]()`. A 1e-12 relative tolerance still catches all

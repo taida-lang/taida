@@ -91,7 +91,7 @@ fn escape_layout(name: &str) -> (PathBuf, PathBuf) {
     (root, foo)
 }
 
-/// Core C26B-015 repro: in-project `../src/bar.td` import from
+/// Core repro: in-project `../src/bar.td` import from
 /// `examples/foo.td` must be accepted by the native backend. Pre-fix
 /// this hit `<path traversal rejected: ../src/bar.td>`.
 #[test]

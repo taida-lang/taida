@@ -2068,7 +2068,7 @@ fn wasm_edge_size_check() {
     );
 }
 
-/// C12-7 (FB-26): wasm-edge hello world must remain in the stdout("literal")
+/// wasm-edge hello world must remain in the stdout("literal")
 /// lightweight path (no `taida_io_stdout_with_tag` / no polymorphic_to_string
 /// DCE chain). We anchor the observed size to a tight 1KB upper bound: the
 /// current output is ~351B and any regression into the tagged runtime path

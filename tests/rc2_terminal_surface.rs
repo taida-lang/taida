@@ -264,7 +264,7 @@ stdout(`surface-ok kind=${KeyKind.Char}`)
 /// is a pipe, not a TTY). The error text is wire-pinned by
 /// `terminal/src/size.rs::TerminalSizeNotATty` (code 2001).
 ///
-/// Before RC2B-207 this call failed with "Symbol 'TerminalSize' not
+/// Before the facade-name-resolution fix this call failed with "Symbol 'TerminalSize' not
 /// found in addon-backed package" because the uppercase facade name
 /// was never bound. After the fix, the symbol resolves, the mold
 /// dispatch bridge forwards to the lowercase Rust function, and the
@@ -346,7 +346,7 @@ stdout(`kind=${key.kind}`)
 /// not ship a facade still expose their `[functions]` table directly
 /// under the original snake/camelCase names. The RC1.5 proof-of-
 /// concept (`crates/addon-terminal-sample`) relies on this path, so
-/// the RC2B-207 fix must not break it.
+/// the facade-name-resolution fix must not break it.
 ///
 /// We exercise this by importing the lowercase `terminalSize` from
 /// the same terminal package. The facade does not export lowercase
@@ -390,7 +390,7 @@ stdout(`cols=${size.cols} rows=${size.rows}`)
 // ── RC2B-208 lock: Cranelift native target is still rejected ─
 
 /// RC2.5 Phase 1: the Cranelift AOT native backend **accepts**
-/// addon-backed package imports. Previously (RC2B-208, RC2 scope) the
+/// addon-backed package imports. Previously the
 /// lowering layer rejected `taida build native` for any
 /// package with `native/addon.toml`; that reject has been removed now
 /// that `taida_addon_call` exists in the native runtime.

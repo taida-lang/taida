@@ -15,6 +15,10 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
+// F55 S4: getentropy(2) for crypto.randomBytes (glibc / macOS / *BSD).
+#if defined(__linux__) || defined(__APPLE__) || defined(__unix__)
+#include <sys/random.h>
+#endif
 
 // FL-9: Safe realloc wrapper — aborts on NULL with a diagnostic message.
 // Usage: TAIDA_REALLOC(ptr, new_size, context_label)
@@ -13139,6 +13143,460 @@ taida_val taida_sha256(taida_val value) {
         return taida_sha256_hex_from_bytes(NULL, 0);
     }
     taida_val out = taida_sha256_hex_from_bytes((const unsigned char*)s, slen);
+    return out;
+}
+
+// ── F55 S4: extended crypto surface ───────────────────────────────────
+// SHA-512 / 384 / 224, HMAC-SHA256, constant-time equality, hex/base64
+// encode/decode, randomBytes. Hand-written (no external dependency); each
+// matches the Rust reference in src/crypto.rs byte-for-byte.
+
+// Materialize a Str|Bytes taida_val into a freshly malloc'd raw buffer.
+// On success returns 1 and sets *out (caller frees) + *out_len. On a value
+// that is neither Str nor Bytes, returns 0. Caps input at 256 MiB.
+#define TAIDA_CRYPTO_MAX_INPUT (256LL * 1024LL * 1024LL)
+static int taida_crypto_materialize(taida_val value, unsigned char **out, size_t *out_len) {
+    if (TAIDA_IS_BYTES_CONTIG(value)) {
+        taida_val len = taida_bytes_contig_len(value);
+        if (len < 0 || len > TAIDA_CRYPTO_MAX_INPUT) return 0;
+        unsigned char *buf = (unsigned char*)TAIDA_MALLOC((size_t)(len > 0 ? len : 1), "crypto_in");
+        if (len > 0) memcpy(buf, taida_bytes_contig_data(value), (size_t)len);
+        *out = buf;
+        *out_len = (size_t)len;
+        return 1;
+    }
+    if (TAIDA_IS_BYTES(value)) {
+        taida_val len = taida_bytes_len(value);
+        if (len < 0 || len > TAIDA_CRYPTO_MAX_INPUT) return 0;
+        taida_val *bytes = (taida_val*)value;
+        unsigned char *buf = (unsigned char*)TAIDA_MALLOC((size_t)(len > 0 ? len : 1), "crypto_in");
+        for (taida_val i = 0; i < len; i++) buf[i] = (unsigned char)bytes[2 + i];
+        *out = buf;
+        *out_len = (size_t)len;
+        return 1;
+    }
+    const char *s = (const char*)value;
+    size_t slen = 0;
+    if (!taida_str_byte_len(s, &slen)) return 0;
+    if (slen > (size_t)TAIDA_CRYPTO_MAX_INPUT) return 0;
+    unsigned char *buf = (unsigned char*)TAIDA_MALLOC(slen > 0 ? slen : 1, "crypto_in");
+    if (slen > 0) memcpy(buf, s, slen);
+    *out = buf;
+    *out_len = slen;
+    return 1;
+}
+
+// SHA-512 / SHA-384 core (64-bit words, 1024-bit blocks).
+typedef struct {
+    uint64_t state[8];
+    uint64_t total_lo; // total length in bytes, low 64 bits
+    unsigned char block[128];
+    size_t block_len;
+} taida_sha512_ctx;
+
+static const uint64_t TAIDA_SHA512_K[80] = {
+    0x428a2f98d728ae22ULL, 0x7137449123ef65cdULL, 0xb5c0fbcfec4d3b2fULL, 0xe9b5dba58189dbbcULL,
+    0x3956c25bf348b538ULL, 0x59f111f1b605d019ULL, 0x923f82a4af194f9bULL, 0xab1c5ed5da6d8118ULL,
+    0xd807aa98a3030242ULL, 0x12835b0145706fbeULL, 0x243185be4ee4b28cULL, 0x550c7dc3d5ffb4e2ULL,
+    0x72be5d74f27b896fULL, 0x80deb1fe3b1696b1ULL, 0x9bdc06a725c71235ULL, 0xc19bf174cf692694ULL,
+    0xe49b69c19ef14ad2ULL, 0xefbe4786384f25e3ULL, 0x0fc19dc68b8cd5b5ULL, 0x240ca1cc77ac9c65ULL,
+    0x2de92c6f592b0275ULL, 0x4a7484aa6ea6e483ULL, 0x5cb0a9dcbd41fbd4ULL, 0x76f988da831153b5ULL,
+    0x983e5152ee66dfabULL, 0xa831c66d2db43210ULL, 0xb00327c898fb213fULL, 0xbf597fc7beef0ee4ULL,
+    0xc6e00bf33da88fc2ULL, 0xd5a79147930aa725ULL, 0x06ca6351e003826fULL, 0x142929670a0e6e70ULL,
+    0x27b70a8546d22ffcULL, 0x2e1b21385c26c926ULL, 0x4d2c6dfc5ac42aedULL, 0x53380d139d95b3dfULL,
+    0x650a73548baf63deULL, 0x766a0abb3c77b2a8ULL, 0x81c2c92e47edaee6ULL, 0x92722c851482353bULL,
+    0xa2bfe8a14cf10364ULL, 0xa81a664bbc423001ULL, 0xc24b8b70d0f89791ULL, 0xc76c51a30654be30ULL,
+    0xd192e819d6ef5218ULL, 0xd69906245565a910ULL, 0xf40e35855771202aULL, 0x106aa07032bbd1b8ULL,
+    0x19a4c116b8d2d0c8ULL, 0x1e376c085141ab53ULL, 0x2748774cdf8eeb99ULL, 0x34b0bcb5e19b48a8ULL,
+    0x391c0cb3c5c95a63ULL, 0x4ed8aa4ae3418acbULL, 0x5b9cca4f7763e373ULL, 0x682e6ff3d6b2b8a3ULL,
+    0x748f82ee5defb2fcULL, 0x78a5636f43172f60ULL, 0x84c87814a1f0ab72ULL, 0x8cc702081a6439ecULL,
+    0x90befffa23631e28ULL, 0xa4506cebde82bde9ULL, 0xbef9a3f7b2c67915ULL, 0xc67178f2e372532bULL,
+    0xca273eceea26619cULL, 0xd186b8c721c0c207ULL, 0xeada7dd6cde0eb1eULL, 0xf57d4f7fee6ed178ULL,
+    0x06f067aa72176fbaULL, 0x0a637dc5a2c898a6ULL, 0x113f9804bef90daeULL, 0x1b710b35131c471bULL,
+    0x28db77f523047d84ULL, 0x32caab7b40c72493ULL, 0x3c9ebe0a15c9bebcULL, 0x431d67c49c100d4cULL,
+    0x4cc5d4becb3e42b6ULL, 0x597f299cfc657e2aULL, 0x5fcb6fab3ad6faecULL, 0x6c44198c4a475817ULL
+};
+
+static uint64_t taida_sha512_rotr(uint64_t x, unsigned n) {
+    return (x >> n) | (x << (64 - n));
+}
+
+static void taida_sha512_transform(taida_sha512_ctx *ctx, const unsigned char block[128]) {
+    uint64_t w[80];
+    for (int i = 0; i < 16; i++) {
+        int j = i * 8;
+        w[i] = ((uint64_t)block[j] << 56) | ((uint64_t)block[j+1] << 48) |
+               ((uint64_t)block[j+2] << 40) | ((uint64_t)block[j+3] << 32) |
+               ((uint64_t)block[j+4] << 24) | ((uint64_t)block[j+5] << 16) |
+               ((uint64_t)block[j+6] << 8) | (uint64_t)block[j+7];
+    }
+    for (int i = 16; i < 80; i++) {
+        uint64_t s0 = taida_sha512_rotr(w[i-15], 1) ^ taida_sha512_rotr(w[i-15], 8) ^ (w[i-15] >> 7);
+        uint64_t s1 = taida_sha512_rotr(w[i-2], 19) ^ taida_sha512_rotr(w[i-2], 61) ^ (w[i-2] >> 6);
+        w[i] = w[i-16] + s0 + w[i-7] + s1;
+    }
+    uint64_t a = ctx->state[0], b = ctx->state[1], c = ctx->state[2], d = ctx->state[3];
+    uint64_t e = ctx->state[4], f = ctx->state[5], g = ctx->state[6], h = ctx->state[7];
+    for (int i = 0; i < 80; i++) {
+        uint64_t s1 = taida_sha512_rotr(e, 14) ^ taida_sha512_rotr(e, 18) ^ taida_sha512_rotr(e, 41);
+        uint64_t ch = (e & f) ^ ((~e) & g);
+        uint64_t temp1 = h + s1 + ch + TAIDA_SHA512_K[i] + w[i];
+        uint64_t s0 = taida_sha512_rotr(a, 28) ^ taida_sha512_rotr(a, 34) ^ taida_sha512_rotr(a, 39);
+        uint64_t maj = (a & b) ^ (a & c) ^ (b & c);
+        uint64_t temp2 = s0 + maj;
+        h = g; g = f; f = e; e = d + temp1; d = c; c = b; b = a; a = temp1 + temp2;
+    }
+    ctx->state[0] += a; ctx->state[1] += b; ctx->state[2] += c; ctx->state[3] += d;
+    ctx->state[4] += e; ctx->state[5] += f; ctx->state[6] += g; ctx->state[7] += h;
+}
+
+static void taida_sha512_update(taida_sha512_ctx *ctx, const unsigned char *data, size_t len) {
+    if (!data || len == 0) return;
+    ctx->total_lo += (uint64_t)len;
+    size_t pos = 0;
+    while (pos < len) {
+        size_t need = 128 - ctx->block_len;
+        size_t take = (len - pos < need) ? (len - pos) : need;
+        memcpy(ctx->block + ctx->block_len, data + pos, take);
+        ctx->block_len += take;
+        pos += take;
+        if (ctx->block_len == 128) {
+            taida_sha512_transform(ctx, ctx->block);
+            ctx->block_len = 0;
+        }
+    }
+}
+
+// Finish the SHA-512 core and write the first out_len bytes of the digest.
+static void taida_sha512_final(taida_sha512_ctx *ctx, unsigned char *out, size_t out_len) {
+    // 128-bit length field; we only ever feed <= 256 MiB so the high 64 bits
+    // of the bit length are always 0.
+    uint64_t bit_len = ctx->total_lo * 8ULL;
+    ctx->block[ctx->block_len++] = 0x80;
+    if (ctx->block_len > 112) {
+        while (ctx->block_len < 128) ctx->block[ctx->block_len++] = 0;
+        taida_sha512_transform(ctx, ctx->block);
+        ctx->block_len = 0;
+    }
+    while (ctx->block_len < 112) ctx->block[ctx->block_len++] = 0;
+    // high 64 bits of the 128-bit length = 0
+    for (int i = 0; i < 8; i++) ctx->block[112 + i] = 0;
+    for (int i = 0; i < 8; i++) ctx->block[120 + i] = (unsigned char)(bit_len >> (56 - i * 8));
+    taida_sha512_transform(ctx, ctx->block);
+    unsigned char full[64];
+    for (int i = 0; i < 8; i++) {
+        full[i*8]   = (unsigned char)(ctx->state[i] >> 56);
+        full[i*8+1] = (unsigned char)(ctx->state[i] >> 48);
+        full[i*8+2] = (unsigned char)(ctx->state[i] >> 40);
+        full[i*8+3] = (unsigned char)(ctx->state[i] >> 32);
+        full[i*8+4] = (unsigned char)(ctx->state[i] >> 24);
+        full[i*8+5] = (unsigned char)(ctx->state[i] >> 16);
+        full[i*8+6] = (unsigned char)(ctx->state[i] >> 8);
+        full[i*8+7] = (unsigned char)(ctx->state[i]);
+    }
+    memcpy(out, full, out_len);
+}
+
+static taida_val taida_crypto_hex_str(const unsigned char *digest, size_t n) {
+    static const char hex[] = "0123456789abcdef";
+    char *out = taida_str_alloc(n * 2);
+    for (size_t i = 0; i < n; i++) {
+        out[i*2] = hex[(digest[i] >> 4) & 0x0f];
+        out[i*2+1] = hex[digest[i] & 0x0f];
+    }
+    return (taida_val)out;
+}
+
+static taida_val taida_sha512_family(taida_val value, const uint64_t iv[8], size_t out_len) {
+    unsigned char *raw = (unsigned char*)0;
+    size_t len = 0;
+    if (!taida_crypto_materialize(value, &raw, &len)) {
+        unsigned char zero = 0;
+        taida_crypto_materialize((taida_val)"", &raw, &len);
+        (void)zero;
+    }
+    taida_sha512_ctx ctx;
+    for (int i = 0; i < 8; i++) ctx.state[i] = iv[i];
+    ctx.total_lo = 0;
+    ctx.block_len = 0;
+    taida_sha512_update(&ctx, raw, len);
+    unsigned char digest[64];
+    taida_sha512_final(&ctx, digest, out_len);
+    if (raw) free(raw);
+    return taida_crypto_hex_str(digest, out_len);
+}
+
+taida_val taida_crypto_sha512(taida_val value) {
+    static const uint64_t iv[8] = {
+        0x6a09e667f3bcc908ULL, 0xbb67ae8584caa73bULL, 0x3c6ef372fe94f82bULL, 0xa54ff53a5f1d36f1ULL,
+        0x510e527fade682d1ULL, 0x9b05688c2b3e6c1fULL, 0x1f83d9abfb41bd6bULL, 0x5be0cd19137e2179ULL
+    };
+    return taida_sha512_family(value, iv, 64);
+}
+
+taida_val taida_crypto_sha384(taida_val value) {
+    static const uint64_t iv[8] = {
+        0xcbbb9d5dc1059ed8ULL, 0x629a292a367cd507ULL, 0x9159015a3070dd17ULL, 0x152fecd8f70e5939ULL,
+        0x67332667ffc00b31ULL, 0x8eb44a8768581511ULL, 0xdb0c2e0d64f98fa7ULL, 0x47b5481dbefa4fa4ULL
+    };
+    return taida_sha512_family(value, iv, 48);
+}
+
+// SHA-224 reuses the SHA-256 32-bit core with its own IV, truncated to 28 bytes.
+taida_val taida_crypto_sha224(taida_val value) {
+    unsigned char *raw = (unsigned char*)0;
+    size_t len = 0;
+    if (!taida_crypto_materialize(value, &raw, &len)) {
+        taida_crypto_materialize((taida_val)"", &raw, &len);
+    }
+    taida_sha256_ctx ctx;
+    ctx.state[0] = 0xc1059ed8U; ctx.state[1] = 0x367cd507U;
+    ctx.state[2] = 0x3070dd17U; ctx.state[3] = 0xf70e5939U;
+    ctx.state[4] = 0xffc00b31U; ctx.state[5] = 0x68581511U;
+    ctx.state[6] = 0x64f98fa7U; ctx.state[7] = 0xbefa4fa4U;
+    ctx.total_len = 0;
+    ctx.block_len = 0;
+    taida_sha256_update(&ctx, raw, len);
+    unsigned char digest[32];
+    taida_sha256_final(&ctx, digest);
+    if (raw) free(raw);
+    return taida_crypto_hex_str(digest, 28);
+}
+
+// HMAC-SHA256 (RFC 2104), block size 64.
+taida_val taida_crypto_hmac_sha256(taida_val key_val, taida_val data_val) {
+    unsigned char *key = (unsigned char*)0; size_t key_len = 0;
+    unsigned char *data = (unsigned char*)0; size_t data_len = 0;
+    if (!taida_crypto_materialize(key_val, &key, &key_len)) {
+        taida_crypto_materialize((taida_val)"", &key, &key_len);
+    }
+    if (!taida_crypto_materialize(data_val, &data, &data_len)) {
+        taida_crypto_materialize((taida_val)"", &data, &data_len);
+    }
+    unsigned char key_block[64];
+    memset(key_block, 0, 64);
+    if (key_len > 64) {
+        unsigned char kd[32];
+        taida_sha256_ctx kc; taida_sha256_init(&kc);
+        taida_sha256_update(&kc, key, key_len);
+        taida_sha256_final(&kc, kd);
+        memcpy(key_block, kd, 32);
+    } else {
+        memcpy(key_block, key, key_len);
+    }
+    unsigned char ipad[64], opad[64];
+    for (int i = 0; i < 64; i++) { ipad[i] = key_block[i] ^ 0x36; opad[i] = key_block[i] ^ 0x5c; }
+    unsigned char inner[32];
+    taida_sha256_ctx ic; taida_sha256_init(&ic);
+    taida_sha256_update(&ic, ipad, 64);
+    taida_sha256_update(&ic, data, data_len);
+    taida_sha256_final(&ic, inner);
+    unsigned char outer[32];
+    taida_sha256_ctx oc; taida_sha256_init(&oc);
+    taida_sha256_update(&oc, opad, 64);
+    taida_sha256_update(&oc, inner, 32);
+    taida_sha256_final(&oc, outer);
+    if (key) free(key);
+    if (data) free(data);
+    return taida_crypto_hex_str(outer, 32);
+}
+
+// Constant-time equality. Length mismatch -> false, but the loop walks the
+// full length of `a` so timing does not depend on mismatch position.
+taida_val taida_crypto_constant_time_equals(taida_val a_val, taida_val b_val) {
+    unsigned char *a = (unsigned char*)0; size_t a_len = 0;
+    unsigned char *b = (unsigned char*)0; size_t b_len = 0;
+    if (!taida_crypto_materialize(a_val, &a, &a_len)) {
+        taida_crypto_materialize((taida_val)"", &a, &a_len);
+    }
+    if (!taida_crypto_materialize(b_val, &b, &b_len)) {
+        taida_crypto_materialize((taida_val)"", &b, &b_len);
+    }
+    uint64_t lx = (uint64_t)a_len ^ (uint64_t)b_len;
+    unsigned char diff = (unsigned char)(lx | (lx >> 8) | (lx >> 16) | (lx >> 32));
+    for (size_t i = 0; i < a_len; i++) {
+        unsigned char bb = (b_len == 0) ? 0 : b[i % b_len];
+        diff |= a[i] ^ bb;
+    }
+    int eq = (diff == 0);
+    if (a) free(a);
+    if (b) free(b);
+    return (taida_val)(eq ? 1 : 0);
+}
+
+// hexEncode: Str|Bytes -> lower-hex Str.
+taida_val taida_crypto_hex_encode(taida_val value) {
+    unsigned char *raw = (unsigned char*)0; size_t len = 0;
+    if (!taida_crypto_materialize(value, &raw, &len)) {
+        taida_crypto_materialize((taida_val)"", &raw, &len);
+    }
+    taida_val out = taida_crypto_hex_str(raw, len);
+    if (raw) free(raw);
+    return out;
+}
+
+static int taida_hex_val(unsigned char c, unsigned char *out) {
+    if (c >= '0' && c <= '9') { *out = c - '0'; return 1; }
+    if (c >= 'a' && c <= 'f') { *out = c - 'a' + 10; return 1; }
+    if (c >= 'A' && c <= 'F') { *out = c - 'A' + 10; return 1; }
+    return 0;
+}
+
+// hexDecode: Str -> Lax[Bytes]. Invalid hex -> empty Lax[Bytes].
+taida_val taida_crypto_hex_decode(taida_val value) {
+    const char *s = (const char*)value;
+    size_t slen = 0;
+    if (!taida_str_byte_len(s, &slen) || (slen % 2 != 0)) {
+        return taida_lax_empty(taida_bytes_default_value());
+    }
+    size_t out_len = slen / 2;
+    unsigned char *buf = (unsigned char*)TAIDA_MALLOC(out_len > 0 ? out_len : 1, "hex_decode");
+    for (size_t i = 0; i < out_len; i++) {
+        unsigned char hi, lo;
+        if (!taida_hex_val((unsigned char)s[i*2], &hi) ||
+            !taida_hex_val((unsigned char)s[i*2+1], &lo)) {
+            free(buf);
+            return taida_lax_empty(taida_bytes_default_value());
+        }
+        buf[i] = (unsigned char)((hi << 4) | lo);
+    }
+    taida_val bytes = taida_bytes_contig_new(buf, (taida_val)out_len);
+    free(buf);
+    return taida_lax_new(bytes, taida_bytes_default_value());
+}
+
+static const char TAIDA_B64_ALPHABET[64] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+// base64Encode: Str|Bytes -> Str (RFC 4648, padded).
+taida_val taida_crypto_base64_encode(taida_val value) {
+    unsigned char *raw = (unsigned char*)0; size_t len = 0;
+    if (!taida_crypto_materialize(value, &raw, &len)) {
+        taida_crypto_materialize((taida_val)"", &raw, &len);
+    }
+    size_t out_len = ((len + 2) / 3) * 4;
+    char *out = taida_str_alloc(out_len);
+    size_t oi = 0, i = 0;
+    while (i + 3 <= len) {
+        uint32_t n = ((uint32_t)raw[i] << 16) | ((uint32_t)raw[i+1] << 8) | (uint32_t)raw[i+2];
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 18) & 0x3f];
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 12) & 0x3f];
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 6) & 0x3f];
+        out[oi++] = TAIDA_B64_ALPHABET[n & 0x3f];
+        i += 3;
+    }
+    size_t rem = len - i;
+    if (rem == 1) {
+        uint32_t n = (uint32_t)raw[i] << 16;
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 18) & 0x3f];
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 12) & 0x3f];
+        out[oi++] = '=';
+        out[oi++] = '=';
+    } else if (rem == 2) {
+        uint32_t n = ((uint32_t)raw[i] << 16) | ((uint32_t)raw[i+1] << 8);
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 18) & 0x3f];
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 12) & 0x3f];
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 6) & 0x3f];
+        out[oi++] = '=';
+    }
+    if (raw) free(raw);
+    return (taida_val)out;
+}
+
+static int taida_b64_val(unsigned char c, unsigned char *out) {
+    if (c >= 'A' && c <= 'Z') { *out = c - 'A'; return 1; }
+    if (c >= 'a' && c <= 'z') { *out = c - 'a' + 26; return 1; }
+    if (c >= '0' && c <= '9') { *out = c - '0' + 52; return 1; }
+    if (c == '+') { *out = 62; return 1; }
+    if (c == '/') { *out = 63; return 1; }
+    return 0;
+}
+
+// base64Decode: Str -> Lax[Bytes]. Invalid base64 -> empty Lax[Bytes].
+taida_val taida_crypto_base64_decode(taida_val value) {
+    const char *s = (const char*)value;
+    size_t slen = 0;
+    if (!taida_str_byte_len(s, &slen) || (slen % 4 != 0)) {
+        return taida_lax_empty(taida_bytes_default_value());
+    }
+    if (slen == 0) {
+        return taida_lax_new(taida_bytes_contig_new((const unsigned char*)"", 0),
+                             taida_bytes_default_value());
+    }
+    size_t n_chunks = slen / 4;
+    size_t cap = n_chunks * 3;
+    unsigned char *buf = (unsigned char*)TAIDA_MALLOC(cap > 0 ? cap : 1, "b64_decode");
+    size_t oi = 0;
+    for (size_t c = 0; c < n_chunks; c++) {
+        const unsigned char *q = (const unsigned char*)(s + c * 4);
+        int is_last = (c == n_chunks - 1);
+        int pad = (q[0]=='=') + (q[1]=='=') + (q[2]=='=') + (q[3]=='=');
+        if ((pad > 0 && !is_last) || pad > 2) { free(buf); return taida_lax_empty(taida_bytes_default_value()); }
+        if ((pad == 1 && q[3] != '=') || (pad == 2 && (q[2] != '=' || q[3] != '='))) {
+            free(buf); return taida_lax_empty(taida_bytes_default_value());
+        }
+        unsigned char v0, v1, v2 = 0, v3 = 0;
+        int n_data = 4 - pad;
+        if (!taida_b64_val(q[0], &v0) || !taida_b64_val(q[1], &v1)) { free(buf); return taida_lax_empty(taida_bytes_default_value()); }
+        if (n_data > 2 && !taida_b64_val(q[2], &v2)) { free(buf); return taida_lax_empty(taida_bytes_default_value()); }
+        if (n_data > 3 && !taida_b64_val(q[3], &v3)) { free(buf); return taida_lax_empty(taida_bytes_default_value()); }
+        uint32_t triple = ((uint32_t)v0 << 18) | ((uint32_t)v1 << 12) | ((uint32_t)v2 << 6) | (uint32_t)v3;
+        buf[oi++] = (unsigned char)((triple >> 16) & 0xff);
+        if (n_data >= 3) buf[oi++] = (unsigned char)((triple >> 8) & 0xff);
+        if (n_data >= 4) buf[oi++] = (unsigned char)(triple & 0xff);
+    }
+    taida_val bytes = taida_bytes_contig_new(buf, (taida_val)oi);
+    free(buf);
+    return taida_lax_new(bytes, taida_bytes_default_value());
+}
+
+// randomBytes(n) -> Bytes. Uses getentropy(2) when available, else
+// /dev/urandom. Throws on entropy failure (PHILOSOPHY I: no silent Unit).
+// (<sys/random.h> is included with the other system headers at the top.)
+taida_val taida_crypto_random_bytes(taida_val n_val) {
+    taida_val n = n_val;
+    if (n < 0) {
+        taida_val err = taida_make_error("CryptoError", "randomBytes: count must be non-negative");
+        return taida_throw(err);
+    }
+    if (n == 0) {
+        return taida_bytes_contig_new((const unsigned char*)"", 0);
+    }
+    if (n > TAIDA_CRYPTO_MAX_INPUT) {
+        taida_val err = taida_make_error("CryptoError", "randomBytes: count exceeds 256 MiB limit");
+        return taida_throw(err);
+    }
+    unsigned char *buf = (unsigned char*)TAIDA_MALLOC((size_t)n, "random_bytes");
+    size_t got = 0;
+    int ok = 0;
+#if defined(__linux__) || defined(__APPLE__)
+    // getentropy is capped at 256 bytes per call.
+    ok = 1;
+    while (got < (size_t)n) {
+        size_t want = (size_t)n - got;
+        if (want > 256) want = 256;
+        if (getentropy(buf + got, want) != 0) { ok = 0; break; }
+        got += want;
+    }
+#endif
+    if (!ok) {
+        // Fallback: read from /dev/urandom.
+        FILE *f = fopen("/dev/urandom", "rb");
+        if (!f) {
+            free(buf);
+            taida_val err = taida_make_error("CryptoError", "randomBytes: failed to open OS entropy source");
+            return taida_throw(err);
+        }
+        got = fread(buf, 1, (size_t)n, f);
+        fclose(f);
+        if (got != (size_t)n) {
+            free(buf);
+            taida_val err = taida_make_error("CryptoError", "randomBytes: failed to read OS entropy source");
+            return taida_throw(err);
+        }
+    }
+    taida_val out = taida_bytes_contig_new(buf, n);
+    free(buf);
     return out;
 }
 

@@ -221,7 +221,7 @@ fn c26b_019_multiline_function_call_parses() {
 }
 
 /// Checker / build parser parity: `taida way check` and `taida <file>` must
-/// agree on parse success/failure for the same input. C26B-019 secondary
+/// agree on parse success/failure for the same input. A secondary
 /// observation flagged "check passes, build fails" as a diagnostics-trust
 /// issue; the repository has a single `parse` entry point, and this test
 /// pins that invariant so any future divergence (e.g. if a wrapper layer
@@ -247,7 +247,7 @@ fn c26b_019_check_and_run_parser_parity_on_multiline() {
 
 /// 3-backend parity: interpreter + JS + native must emit byte-identical
 /// stdout on the multi-line TypeDef constructor fixture. This is the
-/// stable-surface gate for C26B-019.
+/// stable-surface gate for the multi-line constructor parser.
 #[test]
 fn c26b_019_multiline_3backend_parity() {
     let path = write_fixture(FIXTURE_NESTED_MULTILINE, "parity3");

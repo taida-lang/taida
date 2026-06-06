@@ -166,7 +166,7 @@ fn parity_assert(tag: &str, source: &str, expected: &str) {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// C26B-017 canonical repro: `makeAdder` returns a partial as its implicit
+/// Canonical repro: `makeAdder` returns a partial as its implicit
 /// last expression. Interpreter must capture `n` correctly, not lose it to
 /// the tail-call trampoline. 3-backend parity.
 #[test]

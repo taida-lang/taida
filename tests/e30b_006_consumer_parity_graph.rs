@@ -20,7 +20,7 @@ use taida::graph::ai_format::format_ai_json;
 use taida::graph::verify::structural_summary;
 use taida::parser::parse;
 
-/// (E30B-006) BuchiPack kind (`Pilot = @(...)`) は structural_summary の
+/// BuchiPack kind (`Pilot = @(...)`) は structural_summary の
 /// `mold_types` / `error_types` どちらにも入らない。types カウントには 1 加算
 /// される。
 #[test]
@@ -42,7 +42,7 @@ fn test_e30b_006_structural_summary_buchi_pack() {
     );
 }
 
-/// (E30B-006) Mold kind (`Mold[T] => Box[T] = @(...)`) は structural_summary の
+/// Mold kind (`Mold[T] => Box[T] = @(...)`) は structural_summary の
 /// `mold_types` 配列に入る。`Mold[T]` base node は label exclusion で除外され、
 /// `error_types` には入らない。
 #[test]
@@ -66,7 +66,7 @@ fn test_e30b_006_structural_summary_mold_kind() {
     );
 }
 
-/// (E30B-006) Error 継承 (`Error => NotFound = @(...)`) は structural_summary
+/// Error 継承 (`Error => NotFound = @(...)`) は structural_summary
 /// の `error_types` 配列に入る。Error base node は label exclusion で除外。
 #[test]
 fn test_e30b_006_structural_summary_error_inheritance() {
@@ -88,8 +88,8 @@ fn test_e30b_006_structural_summary_error_inheritance() {
     );
 }
 
-/// (E30B-006) TypeDef inheritance (`Pilot => NervStaff = @(...)`) は
-/// `mold_types` / `error_types` どちらにも入らない (Lock-F 軸 2: 親が Error
+/// TypeDef inheritance (`Pilot => NervStaff = @(...)`) は
+/// `mold_types` / `error_types` どちらにも入らない (親が Error
 /// でない inheritance edge は `StructuralSubtype` で表現される)。
 #[test]
 fn test_e30b_006_structural_summary_typedef_inheritance_classification() {
@@ -112,7 +112,7 @@ fn test_e30b_006_structural_summary_typedef_inheritance_classification() {
     );
 }
 
-/// (E30B-006) ai_format JSON は graph layer の NodeKind 統合と独立で旧 4
+/// ai_format JSON は graph layer の NodeKind 統合と独立で旧 4
 /// 分類 ("buchi_pack" / "mold" / "error" / "inheritance") を維持する
 /// (PHILOSOPHY IV 構造的イントロスペクション契約継続)。
 #[test]
@@ -133,7 +133,7 @@ Pilot => NervStaff = @(name: Str, role: Str)
     assert!(json.contains("\"kind\": \"inheritance\""), "json: {}", json);
 }
 
-/// (E30B-006) structural_summary の JSON 構造 (`version` / `stats` / 各
+/// structural_summary の JSON 構造 (`version` / `stats` / 各
 /// section name) は class-like 統合前後で変わらないこと。
 #[test]
 fn test_e30b_006_structural_summary_json_contract_preserved() {
@@ -153,7 +153,7 @@ fn test_e30b_006_structural_summary_json_contract_preserved() {
     assert!(summary.contains("\"errors\":"));
 }
 
-/// (E30B-006) 複合 fixture (4 系統を同 source に置く) で types カウントが
+/// 複合 fixture (4 系統を同 source に置く) で types カウントが
 /// 集計され、mold_types / error_types が正しく分類されることを pin する。
 #[test]
 fn test_e30b_006_structural_summary_aggregate_classification() {

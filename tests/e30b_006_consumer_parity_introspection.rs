@@ -25,7 +25,7 @@ use taida::doc::extract_docs;
 use taida::graph::verify::run_all_checks;
 use taida::parser::parse;
 
-/// (E30B-006) docs gen の `extract_docs` が 4 系統を旧 docs 構造に
+/// docs gen の `extract_docs` が 4 系統を旧 docs 構造に
 /// 振り分ける。BuchiPack → `types`、Mold → `molds`、Inheritance (Error 親
 /// 含む) → `inheritances` (`extract_docs` の旧 API contract 維持)。
 #[test]
@@ -80,7 +80,7 @@ fn test_e30b_006_doc_gen_typedef_inheritance_into_inheritances() {
     assert_eq!(doc.inheritances[0].parent, "Pilot");
 }
 
-/// (E30B-006) `taida way verify` の structural-summary は class-like 統合後も
+/// `taida way verify` の structural-summary は class-like 統合後も
 /// type-consistency check を成立させる (NodeKind 統合で graph cycle 検出が
 /// 壊れていないこと)。
 #[test]
@@ -107,8 +107,8 @@ Pilot => NervStaff = @(name: Str, role: Str)
     );
 }
 
-/// (E30B-006) 4 系統を集約した fixture で extract_docs が全部の class-like
-/// を取りこぼさず分類することを pin する (Lock-F 軸 1 統合の集約証跡)。
+/// 4 系統を集約した fixture で extract_docs が全部の class-like
+/// を取りこぼさず分類することを pin する (class-like 統合の集約証跡)。
 #[test]
 fn test_e30b_006_doc_gen_aggregate_class_like_kinds() {
     let source = "\

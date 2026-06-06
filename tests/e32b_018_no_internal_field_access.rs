@@ -106,7 +106,7 @@ stdout(err.__type)
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// E32B-054: `lower_stdout_with_tag` previously bypassed
+/// `lower_stdout_with_tag` previously bypassed
 /// `lower_field_access`'s E1960 guard for FieldAccess arguments with a
 /// compile-time-unknown tag, so `taida --no-check build native` would happily
 /// emit `taida_pack_get(obj, "__value")` and produce a binary that prints

@@ -37,7 +37,7 @@ fn taida_bin() -> PathBuf {
     common::taida_bin()
 }
 
-/// C17B-003: pre-C17 install (`.taida_installed` present, `_meta.toml`
+/// Legacy install (`.taida_installed` present, `_meta.toml`
 /// absent) + online remote + NO flags -> pessimistic refresh.
 ///
 /// Contract:
@@ -168,7 +168,7 @@ integrity = "{integrity}"
     let _ = fs::remove_dir_all(&work);
 }
 
-/// C17B-001 e2e: force-refresh + offline must not lose the user's install.
+/// e2e: force-refresh + offline must not lose the user's install.
 ///
 /// Set up a working install with a sidecar. Run `taida ingot install
 /// --force-refresh` while the remote and archive URLs point at closed
@@ -301,7 +301,7 @@ integrity = "{integrity}"
     let _ = fs::remove_dir_all(&work);
 }
 
-/// C17B-015: malformed sidecar (`schema_version = 99`) triggers the
+/// Malformed sidecar (`schema_version = 99`) triggers the
 /// "unreadable; re-extracting" path and the sidecar is rewritten with a
 /// fresh schema-1 entry recording the current remote SHA.
 #[test]

@@ -38,10 +38,9 @@ use std::time::{Duration, Instant};
 
 /// The scenario mirrors Hachikuma's Pane.Render pattern: carry a
 /// large structured buffer through a chain of `touch` calls. To keep
-/// this test scoped to C25B-029, we materialize the cell list as a
+/// this test scoped to interpreter bind-clone behavior, we materialize the cell list as a
 /// large literal instead of building it with `Append`, whose O(N²)
-/// tail-recursive accumulator cost is already pinned separately by
-/// C25B-021.
+/// tail-recursive accumulator cost is already pinned separately.
 ///
 /// Phase 5-F2-1 (2026-04-23) migrated `Value::List` to interior
 /// `Arc<Vec<Value>>`, collapsing the touch-chain cost from repeated

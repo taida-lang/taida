@@ -150,7 +150,7 @@ integrity = "fnv1a:0000000000000001"
     let _ = fs::remove_dir_all(&project);
 }
 
-/// E32B-083: non-frozen `taida ingot install` must accept legitimate drift
+/// Non-frozen `taida ingot install` must accept legitimate drift
 /// (path dep contents changed -> integrity differs) and rewrite the lockfile,
 /// instead of failing with `[E32K2_LOCKFILE_INTEGRITY_MISMATCH]` from
 /// `validate_resolved_bindings`. Triple equality is reserved for `--frozen`.

@@ -239,7 +239,7 @@ pub fn collect_entry_effective_exports(entry_path: &Path) -> Result<BTreeSet<Str
 /// Inheritance — 3 kind を統一登録)、EnumDef
 /// - Imported symbols: `>>>./other.td => @(sym)` makes `sym` available
 ///
-/// B11B-022: Import-sourced symbols are included so that re-exports are not
+/// Import-sourced symbols are included so that re-exports are not
 /// falsely flagged as ghost symbols.
 fn collect_defined_symbols(statements: &[Statement]) -> HashSet<String> {
     let mut defined = HashSet::new();

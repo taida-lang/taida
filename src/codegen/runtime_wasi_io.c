@@ -2354,3 +2354,125 @@ int64_t taida_net_http_serve(int64_t port, int64_t handler, int64_t max_requests
     taida_pack_set_tag(ok_inner, 1, WASI_RT_TAG_INT);
     return _wi_net_async_result(_wi_net_result_ok(ok_inner));
 }
+
+/* ── F55 S4: crypto symbols that produce Bytes (wasm-wasi / wasm-full) ──
+ *
+ * hexDecode / base64Decode return Lax[Bytes] and randomBytes returns Bytes,
+ * so they depend on `taida_bytes_from_raw` (defined above) which only links
+ * on wasm-wasi / wasm-full. wasm-min / wasm-edge reject these at compile
+ * time in `emit_wasm_c.rs`. The hash / hmac / equals / *Encode symbols are
+ * pure Str/Bool and live in runtime_core_wasm (all profiles).
+ *
+ * randomBytes uses the WASI `random_get` import for OS entropy. */
+
+/* random_get: (buf, buf_len) -> errno (0 == success) */
+__attribute__((import_module("wasi_snapshot_preview1"), import_name("random_get")))
+extern int32_t __wasi_random_get(unsigned char *buf, int32_t buf_len);
+
+#define TAIDA_WASI_CRYPTO_MAX (256LL * 1024LL * 1024LL)
+
+extern int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);
+extern int64_t taida_throw(int64_t error_val);
+
+static int wasi_hex_val(unsigned char c, unsigned char *out) {
+    if (c >= '0' && c <= '9') { *out = c - '0'; return 1; }
+    if (c >= 'a' && c <= 'f') { *out = c - 'a' + 10; return 1; }
+    if (c >= 'A' && c <= 'F') { *out = c - 'A' + 10; return 1; }
+    return 0;
+}
+
+/* hexDecode: Str -> Lax[Bytes]. Invalid hex -> empty Lax[Bytes]. */
+int64_t taida_crypto_hex_decode(int64_t value) {
+    const char *s = (const char *)(intptr_t)value;
+    int32_t slen = wasi_strlen(s);
+    if (slen < 0 || (slen % 2 != 0)) {
+        return taida_lax_empty(taida_bytes_default_value());
+    }
+    int32_t out_len = slen / 2;
+    unsigned char *buf = (unsigned char *)wasm_alloc((unsigned int)(out_len > 0 ? out_len : 1));
+    for (int32_t i = 0; i < out_len; i++) {
+        unsigned char hi, lo;
+        if (!wasi_hex_val((unsigned char)s[i*2], &hi) ||
+            !wasi_hex_val((unsigned char)s[i*2+1], &lo)) {
+            return taida_lax_empty(taida_bytes_default_value());
+        }
+        buf[i] = (unsigned char)((hi << 4) | lo);
+    }
+    int64_t bytes = taida_bytes_from_raw((int64_t)(intptr_t)buf, (int64_t)out_len);
+    return taida_lax_new(bytes, taida_bytes_default_value());
+}
+
+static const char TAIDA_WASI_B64_ALPHABET[64] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static int wasi_b64_val(unsigned char c, unsigned char *out) {
+    if (c >= 'A' && c <= 'Z') { *out = c - 'A'; return 1; }
+    if (c >= 'a' && c <= 'z') { *out = c - 'a' + 26; return 1; }
+    if (c >= '0' && c <= '9') { *out = c - '0' + 52; return 1; }
+    if (c == '+') { *out = 62; return 1; }
+    if (c == '/') { *out = 63; return 1; }
+    return 0;
+}
+
+/* base64Decode: Str -> Lax[Bytes]. Invalid base64 -> empty Lax[Bytes]. */
+int64_t taida_crypto_base64_decode(int64_t value) {
+    const char *s = (const char *)(intptr_t)value;
+    int32_t slen = wasi_strlen(s);
+    if (slen < 0 || (slen % 4 != 0)) {
+        return taida_lax_empty(taida_bytes_default_value());
+    }
+    if (slen == 0) {
+        return taida_lax_new(taida_bytes_from_raw((int64_t)(intptr_t)"", 0),
+                             taida_bytes_default_value());
+    }
+    int32_t n_chunks = slen / 4;
+    int32_t cap = n_chunks * 3;
+    unsigned char *buf = (unsigned char *)wasm_alloc((unsigned int)(cap > 0 ? cap : 1));
+    int32_t oi = 0;
+    for (int32_t c = 0; c < n_chunks; c++) {
+        const unsigned char *q = (const unsigned char *)(s + c * 4);
+        int is_last = (c == n_chunks - 1);
+        int pad = (q[0]=='=') + (q[1]=='=') + (q[2]=='=') + (q[3]=='=');
+        if ((pad > 0 && !is_last) || pad > 2) return taida_lax_empty(taida_bytes_default_value());
+        if ((pad == 1 && q[3] != '=') || (pad == 2 && (q[2] != '=' || q[3] != '='))) {
+            return taida_lax_empty(taida_bytes_default_value());
+        }
+        unsigned char v0, v1, v2 = 0, v3 = 0;
+        int n_data = 4 - pad;
+        if (!wasi_b64_val(q[0], &v0) || !wasi_b64_val(q[1], &v1)) return taida_lax_empty(taida_bytes_default_value());
+        if (n_data > 2 && !wasi_b64_val(q[2], &v2)) return taida_lax_empty(taida_bytes_default_value());
+        if (n_data > 3 && !wasi_b64_val(q[3], &v3)) return taida_lax_empty(taida_bytes_default_value());
+        uint32_t triple = ((uint32_t)v0 << 18) | ((uint32_t)v1 << 12) | ((uint32_t)v2 << 6) | (uint32_t)v3;
+        buf[oi++] = (unsigned char)((triple >> 16) & 0xff);
+        if (n_data >= 3) buf[oi++] = (unsigned char)((triple >> 8) & 0xff);
+        if (n_data >= 4) buf[oi++] = (unsigned char)(triple & 0xff);
+    }
+    int64_t bytes = taida_bytes_from_raw((int64_t)(intptr_t)buf, (int64_t)oi);
+    return taida_lax_new(bytes, taida_bytes_default_value());
+}
+
+/* randomBytes(n) -> Bytes via WASI random_get. Throws on entropy failure. */
+int64_t taida_crypto_random_bytes(int64_t n_val) {
+    if (n_val < 0) {
+        return taida_throw(taida_make_error((int64_t)(intptr_t)"CryptoError", (int64_t)(intptr_t)"randomBytes: count must be non-negative"));
+    }
+    if (n_val == 0) {
+        return taida_bytes_from_raw((int64_t)(intptr_t)"", 0);
+    }
+    if (n_val > TAIDA_WASI_CRYPTO_MAX) {
+        return taida_throw(taida_make_error((int64_t)(intptr_t)"CryptoError", (int64_t)(intptr_t)"randomBytes: count exceeds 256 MiB limit"));
+    }
+    unsigned char *buf = (unsigned char *)wasm_alloc((unsigned int)n_val);
+    /* random_get fills up to the requested length; loop to be safe across
+       hosts that cap a single call. */
+    int64_t got = 0;
+    while (got < n_val) {
+        int32_t want = (int32_t)((n_val - got > 0x7fffffffLL) ? 0x7fffffff : (n_val - got));
+        int32_t rc = __wasi_random_get(buf + got, want);
+        if (rc != 0) {
+            return taida_throw(taida_make_error((int64_t)(intptr_t)"CryptoError", (int64_t)(intptr_t)"randomBytes: WASI random_get failed"));
+        }
+        got += want;
+    }
+    return taida_bytes_from_raw((int64_t)(intptr_t)buf, n_val);
+}

@@ -86,7 +86,7 @@ fn manifest_dir() -> PathBuf {
 
 /// Static check: the native runtime C source assembled from
 /// core.c / os.c / tls.c / net_h1_h2.c / net_h3_quic.c must contain the
-/// D29B-003 contig primitives. This is the cheapest available regression
+/// contig primitives. This is the cheapest available regression
 /// guard against an accidental revert (e.g. a future cherry-pick or
 /// merge conflict that drops the new section).
 #[test]

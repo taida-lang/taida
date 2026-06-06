@@ -142,7 +142,7 @@ fn bytes_value_eq_compares_content() {
 /// **The hot-path test**: `Slice[bytes]` invoked through the interpreter
 /// returns a view sharing the source's buf Arc.
 ///
-/// This is the primary D29B-004 acceptance: pre-fix, `mold_eval.rs:481`
+/// This is the primary acceptance: pre-fix, `mold_eval.rs:481`
 /// allocated a fresh `Vec<u8>` per call; post-fix, it returns
 /// `Value::bytes_view` sharing the source buf Arc.
 #[test]
@@ -211,7 +211,7 @@ view <= Slice[source, 10, 100]
 /// across source and view, then by construction no new `Vec<u8>` was
 /// allocated, hence zero memcpy of body bytes (the only remaining cost
 /// is the `Arc<BytesValue>` wrapper, which is one alloc of ~24 bytes
-/// regardless of body size). This satisfies the D29B-004 acceptance
+/// regardless of body size). This satisfies the acceptance
 /// "1MB body の 1-arg handler が現状比 alloc count 0" for body bytes.
 #[test]
 fn one_mb_body_slice_is_zero_copy() {

@@ -227,7 +227,7 @@ impl Lowering {
     // `Lowering` methods with identical signatures — only the enclosing
     // file changes.
 
-    /// NB-31: Determine compile-time callable type tag for httpServe handler.
+    /// Determine compile-time callable type tag for httpServe handler.
     /// Returns:
     /// 6 (TAIDA_TAG_CLOSURE) — lambda or closure variable
     /// 10 (TAIDA_TAG_FUNC) — named function reference (user_funcs / lambda_vars)
@@ -354,7 +354,7 @@ impl Lowering {
         }
     }
 
-    /// NB-31: Determine if an expression is a known non-callable type.
+    /// Determine if an expression is a known non-callable type.
     /// Returns Some(tag) for statically known non-callable, None for unknown.
     /// Leverages existing expr_returns_float / expr_is_string_full / expr_is_bool /
     /// expr_is_pack / expr_is_list which already handle literals, variables, BinaryOp,
@@ -474,7 +474,7 @@ impl Lowering {
         }
     }
 
-    /// NB-31: 式が Int を返すかどうかを判定（noncallable_type_tag 用）
+    /// 式が Int を返すかどうかを判定（noncallable_type_tag 用）
     /// arithmetic 演算、Int-returning メソッド/関数、int_vars を網羅する。
     ///
     /// reopen 4 (2026-04-22): visibility widened from

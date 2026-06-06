@@ -474,7 +474,7 @@ impl Lowering {
         body.iter().any(|s| stmt_hits(s, param_names))
     }
 
-    /// NB-14: Get the runtime param tag IrVar for an expression, if it's a function
+    /// Get the runtime param tag IrVar for an expression, if it's a function
     /// parameter with a caller-propagated type tag.
     /// Returns Some(tag_var) if the expression is an Ident whose name is in param_tag_vars.
     pub(crate) fn get_param_tag_var(&self, expr: &Expr) -> Option<IrVar> {
@@ -493,7 +493,7 @@ impl Lowering {
         matches!(arg, Expr::Ident(n, _) if self.param_tag_vars.contains_key(n))
     }
 
-    /// NB-14: Check whether any argument requires call-site tag propagation.
+    /// Check whether any argument requires call-site tag propagation.
     /// Returns true if at least one arg has a non-INT compile-time tag, a transitive
     /// param_tag_var, or is a FuncCall to a user function (which may carry a return tag).
     pub(super) fn needs_call_arg_tags(&self, args: &[Expr]) -> bool {
@@ -520,7 +520,7 @@ impl Lowering {
         false
     }
 
-    /// NB-14: Emit taida_set_call_arg_tag() for each argument with a known non-default
+    /// Emit taida_set_call_arg_tag() for each argument with a known non-default
     /// type tag before a CallUser. This propagates Bool/Float/Str/etc. type info from
     /// the caller to the callee so that pack field tags can be set correctly.
     /// Note: TAG_FRAME_SIZE (256) is the maximum number of tagged arguments per call.
@@ -601,7 +601,7 @@ impl Lowering {
         }
     }
 
-    /// NB-14: Emit taida_set_call_arg_tag() for arguments whose type was determined
+    /// Emit taida_set_call_arg_tag() for arguments whose type was determined
     /// AFTER lowering (via return type tag from a nested CallUser). This complements
     /// emit_call_arg_tags which handles compile-time known types before lowering.
     pub(super) fn emit_post_lower_arg_tags(

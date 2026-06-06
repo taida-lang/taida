@@ -835,7 +835,7 @@ fn test_b11_9d_facade_hidden_symbol_rejected_all_backends() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// B11B-021: Importing a symbol that is declared in the facade but does NOT exist
+/// Importing a symbol that is declared in the facade but does NOT exist
 /// in the entry module must be rejected at compile-time across all backends.
 #[test]
 fn test_b11_021_facade_missing_symbol_rejected_all_backends() {
@@ -1016,7 +1016,7 @@ fn test_b11_9d_facade_public_symbol_accepted() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// B11B-022: Re-exported symbols must be accepted by all 4 backends.
+/// Re-exported symbols must be accepted by all 4 backends.
 /// When the entry module imports a symbol from a helper and re-exports it,
 /// the facade check must not flag it as a ghost symbol.
 #[test]
@@ -1115,7 +1115,7 @@ fn test_b11_022_facade_reexport_accepted_all_backends() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// B11B-025: Identity-only facade (no symbols declared) should not interfere
+/// Identity-only facade (no symbols declared) should not interfere
 /// with imports. When packages.tdm has `<<<@version owner/name` without @(symbols),
 /// the entry module's own <<< controls what is importable.
 #[test]
@@ -1190,7 +1190,7 @@ fn test_b11_025_identity_only_facade_allows_entry_exports() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// B11B-025: Submodule import should bypass facade check.
+/// Submodule import should bypass facade check.
 /// When importing `acme/lib/sub`, the facade check on `acme/lib` should not apply
 /// because this is a submodule import, not a package root import.
 #[test]

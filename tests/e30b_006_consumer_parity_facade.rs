@@ -21,7 +21,7 @@ fn make_test_dir(name: &str) -> std::path::PathBuf {
     dir
 }
 
-/// (E30B-006) BuchiPack kind class-like (`Pilot = @(...)`) は
+/// BuchiPack kind class-like (`Pilot = @(...)`) は
 /// classify_symbol_in_module で `SymbolKind::TypeDef` を返す
 /// (旧挙動と整合、regression guard)。
 #[test]
@@ -34,9 +34,9 @@ fn test_e30b_006_facade_buchi_pack_classified_as_type_def() {
     assert_eq!(kind, Some(SymbolKind::TypeDef));
 }
 
-/// (E30B-006 silent bug 解消) Mold kind class-like (`Mold[T] => Box[T] = @(...)`)
+/// Mold kind class-like (`Mold[T] => Box[T] = @(...)`)
 /// は classify_symbol_in_module で `SymbolKind::TypeDef` を返す。
-/// 旧挙動では Function fallback (Sub-step 2.1 で意図的に維持された silent
+/// 旧挙動では Function fallback (意図的に維持された silent
 /// bug) に落ちていた。
 #[test]
 fn test_e30b_006_facade_mold_classified_as_type_def() {
@@ -52,7 +52,7 @@ fn test_e30b_006_facade_mold_classified_as_type_def() {
     );
 }
 
-/// (E30B-006) Inheritance kind class-like (`Pilot => NervStaff = @(...)`) は
+/// Inheritance kind class-like (`Pilot => NervStaff = @(...)`) は
 /// classify_symbol_in_module で `SymbolKind::TypeDef` を返す (旧挙動と整合)。
 #[test]
 fn test_e30b_006_facade_inheritance_classified_as_type_def() {
@@ -68,7 +68,7 @@ fn test_e30b_006_facade_inheritance_classified_as_type_def() {
     assert_eq!(kind, Some(SymbolKind::TypeDef));
 }
 
-/// (E30B-006) Error 継承 (`Error => NotFound = @(...)`) は Inheritance kind の
+/// Error 継承 (`Error => NotFound = @(...)`) は Inheritance kind の
 /// 一種なので classify_symbol_in_module で `SymbolKind::TypeDef` を返す。
 #[test]
 fn test_e30b_006_facade_error_inheritance_classified_as_type_def() {
@@ -80,7 +80,7 @@ fn test_e30b_006_facade_error_inheritance_classified_as_type_def() {
     assert_eq!(kind, Some(SymbolKind::TypeDef));
 }
 
-/// (E30B-006 silent bug 解消) Mold kind class-like を facade-export して
+/// Mold kind class-like を facade-export して
 /// validate_facade 経由で参照したとき、ghost symbol violation が発生しない
 /// (旧挙動では Mold kind を defined symbol に登録していなかったため
 /// `FacadeViolation::GhostSymbol` が誤発火していた可能性がある)。
@@ -99,8 +99,8 @@ fn test_e30b_006_facade_mold_kind_not_ghost_symbol() {
     );
 }
 
-/// (E30B-006) FuncDef / Assignment の SymbolKind 分類は変更されないこと
-/// (regression guard、Phase 2 Sub-step 2.1 で land した分類挙動を継承)。
+/// FuncDef / Assignment の SymbolKind 分類は変更されないこと
+/// (regression guard、既存の分類挙動を継承)。
 #[test]
 fn test_e30b_006_facade_function_value_classification_unchanged() {
     let dir = make_test_dir("function_value");
@@ -121,9 +121,9 @@ fn test_e30b_006_facade_function_value_classification_unchanged() {
     );
 }
 
-/// (E30B-006) 4 系統 (BuchiPack / Mold / Inheritance + Error 継承) を
+/// 4 系統 (BuchiPack / Mold / Inheritance + Error 継承) を
 /// 同じ source に置いた集約 fixture で、全てが SymbolKind::TypeDef として
-/// 一貫分類されることを pin する (Lock-F 軸 1 統合の証跡)。
+/// 一貫分類されることを pin する (class-like 統合の証跡)。
 #[test]
 fn test_e30b_006_facade_all_class_like_kinds_uniform_classification() {
     let dir = make_test_dir("aggregate");
