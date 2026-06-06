@@ -1,6 +1,6 @@
 //! `taida-addon` — Taida Lang addon authoring crate (ABI v1).
 //!
-//! This is the **addon foundation** referenced by RC1 (`taida-lang/addon-rs`).
+//! This is the **addon foundation** (`taida-lang/addon-rs`) for building native Rust addons.
 //! Authors of native Rust addons depend on this crate to build cdylib
 //! binaries that the Taida Native backend loader can discover and call.
 //!
@@ -161,13 +161,13 @@ mod tests {
 
     #[test]
     fn abi_version_is_locked_to_one() {
-        // RC1_DESIGN.md Section C — ABI v1 freeze, item 1.
+        // ABI v1 freeze, item 1: version must be exactly 1.
         assert_eq!(TAIDA_ADDON_ABI_VERSION, 1);
     }
 
     #[test]
     fn entry_symbol_is_taida_addon_get_v1() {
-        // RC1_DESIGN.md Section C — ABI v1 freeze, item 2.
+        // ABI v1 freeze, item 2: entry symbol name must be exactly this.
         assert_eq!(TAIDA_ADDON_ENTRY_SYMBOL, "taida_addon_get_v1");
     }
 
@@ -284,11 +284,12 @@ mod tests {
 
     // ── Host table layout test ─────────────────────────────────────
     //
-    // Phase 3 replaces the Phase 1 `*const c_void` reservation slots with
-    // concrete extern "C" fn signatures. We build a throwaway table here
-    // with stub callbacks to prove the struct is constructible and
-    // pinned in field order. Any reshuffling in `abi.rs` makes this
-    // test fail to compile, which is exactly what we want.
+    // The ABI v1 value-bridge freeze replaced the initial opaque
+    // `*const c_void` reservation slots with concrete extern "C" fn
+    // signatures. We build a throwaway table here with stub callbacks to
+    // prove the struct is constructible and pinned in field order. Any
+    // reshuffling in `abi.rs` makes this test fail to compile, which is
+    // exactly what we want.
 
     extern "C" fn stub_new_unit(_host: *const TaidaHostV1) -> *mut TaidaAddonValueV1 {
         core::ptr::null_mut()
@@ -362,9 +363,8 @@ mod tests {
 
     #[test]
     fn host_table_is_repr_c_and_minimal() {
-        // RC1_DESIGN.md Section G + Phase 3 Lock: minimal host capability
-        // table with concrete signatures. No logging slot, no async
-        // scheduler hook.
+        // ABI v1 frozen host capability table with concrete signatures.
+        // No logging slot, no async scheduler hook.
         let host = stub_host();
         assert_eq!(host.abi_version, 1);
 
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn value_tag_discriminants_are_frozen() {
-        // Phase 3 Lock: these wire values are part of the ABI surface.
+        // Frozen ABI v1 contract: these wire values are part of the ABI surface.
         // Bumping any of them requires a new entry symbol name.
         assert_eq!(TaidaAddonValueTag::Unit as u32, 0);
         assert_eq!(TaidaAddonValueTag::Int as u32, 1);
@@ -422,8 +422,8 @@ mod tests {
 
     #[test]
     fn value_header_layout_matches_phase_one_reservation() {
-        // Phase 3 must not change the byte layout of the header. Phase 1
-        // addons saw (tag: u32, _reserved: u32, payload: *mut c_void).
+        // The ABI v1 value-bridge freeze must not change the byte layout of
+        // the header: (tag: u32, _reserved: u32, payload: *mut c_void).
         use core::mem::{align_of, size_of};
 
         // u32 + u32 = 8 bytes, then pointer-aligned payload.

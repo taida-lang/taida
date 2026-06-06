@@ -1,18 +1,17 @@
-//! `taida-addon-sample` — minimal sample addon for RC1.
+//! `taida-addon-sample` — minimal sample addon exercising the frozen ABI v1.
 //!
 //! This is the **smallest possible addon** that exercises the frozen
 //! ABI v1 contract. It exists for two reasons:
 //!
 //! 1. To prove that `taida-addon`'s `declare_addon!` macro produces a
 //!    well-formed `taida_addon_get_v1` symbol.
-//! 2. To give RC1 Phase 2 / Phase 3 (Native loader + value bridge) a
-//!    real `cdylib` to dlopen.
+//! 2. To give the native loader a real `cdylib` to dlopen.
 //!
 //! Surface (deliberately tiny):
 //!
 //! - `noop`: arity 0, returns `Ok` and does nothing.
 //! - `echo`: arity 1, round-trips its single argument through the
-//!   Phase 3 value bridge: the addon reads the borrowed input via
+//!   ABI v1 value bridge: the addon reads the borrowed input via
 //!   [`taida_addon::bridge`], rebuilds an equivalent host-owned value
 //!   via the host capability table, and writes it into `*out_value`.
 //!
@@ -23,11 +22,11 @@
 //!
 //! The `echo` implementation needs the `TaidaHostV1` callback table to
 //! build return values, but the C ABI call signature doesn't pass the
-//! host pointer per-call (RC1 locked the Phase 1 shape and we don't
-//! want to reshuffle it for Phase 3). Instead, the addon captures the
-//! host pointer in a `static AtomicPtr` during its `init` callback.
-//! RC1 guarantees `init` is called exactly once before any function
-//! call (`.dev/RC1_DESIGN.md` Section C).
+//! host pointer per-call — the ABI v1 contract froze the per-call
+//! signature without a host pointer argument. Instead, the addon captures
+//! the host pointer in a `static AtomicPtr` during its `init` callback.
+//! The ABI v1 contract guarantees `init` is called exactly once before
+//! any function call.
 
 use core::ffi::c_char;
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -39,11 +38,10 @@ use taida_addon::{
 };
 
 /// Captured host callback table. Populated by [`sample_init`] and read
-/// by per-call entry points. RC1 Phase 3 ownership contract: the host
-/// table outlives the addon, so storing a raw pointer here is sound as
-/// long as the loader keeps the library loaded while calls are in
-/// flight (which it always does — calls happen through a
-/// `LoadedAddon` borrow).
+/// by per-call entry points. ABI v1 ownership contract: the host table
+/// outlives the addon, so storing a raw pointer here is sound as long as
+/// the loader keeps the library loaded while calls are in flight (which
+/// it always does — calls happen through a `LoadedAddon` borrow).
 static HOST_PTR: AtomicPtr<TaidaHostV1> = AtomicPtr::new(core::ptr::null_mut());
 
 /// One-shot init callback. The host calls this exactly once after a
@@ -56,8 +54,8 @@ extern "C" fn sample_init(host: *const TaidaHostV1) -> TaidaAddonStatus {
         return TaidaAddonStatus::NullPointer;
     }
     // SAFETY: we only store the pointer; we read it back with matching
-    // `unsafe` at call time. The host promises the table is valid for
-    // the addon's lifetime (see RC1 design lock).
+    // `unsafe` at call time. The host guarantees the table is valid for
+    // the entire addon lifetime (ABI v1 ownership contract).
     HOST_PTR.store(host as *mut _, Ordering::Release);
     TaidaAddonStatus::Ok
 }
@@ -76,8 +74,7 @@ extern "C" fn noop(
 
 /// Rebuild a host-owned copy of `src` using the provided builder. This
 /// is a deliberately simple identity mapping — it's the minimum
-/// round-trip we need to prove the Phase 3 value bridge works end to
-/// end.
+/// round-trip needed to prove the ABI v1 value bridge works end to end.
 ///
 /// Returns `None` when the input value has an unsupported kind (caller
 /// should surface `TaidaAddonStatus::UnsupportedValue`).
@@ -170,9 +167,9 @@ extern "C" fn echo(
         return TaidaAddonStatus::NullPointer;
     }
 
-    // Pull the host table captured during init. RC1 guarantees init
-    // runs first, so this should be non-null by the time any function
-    // call reaches us.
+    // Pull the host table captured during init. The ABI v1 contract
+    // guarantees init runs before any function call, so this should be
+    // non-null by the time any function call reaches us.
     let host_raw = HOST_PTR.load(Ordering::Acquire);
     if host_raw.is_null() {
         return TaidaAddonStatus::InvalidState;
@@ -223,8 +220,8 @@ pub static SAMPLE_FUNCTIONS: &[TaidaAddonFunctionV1] = &[
 // Wires up `taida_addon_get_v1` for the cdylib build.
 //
 // The macro emits a `#[no_mangle] pub extern "C" fn taida_addon_get_v1`
-// at the crate root. The Native loader (RC1 Phase 2) resolves this
-// exact symbol from the produced shared object.
+// at the crate root. The native loader resolves this exact symbol from
+// the produced shared object.
 taida_addon::declare_addon! {
     name: "taida-lang/addon-rs-sample",
     functions: SAMPLE_FUNCTIONS,
@@ -272,9 +269,9 @@ mod tests {
 
     #[test]
     fn descriptor_init_is_wired_up() {
-        // Phase 3: the sample addon now has a real `init` callback
-        // (Phase 1 had `init: None`). This pins the wire-up so future
-        // refactors can't silently drop it.
+        // The sample addon has a real `init` callback wired up (earlier
+        // it used `init: None`). This pins the wire-up so future refactors
+        // can't silently drop it.
         let ptr = unsafe { taida_addon_get_v1() };
         let d = unsafe { &*ptr };
         assert!(d.init.is_some());
