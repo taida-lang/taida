@@ -283,6 +283,31 @@ static taida_val taida_ekind_to_tag(uint32_t ek) {
     return k == TAIDA_EKIND_UNKNOWN ? TAIDA_TAG_UNKNOWN : (taida_val)k;
 }
 
+// Project one element (with its source-recorded kind) into a derived
+// container, then push it. The single write-side entry point for the
+// array-carrying paths of every list/Set projection; when the source is
+// NOT an array carrier the caller keeps its legacy single-tag retain and
+// must not call this.
+static void taida_list_elem_retain(taida_val elem, taida_val elem_tag);      // defined below
+taida_ptr taida_list_push(taida_ptr list_ptr, taida_val item);               // defined below
+static void taida_elem_tags_note_push_ek(taida_val *c, uint32_t ek);         // defined below
+static taida_val taida_list_project_push(taida_val dst, taida_val item,
+                                         const taida_val *src, taida_val src_idx) {
+    uint32_t ek = taida_elem_kind_at(src, src_idx);
+    taida_list_elem_retain(item, taida_ekind_to_tag(ek));
+    taida_elem_tags_note_push_ek((taida_val *)dst, ek);
+    return taida_list_push(dst, item);
+}
+
+// Kind entry → pack field tag domain: known kinds map directly except
+// ENUM (the pack tag's display consumers don't understand 9 — fall back
+// to the caller-supplied legacy propagation tag).
+static taida_val taida_ekind_to_pack_tag(uint32_t ek, taida_val fallback) {
+    uint32_t k = TAIDA_EKIND_KIND(ek);
+    if (k == TAIDA_EKIND_UNKNOWN || k == (uint32_t)TAIDA_TAG_ENUM) return fallback;
+    return (taida_val)k;
+}
+
 // Record the kind entry for the element about to be pushed (pre-push
 // contract: the append index is c[2]). Mirrors taida_list_set_elem_tag
 // but takes a full kind|aux entry so enum type ids survive container
@@ -823,6 +848,7 @@ taida_ptr taida_list_get(taida_ptr list_ptr, taida_val index);
 taida_val taida_set_new(void);
 taida_val taida_set_has(taida_ptr set_ptr, taida_val item);
 taida_ptr taida_set_remove(taida_ptr set_ptr, taida_val item);
+taida_val taida_set_remove_k(taida_val set_ptr, taida_val item, uint32_t probe_ek);
 taida_ptr taida_set_add(taida_ptr set_ptr, taida_val item);
 void taida_set_set_elem_tag(taida_ptr set_ptr, taida_val tag);
 // Str state check methods
@@ -3854,13 +3880,17 @@ taida_val taida_list_sum(taida_val list_ptr) {
 taida_val taida_list_reverse(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
     taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     for (taida_val i = len - 1; i >= 0; i--) {
-        taida_list_elem_retain(list[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, list[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+        } else {
+            taida_list_elem_retain(list[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, list[4 + i]);
+        }
     }
     return new_list;
 }
@@ -3895,14 +3925,18 @@ taida_val taida_list_map(taida_val list_ptr, taida_val fn_ptr) {
 taida_val taida_list_filter(taida_val list_ptr, taida_val fn_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
     taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     for (taida_val i = 0; i < len; i++) {
         if (taida_invoke_callback1(fn_ptr, list[4 + i])) {
-            taida_list_elem_retain(list[4 + i], elem_tag);
-            new_list = taida_list_push(new_list, list[4 + i]);
+            if (src_tagged) {
+                new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+            } else {
+                taida_list_elem_retain(list[4 + i], elem_tag);
+                new_list = taida_list_push(new_list, list[4 + i]);
+            }
         }
     }
     return new_list;
@@ -4149,6 +4183,7 @@ taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end) {
     if (TAIDA_IS_LIST(value)) {
         taida_val *list = (taida_val*)value;
         taida_val len = list[2];
+        int src_tagged = taida_elem_slot_is_array(list[3]);
         taida_val elem_tag = taida_elem_tag_for_propagation(list);
         taida_val s = start;
         taida_val e = end;
@@ -4157,11 +4192,14 @@ taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end) {
         if (e < 0 || e > len) e = len;
         if (e < s) e = s;
         taida_val out = taida_list_new();
-        taida_val *ol = (taida_val*)out;
-        ol[3] = elem_tag;  // propagate elem_type_tag
+        if (!src_tagged) ((taida_val*)out)[3] = elem_tag;  // propagate elem_type_tag
         for (taida_val i = s; i < e; i++) {
-            taida_list_elem_retain(list[4 + i], elem_tag);
-            out = taida_list_push(out, list[4 + i]);
+            if (src_tagged) {
+                out = taida_list_project_push(out, list[4 + i], list, i);
+            } else {
+                taida_list_elem_retain(list[4 + i], elem_tag);
+                out = taida_list_push(out, list[4 + i]);
+            }
         }
         return out;
     }
@@ -5734,17 +5772,25 @@ taida_val taida_list_concat(taida_val list1, taida_val list2) {
     taida_val *l1 = (taida_val*)list1;
     taida_val *l2 = (taida_val*)list2;
     taida_val len1 = l1[2], len2 = l2[2];
+    int src_tagged = taida_elem_slot_is_array(l1[3]) || taida_elem_slot_is_array(l2[3]);
     taida_val elem_tag = taida_elem_tag_for_propagation(l1);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag from first list
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag from first list
     for (taida_val i = 0; i < len1; i++) {
-        taida_list_elem_retain(l1[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, l1[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, l1[4 + i], l1, i);
+        } else {
+            taida_list_elem_retain(l1[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, l1[4 + i]);
+        }
     }
     for (taida_val i = 0; i < len2; i++) {
-        taida_list_elem_retain(l2[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, l2[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, l2[4 + i], l2, i);
+        } else {
+            taida_list_elem_retain(l2[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, l2[4 + i]);
+        }
     }
     return new_list;
 }
@@ -5791,27 +5837,47 @@ taida_val taida_list_join(taida_val list_ptr, const char* sep) {
 taida_val taida_list_sort(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
     taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     if (len == 0) return new_list;
     // M-07: Overflow guard + NULL check on items allocation.
     size_t items_size = taida_safe_mul((size_t)len, sizeof(taida_val), "list_sort items");
     taida_val *items = (taida_val*)TAIDA_MALLOC(items_size, "list_sort");
+    // Kinds ride the permutation so an array-carrying source keeps each
+    // element's identity through the reorder.
+    uint32_t *eks = NULL;
+    if (src_tagged) {
+        eks = (uint32_t*)TAIDA_MALLOC(taida_safe_mul((size_t)len, sizeof(uint32_t), "list_sort kinds"), "list_sort kinds");
+        for (taida_val i = 0; i < len; i++) eks[i] = taida_elem_kind_at(list, i);
+    }
     for (taida_val i = 0; i < len; i++) items[i] = list[4 + i];
     // Simple insertion sort
     for (taida_val i = 1; i < len; i++) {
         taida_val key = items[i];
+        uint32_t kek = eks ? eks[i] : 0;
         taida_val j = i - 1;
-        while (j >= 0 && items[j] > key) { items[j+1] = items[j]; j--; }
+        while (j >= 0 && items[j] > key) {
+            items[j+1] = items[j];
+            if (eks) eks[j+1] = eks[j];
+            j--;
+        }
         items[j+1] = key;
+        if (eks) eks[j+1] = kek;
     }
     for (taida_val i = 0; i < len; i++) {
-        taida_list_elem_retain(items[i], elem_tag);
-        new_list = taida_list_push(new_list, items[i]);
+        if (src_tagged) {
+            taida_list_elem_retain(items[i], taida_ekind_to_tag(eks[i]));
+            taida_elem_tags_note_push_ek((taida_val*)new_list, eks[i]);
+            new_list = taida_list_push(new_list, items[i]);
+        } else {
+            taida_list_elem_retain(items[i], elem_tag);
+            new_list = taida_list_push(new_list, items[i]);
+        }
     }
     free(items);
+    free(eks);
     return new_list;
 }
 
@@ -6362,22 +6428,29 @@ taida_val taida_list_flatten(taida_val list_ptr) {
         if (TAIDA_IS_LIST(item)) {
             taida_val *sub = (taida_val*)item;
             taida_val slen = sub[2];
+            int sub_tagged = taida_elem_slot_is_array(sub[3]);
             taida_val sub_tag = taida_elem_tag_for_propagation(sub);
-            // Propagate inner list's elem_tag to result
-            if (i == 0) {
+            // Propagate inner list's elem_tag to result (array carriers
+            // project per element below instead of stamping one tag).
+            if (i == 0 && !sub_tagged) {
                 taida_val *nl = (taida_val*)new_list;
                 nl[3] = sub_tag;
             }
             for (taida_val j = 0; j < slen; j++) {
-                taida_list_elem_retain(sub[4 + j], sub_tag);
-                new_list = taida_list_push(new_list, sub[4 + j]);
+                if (sub_tagged) {
+                    new_list = taida_list_project_push(new_list, sub[4 + j], sub, j);
+                } else {
+                    taida_list_elem_retain(sub[4 + j], sub_tag);
+                    new_list = taida_list_push(new_list, sub[4 + j]);
+                }
             }
         } else {
-            // Non-list element: retain using its per-element kind (falls
-            // back to the outer list's homogeneous tag / UNKNOWN through
-            // taida_elem_kind_at, so an array-carrying outer list retains
-            // heap elements precisely instead of leaking them).
-            taida_list_elem_retain(item, taida_ekind_to_tag(taida_elem_kind_at(list, i)));
+            // Non-list element: project under its recorded kind so an
+            // array-carrying outer list keeps each element's identity
+            // (and retains heap elements precisely).
+            uint32_t ek = taida_elem_kind_at(list, i);
+            taida_list_elem_retain(item, taida_ekind_to_tag(ek));
+            taida_elem_tags_note_push_ek((taida_val*)new_list, ek);
             new_list = taida_list_push(new_list, item);
         }
     }
@@ -6411,15 +6484,22 @@ taida_val taida_list_min(taida_val list_ptr) {
 taida_val taida_list_append(taida_val list_ptr, taida_val item) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
     taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     for (taida_val i = 0; i < len; i++) {
-        taida_list_elem_retain(list[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, list[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+        } else {
+            taida_list_elem_retain(list[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, list[4 + i]);
+        }
     }
-    // New item: no retain (ownership transferred from caller)
+    // New item: no retain (ownership transferred from caller). The
+    // appended value's kind is unknown at this boundary — record it as
+    // such so an array-carrying result stays honest.
+    if (src_tagged) taida_elem_tags_note_push_ek((taida_val*)new_list, TAIDA_EKIND_UNKNOWN);
     new_list = taida_list_push(new_list, item);
     return new_list;
 }
@@ -6427,15 +6507,21 @@ taida_val taida_list_append(taida_val list_ptr, taida_val item) {
 taida_val taida_list_prepend(taida_val list_ptr, taida_val item) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
     taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
-    // New item: no retain (ownership transferred from caller)
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
+    // New item: no retain (ownership transferred from caller); its kind
+    // is unknown at this boundary.
+    if (src_tagged) taida_elem_tags_note_push_ek((taida_val*)new_list, TAIDA_EKIND_UNKNOWN);
     new_list = taida_list_push(new_list, item);
     for (taida_val i = 0; i < len; i++) {
-        taida_list_elem_retain(list[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, list[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+        } else {
+            taida_list_elem_retain(list[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, list[4 + i]);
+        }
     }
     return new_list;
 }
@@ -6443,27 +6529,45 @@ taida_val taida_list_prepend(taida_val list_ptr, taida_val item) {
 taida_val taida_list_sort_desc(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
     taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     if (len == 0) return new_list;
     // M-07: Overflow guard + NULL check on items allocation.
     size_t items_size = taida_safe_mul((size_t)len, sizeof(taida_val), "list_sort_desc items");
     taida_val *items = (taida_val*)TAIDA_MALLOC(items_size, "list_sort_desc");
+    uint32_t *eks = NULL;
+    if (src_tagged) {
+        eks = (uint32_t*)TAIDA_MALLOC(taida_safe_mul((size_t)len, sizeof(uint32_t), "list_sort_desc kinds"), "list_sort_desc kinds");
+        for (taida_val i = 0; i < len; i++) eks[i] = taida_elem_kind_at(list, i);
+    }
     for (taida_val i = 0; i < len; i++) items[i] = list[4 + i];
     // Insertion sort descending
     for (taida_val i = 1; i < len; i++) {
         taida_val key = items[i];
+        uint32_t kek = eks ? eks[i] : 0;
         taida_val j = i - 1;
-        while (j >= 0 && items[j] < key) { items[j+1] = items[j]; j--; }
+        while (j >= 0 && items[j] < key) {
+            items[j+1] = items[j];
+            if (eks) eks[j+1] = eks[j];
+            j--;
+        }
         items[j+1] = key;
+        if (eks) eks[j+1] = kek;
     }
     for (taida_val i = 0; i < len; i++) {
-        taida_list_elem_retain(items[i], elem_tag);
-        new_list = taida_list_push(new_list, items[i]);
+        if (src_tagged) {
+            taida_list_elem_retain(items[i], taida_ekind_to_tag(eks[i]));
+            taida_elem_tags_note_push_ek((taida_val*)new_list, eks[i]);
+            new_list = taida_list_push(new_list, items[i]);
+        } else {
+            taida_list_elem_retain(items[i], elem_tag);
+            new_list = taida_list_push(new_list, items[i]);
+        }
     }
     free(items);
+    free(eks);
     return new_list;
 }
 
@@ -6475,10 +6579,10 @@ taida_val taida_list_sort_desc(taida_val list_ptr) {
 taida_val taida_list_unique_by(taida_val list_ptr, taida_val fn_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
     taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl_init = (taida_val*)new_list;
-    nl_init[3] = elem_tag;
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;
     if (len == 0) return new_list;
     // F54B-016 (C2): dedup keys by STRUCTURE (was raw `==`), mirroring the
     // interpreter Unique[](by) path (mold_eval.rs): a fingerprint seen-set while
@@ -6508,8 +6612,12 @@ taida_val taida_list_unique_by(taida_val list_ptr, taida_val fn_ptr) {
         }
         if (!dup) {
             seen_keys[seen_count++] = key;
-            taida_list_elem_retain(item, elem_tag);
-            new_list = taida_list_push(new_list, item);
+            if (src_tagged) {
+                new_list = taida_list_project_push(new_list, item, list, i);
+            } else {
+                taida_list_elem_retain(item, elem_tag);
+                new_list = taida_list_push(new_list, item);
+            }
         }
     }
     if (use_hash) taida_seen_free(&seen);
@@ -6522,14 +6630,19 @@ taida_val taida_list_unique_by(taida_val list_ptr, taida_val fn_ptr) {
 taida_val taida_list_sort_by(taida_val list_ptr, taida_val fn_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
     taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;
     if (len == 0) return new_list;
     size_t items_size = taida_safe_mul((size_t)len, sizeof(taida_val), "list_sort_by items");
     taida_val *items = (taida_val*)TAIDA_MALLOC(items_size, "list_sort_by items");
     taida_val *keys = (taida_val*)TAIDA_MALLOC(items_size, "list_sort_by keys");
+    uint32_t *eks = NULL;
+    if (src_tagged) {
+        eks = (uint32_t*)TAIDA_MALLOC(taida_safe_mul((size_t)len, sizeof(uint32_t), "list_sort_by kinds"), "list_sort_by kinds");
+        for (taida_val i = 0; i < len; i++) eks[i] = taida_elem_kind_at(list, i);
+    }
     for (taida_val i = 0; i < len; i++) {
         items[i] = list[4 + i];
         keys[i] = taida_invoke_callback1(fn_ptr, items[i]);
@@ -6538,21 +6651,31 @@ taida_val taida_list_sort_by(taida_val list_ptr, taida_val fn_ptr) {
     for (taida_val i = 1; i < len; i++) {
         taida_val kkey = keys[i];
         taida_val kitem = items[i];
+        uint32_t kek = eks ? eks[i] : 0;
         taida_val j = i - 1;
         while (j >= 0 && keys[j] > kkey) {
             keys[j+1] = keys[j];
             items[j+1] = items[j];
+            if (eks) eks[j+1] = eks[j];
             j--;
         }
         keys[j+1] = kkey;
         items[j+1] = kitem;
+        if (eks) eks[j+1] = kek;
     }
     for (taida_val i = 0; i < len; i++) {
-        taida_list_elem_retain(items[i], elem_tag);
-        new_list = taida_list_push(new_list, items[i]);
+        if (src_tagged) {
+            taida_list_elem_retain(items[i], taida_ekind_to_tag(eks[i]));
+            taida_elem_tags_note_push_ek((taida_val*)new_list, eks[i]);
+            new_list = taida_list_push(new_list, items[i]);
+        } else {
+            taida_list_elem_retain(items[i], elem_tag);
+            new_list = taida_list_push(new_list, items[i]);
+        }
     }
     free(items);
     free(keys);
+    free(eks);
     return new_list;
 }
 
@@ -6613,15 +6736,19 @@ taida_val taida_list_foldr(taida_val list_ptr, taida_val init, taida_val fn_ptr)
 taida_val taida_list_take(taida_val list_ptr, taida_val n) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
     taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val take_n = n < len ? n : len;
     if (take_n < 0) take_n = 0;
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     for (taida_val i = 0; i < take_n; i++) {
-        taida_list_elem_retain(list[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, list[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+        } else {
+            taida_list_elem_retain(list[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, list[4 + i]);
+        }
     }
     return new_list;
 }
@@ -6630,14 +6757,18 @@ taida_val taida_list_take(taida_val list_ptr, taida_val n) {
 taida_val taida_list_take_while(taida_val list_ptr, taida_val fn_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
     taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     for (taida_val i = 0; i < len; i++) {
         if (taida_invoke_callback1(fn_ptr, list[4 + i])) {
-            taida_list_elem_retain(list[4 + i], elem_tag);
-            new_list = taida_list_push(new_list, list[4 + i]);
+            if (src_tagged) {
+                new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+            } else {
+                taida_list_elem_retain(list[4 + i], elem_tag);
+                new_list = taida_list_push(new_list, list[4 + i]);
+            }
         } else {
             break;
         }
@@ -6649,15 +6780,19 @@ taida_val taida_list_take_while(taida_val list_ptr, taida_val fn_ptr) {
 taida_val taida_list_drop(taida_val list_ptr, taida_val n) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
     taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val skip = n < len ? n : len;
     if (skip < 0) skip = 0;
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     for (taida_val i = skip; i < len; i++) {
-        taida_list_elem_retain(list[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, list[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+        } else {
+            taida_list_elem_retain(list[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, list[4 + i]);
+        }
     }
     return new_list;
 }
@@ -6666,18 +6801,22 @@ taida_val taida_list_drop(taida_val list_ptr, taida_val n) {
 taida_val taida_list_drop_while(taida_val list_ptr, taida_val fn_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
     taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     taida_val dropping = 1;
     for (taida_val i = 0; i < len; i++) {
         if (dropping && taida_invoke_callback1(fn_ptr, list[4 + i])) {
             continue;
         }
         dropping = 0;
-        taida_list_elem_retain(list[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, list[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+        } else {
+            taida_list_elem_retain(list[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, list[4 + i]);
+        }
     }
     return new_list;
 }
@@ -6713,23 +6852,27 @@ taida_val taida_list_zip(taida_val list1, taida_val list2) {
     taida_val len1 = l1[2], len2 = l2[2];
     taida_val min_len = len1 < len2 ? len1 : len2;
     taida_val elem_tag1 = taida_elem_tag_for_propagation(l1);  // ソースリスト1の要素型タグ
-    taida_val elem_tag2 = l2[3];  // ソースリスト2の要素型タグ
+    taida_val elem_tag2 = taida_elem_tag_for_propagation(l2);  // ソースリスト2の要素型タグ
     taida_val new_list = taida_list_new();
     taida_val *nl = (taida_val*)new_list;
     nl[3] = TAIDA_TAG_PACK;  // zip produces Pack elements
     for (taida_val i = 0; i < min_len; i++) {
-        // Create a BuchiPack with fields: first, second
+        // Create a BuchiPack with fields: first, second. Field tags come
+        // from each element's recorded kind (per-element for array
+        // carriers; the single propagation tag otherwise — ENUM/unknown
+        // entries fall back to it because pack tag consumers only
+        // understand the legacy domain).
+        taida_val ft1 = taida_ekind_to_pack_tag(taida_elem_kind_at(l1, i), elem_tag1);
+        taida_val ft2 = taida_ekind_to_pack_tag(taida_elem_kind_at(l2, i), elem_tag2);
         taida_val pair = taida_pack_new(2);
         pair = taida_pack_set_hash(pair, 0, (taida_val)HASH_FIRST);
         pair = taida_pack_set(pair, 0, l1[4 + i]);
-        // tag + retain for first field based on source list's elem_type_tag
-        taida_pack_set_tag(pair, 0, elem_tag1);
-        taida_list_elem_retain(l1[4 + i], elem_tag1);
+        taida_pack_set_tag(pair, 0, ft1);
+        taida_list_elem_retain(l1[4 + i], ft1);
         pair = taida_pack_set_hash(pair, 1, (taida_val)HASH_SECOND);
         pair = taida_pack_set(pair, 1, l2[4 + i]);
-        // tag + retain for second field based on source list's elem_type_tag
-        taida_pack_set_tag(pair, 1, elem_tag2);
-        taida_list_elem_retain(l2[4 + i], elem_tag2);
+        taida_pack_set_tag(pair, 1, ft2);
+        taida_list_elem_retain(l2[4 + i], ft2);
         new_list = taida_list_push(new_list, pair);
     }
     return new_list;
@@ -6751,9 +6894,11 @@ taida_val taida_list_enumerate(taida_val list_ptr) {
         // index は INT なのでタグはデフォルト(0)のまま、retain 不要
         pair = taida_pack_set_hash(pair, 1, (taida_val)HASH_VALUE);
         pair = taida_pack_set(pair, 1, list[4 + i]);
-        // value フィールドにソースリストの elem_type_tag に基づいて tag + retain
-        taida_pack_set_tag(pair, 1, elem_tag);
-        taida_list_elem_retain(list[4 + i], elem_tag);
+        // value フィールドは要素の recorded kind に基づいて tag + retain
+        // （配列持ちソースは per-element、それ以外は単一 propagation tag）
+        taida_val vft = taida_ekind_to_pack_tag(taida_elem_kind_at(list, i), elem_tag);
+        taida_pack_set_tag(pair, 1, vft);
+        taida_list_elem_retain(list[4 + i], vft);
         new_list = taida_list_push(new_list, pair);
     }
     return new_list;
@@ -7797,6 +7942,11 @@ taida_val taida_set_add(taida_val set_ptr, taida_val item) {
 }
 
 taida_val taida_set_remove(taida_val set_ptr, taida_val item) {
+    return taida_set_remove_k(set_ptr, item, TAIDA_EKIND_UNKNOWN);
+}
+
+
+taida_val taida_set_remove_k(taida_val set_ptr, taida_val item, uint32_t probe_ek) {
     taida_val *list = (taida_val*)set_ptr;
     taida_val len = list[2];  // length at index 2
     if (taida_elem_slot_is_array(list[3])) {
@@ -7806,7 +7956,7 @@ taida_val taida_set_remove(taida_val set_ptr, taida_val item) {
         taida_val new_set = taida_set_new();
         for (taida_val i = 0; i < len; i++) {
             uint32_t ek = taida_elem_kind_at(list, i);
-            if (!taida_ekind_value_eq(list[4 + i], ek, item, TAIDA_EKIND_UNKNOWN)) {
+            if (!taida_ekind_value_eq(list[4 + i], ek, item, probe_ek)) {
                 taida_list_elem_retain(list[4 + i], taida_ekind_to_tag(ek));
                 taida_elem_tags_note_push_ek((taida_val*)new_set, ek);
                 new_set = taida_list_push(new_set, list[4 + i]);
@@ -7818,7 +7968,7 @@ taida_val taida_set_remove(taida_val set_ptr, taida_val item) {
     taida_val new_set = taida_set_new();
     ((taida_val*)new_set)[3] = elem_tag;  // NO-2: set elem_type_tag
     for (taida_val i = 0; i < len; i++) {
-        if (!taida_value_struct_eq(list[4 + i], item)) {
+        if (!taida_ekind_value_eq(list[4 + i], taida_elem_kind_at(list, i), item, probe_ek)) {
             taida_list_elem_retain(list[4 + i], elem_tag);  // NO-2: retain-on-copy
             new_set = taida_list_push(new_set, list[4 + i]);
         }
@@ -8261,6 +8411,16 @@ taida_val taida_collection_remove(taida_val ptr, taida_val item) {
     }
     // Set: linear scan removal
     return taida_set_remove(ptr, item);
+}
+
+// Tagged sibling: the probe's static kind drives pair-semantics removal
+// on Sets (mirrors has/add); HashMaps keep their key-hash path.
+taida_val taida_collection_remove_tagged(taida_val ptr, taida_val item, taida_val ekind_arg) {
+    if (taida_is_hashmap(ptr)) {
+        taida_val key_hash = taida_value_hash(item);
+        return taida_hashmap_remove_immut(ptr, key_hash, item);
+    }
+    return taida_set_remove_k(ptr, item, (uint32_t)ekind_arg);
 }
 
 // .size() — works on both HashMap and Set (both store length at ptr[2])
@@ -11522,9 +11682,15 @@ taida_val taida_debug_json(taida_val json_ptr) {
 static double _l2d(taida_val v) { union { taida_val l; double d; } u; u.l = v; return u.d; }
 static taida_val _d2l(double v) { union { taida_val l; double d; } u; u.d = v; return u.l; }
 
-// Smart conversion: if the bit pattern represents a "reasonable" f64, use it as-is.
-// If it looks like a small integer (-1M..1M), convert from integer.
-// This heuristic handles both ConstFloat (bitcast) and ConstInt paths.
+// Magnitude heuristic, DYNAMIC operands only: statically-typed Int
+// operands of float-family ops are lifted to genuine f64 bits at the
+// call site (taida_int_to_float emitted by the lowering), so this
+// fallback only decides for dynamically-typed values whose kind never
+// reached the runtime. Small bit patterns (within ±2^20 — a range no
+// non-denormal f64 occupies) are treated as plain integers; everything
+// else as an f64 bit pattern. Known residual: a dynamic Int beyond
+// ±2^20 misclassifies — the tagged poly comparisons remove that for
+// equality, and arithmetic keeps it until kinds ride those paths too.
 static double _to_double(taida_val v) {
     // If v is a small integer (common case for literals like 16, 100, etc.)
     // f64 encoding of small integers has specific bit patterns

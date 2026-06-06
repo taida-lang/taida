@@ -757,7 +757,11 @@ mod tests {
         //   except ENUM so heuristic INT tags on string payloads can no
         //   longer poison the shadow reader (see F1_LEN history).
         //   F1 374,993 -> 375,639. Total -> 1,243,466.
-        const EXPECTED_TOTAL_LEN: usize = 1_243_466;
+        // 2026-06-06 value-tag track step 8 (review Must Fix): +8,306
+        //   bytes in core.c F1 — derived list operations project
+        //   per-element kinds end to end (see F1_LEN history).
+        //   F1 375,639 -> 383,945. Total -> 1,251,772.
+        const EXPECTED_TOTAL_LEN: usize = 1_251_772;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1412,7 +1416,20 @@ mod tests {
         // a bare INT tag on a string payload, which the shadow reader then
         // trusted and compared a Str under INT semantics), and the shadow
         // reader trusts the full stamped range. F1_LEN 374,993 -> 375,639.
-        const F1_LEN: usize = 375_639;
+        // Value-tag track step 8 (2026-06-06, review Must Fix): +8,306
+        // before the marker — every derived list operation (reverse /
+        // filter / slice / concat / take / take_while / drop / drop_while /
+        // sort / sort_desc / sort_by / append / prepend / unique_by /
+        // flatten) projects per-element kinds through the new
+        // taida_list_project_push instead of collapsing an array carrier
+        // to the bare mixed sentinel; sorts ride the kinds through the
+        // permutation; zip/enumerate stamp per-element pack field tags
+        // (and zip's raw second-operand slot read is gone); set removal
+        // takes the probe's kind (taida_set_remove_k +
+        // taida_collection_remove_tagged). +7,900 lands before the marker
+        // and +406 after it (taida_collection_remove_tagged sits in the
+        // F2 collection-dispatch region): F1_LEN 375,639 -> 383,539.
+        const F1_LEN: usize = 383_539;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1421,11 +1438,13 @@ mod tests {
         // F54B-029 (Codex review round 2) makes taida_async_join handle-based
         // (reclaims resolved-but-unjoined worker pthreads) after the marker:
         // F2 201,685 -> 202,180.
+        // Value-tag track step 8 adds taida_collection_remove_tagged in the
+        // collection-dispatch region after the marker: F2 202,180 -> 202,586.
         // Express it as F1_LEN + F2 so the F1 side stays in lockstep with the
         // const above.
         assert_eq!(
             CORE_SECTION.len(),
-            F1_LEN + 202_180,
+            F1_LEN + 202_586,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

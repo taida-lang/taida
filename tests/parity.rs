@@ -42807,3 +42807,49 @@ stdout(u.length())
         );
     }
 }
+
+/// Regression: derived list operations (Reverse / Concat / Sort / Take
+/// and friends) collapsed an array-carrying source to the bare mixed
+/// sentinel, so a downstream setOf lost the Int/Float crossing one
+/// composition step after the literal; and removing with a probe of a
+/// different numeric kind missed the crossing entirely. Derived ops now
+/// project per-element kinds (sorts ride them through the permutation)
+/// and removal takes the probe's static kind.
+/// Expected: 1 2 1 2 1 1
+#[test]
+fn test_value_tag_derived_op_projection_parity() {
+    let source = r#"
+stdout(setOf(Reverse[@[1, 1.0]]()).size())
+stdout(setOf(Concat[@[1, 1.0], @[2]]()).size())
+stdout(setOf(Take[@[1, 1.0, 1], 2]()).size())
+stdout(setOf(Sort[@[2, 1.0, 1]]()).size())
+stdout(setOf(@[1.0, 2]).remove(1).size())
+Unique[Drop[@[5, 1, 1.0], 1]()]() >=> u
+stdout(u.length())
+"#;
+    let label = "value_tag_derived_op_projection";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["1", "2", "1", "2", "1", "1"],
+        "interpreter derived-op projection reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native derived-op projection parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js derived-op projection parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min derived-op projection parity"
+        );
+    }
+}

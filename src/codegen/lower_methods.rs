@@ -465,12 +465,19 @@ impl Lowering {
         }
         let key_var = self.lower_expr(func, &args[0])?;
         // For HashMap: compute key hash, then call taida_collection_remove
-        // taida_collection_remove auto-detects HashMap vs Set
+        // taida_collection_remove auto-detects HashMap vs Set.
+        // Value-tag track: the probe's static kind rides along so Set
+        // removal follows the same pair semantics as has/add (HashMaps
+        // ignore it). Without this, removing Int 1 from setOf(@[1.0, 2])
+        // missed the Float under the interpreter's crossing.
+        let ekind = self.expr_ekind(&args[0]);
+        let ek_var = func.alloc_var();
+        func.push(IrInst::ConstInt(ek_var, ekind));
         let result = func.alloc_var();
         func.push(IrInst::Call(
             result,
-            "taida_collection_remove".to_string(),
-            vec![hm_var, key_var],
+            "taida_collection_remove_tagged".to_string(),
+            vec![hm_var, key_var, ek_var],
         ));
         Ok(result)
     }

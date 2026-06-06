@@ -464,6 +464,26 @@ static int64_t _wasm_ekind_to_tag(uint32_t ek) {
    kind conflict materialises the array. Used by the runtime-internal
    builders (unique / set_from_list / Set ops) when projecting from an
    array-carrying source. */
+int64_t taida_list_push(int64_t list_ptr, int64_t item); /* fwd */
+static void _wasm_elem_tags_note_push_ek(int64_t *c, uint32_t ek); /* fwd */
+
+/* Project one element (with its source-recorded kind) into a derived
+   container, then push (native taida_list_project_push mirror — no
+   retain on WASM's bump runtime). */
+static int64_t _wasm_list_project_push(int64_t dst, int64_t item,
+                                       const int64_t *src, int64_t src_idx) {
+    _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)dst, _wasm_elem_kind_at(src, src_idx));
+    return taida_list_push(dst, item);
+}
+
+/* Kind entry → pack field tag domain (native mirror): known kinds map
+   directly except ENUM, which falls back to the caller's legacy tag. */
+static int64_t _wasm_ekind_to_pack_tag(uint32_t ek, int64_t fallback) {
+    uint32_t k = ek & 0xFFu;
+    if (k == WASM_EKIND_UNKNOWN || k == (uint32_t)WASM_TAG_ENUM) return fallback;
+    return (int64_t)k;
+}
+
 static void _wasm_elem_tags_note_push_ek(int64_t *c, uint32_t ek) {
     int64_t existing = c[2];
     if (_wasm_elem_slot_is_array(existing)) {
@@ -4030,18 +4050,16 @@ int64_t taida_set_from_list(int64_t list_ptr) {
 }
 
 /* W-4f: Set.remove(item) -> new Set without the item */
-int64_t taida_set_remove(int64_t set_ptr, int64_t item) {
+static int64_t taida_set_remove_k(int64_t set_ptr, int64_t item, uint32_t probe_ek) {
     int64_t *list = (int64_t *)(intptr_t)set_ptr;
     int64_t len = list[1];
     if (_wasm_elem_slot_is_array(list[2])) {
         /* Kind-aware removal (mirror of native): survivors keep their
-           recorded kinds (the probe item has no kind here, so the pair
-           comparison degrades to structural for it — same membership the
-           2-arg has() reports). */
+           recorded kinds; the probe's kind comes from the caller. */
         int64_t new_set = taida_set_new();
         for (int64_t i = 0; i < len; i++) {
             uint32_t ek = _wasm_elem_kind_at(list, i);
-            if (!_wasm_ekind_value_eq(list[WASM_LIST_ELEMS + i], ek, item, WASM_EKIND_UNKNOWN)) {
+            if (!_wasm_ekind_value_eq(list[WASM_LIST_ELEMS + i], ek, item, probe_ek)) {
                 _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_set, ek);
                 new_set = taida_list_push(new_set, list[WASM_LIST_ELEMS + i]);
             }
@@ -4053,11 +4071,15 @@ int64_t taida_set_remove(int64_t set_ptr, int64_t item) {
        elem tag stays honest (mirrors native taida_set_remove). */
     taida_list_set_elem_tag(result, _wasm_elem_tag_for_propagation(list));
     for (int64_t i = 0; i < len; i++) {
-        if (!_wasm_value_eq(list[WASM_LIST_ELEMS + i], item)) {
+        if (!_wasm_ekind_value_eq(list[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(list, i), item, probe_ek)) {
             result = taida_list_push(result, list[WASM_LIST_ELEMS + i]);
         }
     }
     return result;
+}
+
+int64_t taida_set_remove(int64_t set_ptr, int64_t item) {
+    return taida_set_remove_k(set_ptr, item, WASM_EKIND_UNKNOWN);
 }
 
 /* ── F54 tier 2: numeric-domain aware Set×Set comparison ──────────
@@ -4304,6 +4326,18 @@ int64_t taida_collection_has_tagged(int64_t ptr, int64_t item, int64_t ekind) {
         return taida_hashmap_has(ptr, key_hash, item);
     }
     return _wasm_set_contains_k(ptr, item, (uint32_t)ekind);
+}
+
+/* Tagged removal: the probe's static kind drives pair-semantics removal
+   on Sets (native mirror); HashMaps keep their key-hash path. */
+static int64_t taida_set_remove_k(int64_t set_ptr, int64_t item, uint32_t probe_ek); /* fwd */
+int64_t taida_collection_remove_tagged(int64_t ptr, int64_t item, int64_t ekind) {
+    if (_is_wasm_hashmap(ptr)) {
+        int64_t clone = _wasm_hashmap_clone(ptr);
+        int64_t key_hash = taida_value_hash(item);
+        return taida_hashmap_remove(clone, key_hash, item);
+    }
+    return taida_set_remove_k(ptr, item, (uint32_t)ekind);
 }
 
 /* .remove(key_or_item) — HashMap: clone + hash-based removal, Set: linear scan */

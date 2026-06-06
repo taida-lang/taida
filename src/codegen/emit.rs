@@ -348,6 +348,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Val, Val],
             returns: &[Val],
         },
+        "taida_collection_remove_tagged" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
         "taida_lax_value_ekind" => RuntimeAbi {
             params: &[Val],
             returns: &[Val],

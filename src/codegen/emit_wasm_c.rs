@@ -662,6 +662,10 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             "int64_t taida_collection_has_tagged(int64_t ptr, int64_t item, int64_t ekind);"
                 .to_string()
         }
+        "taida_collection_remove_tagged" => {
+            "int64_t taida_collection_remove_tagged(int64_t ptr, int64_t item, int64_t ekind);"
+                .to_string()
+        }
         "taida_lax_value_ekind" => {
             "int64_t taida_lax_value_ekind(int64_t maybe_lax);".to_string()
         }
