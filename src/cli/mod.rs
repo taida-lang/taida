@@ -9,3 +9,5 @@ pub(crate) mod build;
 pub(crate) mod way;
 
 pub(crate) mod ingot;
+
+pub(crate) mod commands;
