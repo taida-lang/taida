@@ -10299,7 +10299,6 @@ defaulted fields must be provided via `()`",
     }
 }
 
-#[path = "checker_methods.rs"]
 mod checker_methods;
 
 impl Default for TypeChecker {
@@ -10413,5 +10412,4 @@ pub fn default_fn_generatable(
 }
 
 #[cfg(test)]
-#[path = "checker_tests.rs"]
 mod tests;
