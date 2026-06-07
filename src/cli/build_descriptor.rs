@@ -13,7 +13,7 @@ use taida::diagnostics::split_diag_code_and_hint;
 use taida::module_graph;
 use taida::parser::{BuchiField, Expr, ImportStmt, Program, Statement, parse};
 
-use crate::{
+use crate::cli::build::{
     BuildDiagContext, BuildTarget, CompileDiagStats, DiagFormat,
     emit_build_cli_diagnostic_and_exit, emit_compile_diag_jsonl,
 };
