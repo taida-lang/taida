@@ -369,7 +369,7 @@ pub fn cache_wasm(profile: &str, stem: &str, wasm_path: &Path) {
     }
 }
 
-/// RCB-55: Taida binary mtime, cached once per process via OnceLock.
+/// Taida binary mtime, cached once per process via OnceLock.
 /// Used by `cached_wasm` to invalidate cache when the compiler is rebuilt.
 static BIN_MTIME: OnceLock<Option<std::time::SystemTime>> = OnceLock::new();
 
@@ -381,7 +381,7 @@ fn taida_bin_mtime() -> Option<std::time::SystemTime> {
 /// and is not stale.
 ///
 /// M-1: Compares the source file (.td) modification time against the cached .wasm.
-/// RCB-55: Also compares the taida binary's mtime — if the compiler was rebuilt,
+/// Also compares the taida binary's mtime — if the compiler was rebuilt,
 /// the cache is considered stale and `None` is returned, forcing recompilation.
 /// If the source or binary is newer than the cache, `None` is returned.
 /// Equal mtime is treated as valid (same-time writes are assumed identical).
@@ -459,9 +459,7 @@ fn ephemeral_port_min() -> u16 {
 /// Allocate a unique, bindable loopback port for NET integration tests.
 ///
 /// Replaces the legacy `AtomicU16::new(17000)` per-binary allocators that
-/// CI run 24935511811 / 24846315881 (D28 main) showed to be flaky under
-/// nextest 2C parallelism. See `.dev/D29_BLOCKERS.md::D29B-009` for the
-/// full failure inventory.
+/// CI showed to be flaky under nextest 2C parallelism.
 pub fn find_free_loopback_port() -> u16 {
     static INIT: Once = Once::new();
     static COUNTER: AtomicU16 = AtomicU16::new(0);

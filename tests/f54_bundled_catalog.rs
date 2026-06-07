@@ -157,7 +157,7 @@ fn f54_unknown_symbol_diagnostic_is_uniform() {
     // had. Before the catalog, os/crypto/pool/js/build skipped validation.
     for (pkg, bogus) in [
         ("os", "getEnv"),
-        ("crypto", "sha512"),
+        ("crypto", "sha9000"),
         ("pool", "poolCreat"),
         ("js", "JSEval"),
         ("build", "BuildUnitt"),

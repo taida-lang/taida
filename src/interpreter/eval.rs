@@ -16,7 +16,7 @@ use super::env::Environment;
 use super::value::{FuncValue, Value};
 use crate::parser::*;
 
-/// Maximum function call depth before RuntimeError (RCB-301 / SEC-002).
+/// Maximum function call depth before RuntimeError.
 /// Prevents stack overflow from deeply recursive (non-TCO) calls.
 /// Set conservatively to account for multiple Rust stack frames per call
 /// (eval_statements + eval_expr + call_function = ~5 frames per recursion,
@@ -185,10 +185,10 @@ pub struct Interpreter {
     /// When a callback inside call_function_with_values throws, the thrown value
     /// is stored here so that eval_statements' error ceiling can recover it.
     pub(crate) pending_throw: Option<Value>,
-    /// RCB-101: Inheritance parent map (child_name -> parent_name).
+    /// Inheritance parent map (child_name -> parent_name).
     /// Used by error ceiling to check if a thrown error type IS-A the handler type.
     pub(crate) type_parents: HashMap<String, String>,
-    /// RCB-301: Current function call depth for stack overflow prevention.
+    /// Current function call depth for stack overflow prevention.
     /// Incremented on each non-TCO function call, decremented on return.
     call_depth: usize,
     /// Active streaming writer for 2-arg httpServe handler.
@@ -311,7 +311,7 @@ impl Interpreter {
         self.host_capability_mocks.clear();
     }
 
-    /// RCB-101: Check if `thrown_type` IS-A `handler_type` by walking the inheritance chain.
+    /// Check if `thrown_type` IS-A `handler_type` by walking the inheritance chain.
     /// Returns true if they are the same type or if `thrown_type` inherits from `handler_type`.
     pub(crate) fn is_error_subtype(&self, thrown_type: &str, handler_type: &str) -> bool {
         if thrown_type == handler_type {

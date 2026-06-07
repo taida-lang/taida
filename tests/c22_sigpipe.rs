@@ -36,7 +36,7 @@ fn write_tmp_td(body: &str) -> std::path::PathBuf {
     path
 }
 
-/// Regression for C22B-004: `stdout` in stream mode + SIGPIPE SIG_IGN in main
+/// Regression: `stdout` in stream mode + SIGPIPE SIG_IGN in main
 /// should let the whole pipeline exit 0 when a short consumer closes early.
 #[test]
 fn taida_pipe_to_head_exits_zero() {

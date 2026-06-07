@@ -309,7 +309,7 @@ fn run_reject_case(backend: &str, label: &str, opcode: u8, payload: &[u8], expec
     );
 }
 
-/// Lower-level entry point used by E32B-068 to drive raw frames that the
+/// Lower-level entry point used by the protocol-violation cases to drive raw frames that the
 /// `masked_frame` helper cannot express (RSV1=1, MASK=0, unknown opcode).
 /// Identical lifecycle to `run_reject_case` — connect, send the frame,
 /// observe the close frame, assert the RFC 6455 close code.
@@ -411,7 +411,7 @@ fn e32b_029_websocket_validation_three_backend() {
     }
 }
 
-/// E32B-068 (RFC 6455 §5.1 / §5.2 protocol-violation closure):
+/// RFC 6455 §5.1 / §5.2 protocol-violation closure:
 ///
 /// The existing `e32b_029_websocket_validation_three_backend` covers control
 /// payload >125 and invalid-UTF-8 text. Three additional protocol violations

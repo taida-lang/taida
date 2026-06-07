@@ -227,7 +227,7 @@ impl Lowering {
     // `Lowering` methods with identical signatures — only the enclosing
     // file changes.
 
-    /// NB-31: Determine compile-time callable type tag for httpServe handler.
+    /// Determine compile-time callable type tag for httpServe handler.
     /// Returns:
     /// 6 (TAIDA_TAG_CLOSURE) — lambda or closure variable
     /// 10 (TAIDA_TAG_FUNC) — named function reference (user_funcs / lambda_vars)
@@ -354,7 +354,7 @@ impl Lowering {
         }
     }
 
-    /// NB-31: Determine if an expression is a known non-callable type.
+    /// Determine if an expression is a known non-callable type.
     /// Returns Some(tag) for statically known non-callable, None for unknown.
     /// Leverages existing expr_returns_float / expr_is_string_full / expr_is_bool /
     /// expr_is_pack / expr_is_list which already handle literals, variables, BinaryOp,
@@ -474,7 +474,7 @@ impl Lowering {
         }
     }
 
-    /// NB-31: 式が Int を返すかどうかを判定（noncallable_type_tag 用）
+    /// 式が Int を返すかどうかを判定（noncallable_type_tag 用）
     /// arithmetic 演算、Int-returning メソッド/関数、int_vars を網羅する。
     ///
     /// reopen 4 (2026-04-22): visibility widened from
@@ -510,6 +510,46 @@ impl Lowering {
             }
             _ => false,
         }
+    }
+
+    /// Value-tag track: capture a runtime "shadow kind" for an unmold
+    /// target whose payload kind is only known at runtime — i.e. the
+    /// source is a Lax-returning list accessor over a possibly mixed
+    /// list. The companion `__ekind__<name>` IR variable holds the kind
+    /// the runtime recorded on the Lax's `__value` field; tagged poly
+    /// comparisons read it back so e.g. a Float pulled out of
+    /// `@[1, 1.0]` compares to an Int literal under f64 semantics.
+    /// Restricted to a method whitelist to keep IR noise out of the
+    /// (much more common) Async-await unmolds.
+    pub(super) fn maybe_capture_shadow_kind(
+        &mut self,
+        func: &mut IrFunction,
+        target: &str,
+        source: &Expr,
+        source_var: IrVar,
+    ) {
+        // A rebind always invalidates a previous shadow for this name.
+        self.shadow_kind_vars.remove(target);
+        // Restricted to the accessors that build their Lax through the
+        // kind-stamping constructor — max/min still use the plain
+        // constructor whose heuristic field tag is NOT trustworthy (a
+        // string payload can read back as a bare INT), so they must not
+        // feed a shadow.
+        let is_lax_accessor = matches!(
+            source,
+            Expr::MethodCall(_, m, _, _) if matches!(m.as_str(), "get" | "first" | "last")
+        );
+        if !is_lax_accessor {
+            return;
+        }
+        let kind_var = func.alloc_var();
+        func.push(IrInst::Call(
+            kind_var,
+            "taida_lax_value_ekind".to_string(),
+            vec![source_var],
+        ));
+        func.push(IrInst::DefVar(format!("__ekind__{}", target), kind_var));
+        self.shadow_kind_vars.insert(target.to_string());
     }
 
     /// Unmold 先の変数に型情報を伝播する

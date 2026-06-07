@@ -705,8 +705,8 @@ fn compile_file_inner(
 }
 
 /// モジュールパスの解決: "./math.td" → 絶対パス
-/// RCB-103: Support ~/ (project root relative) and package imports.
-/// RCB-213: Support versioned package imports via resolve_package_import_versioned.
+/// Support ~/ (project root relative) and package imports.
+/// Support versioned package imports via resolve_package_import_versioned.
 fn resolve_module_path(base_dir: &Path, module_path: &str, version: Option<&str>) -> PathBuf {
     let path = if module_path.starts_with("./") || module_path.starts_with("../") {
         base_dir.join(module_path)
@@ -1225,7 +1225,7 @@ fn run_wasm_clang_object(
 /// import で要求されたシンボル + その推移的依存のみを融合する。
 /// これにより非公開関数がリンク時に名前空間に漏洩することを防ぐ。
 ///
-/// RCB-43: ダイヤモンド依存時の IR キャッシュ — 同一モジュールが複数パスから
+/// ダイヤモンド依存時の IR キャッシュ — 同一モジュールが複数パスから
 /// 異なるシンボルセットで import された場合、2回目以降は初回の parse+lower 結果を
 /// キャッシュから再利用し、ファイル再読込・再パース・再 lower を回避する。
 fn inline_wasm_module_imports_with_backend(
@@ -1487,7 +1487,7 @@ fn collect_func_refs(insts: &[super::ir::IrInst]) -> Vec<String> {
 // RCB-20: Shared WASM compilation helpers
 // ---------------------------------------------------------------------------
 
-/// RCB-20: Frontend pipeline shared by all WASM profiles.
+/// Frontend pipeline shared by all WASM profiles.
 ///
 /// Performs: cycle detection -> parse -> lower -> module inline -> RC optimize -> C emit.
 /// Returns (generated_c_source, resolved_wasm_output_path).
@@ -3037,7 +3037,7 @@ mod tests {
         // guard restores env on drop
     }
 
-    /// RCB-56: default_wasm_cache_dir walks up parent directories to find project root.
+    /// default_wasm_cache_dir walks up parent directories to find project root.
     #[test]
     fn test_default_wasm_cache_dir_parent_traversal() {
         let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");
@@ -3063,7 +3063,7 @@ mod tests {
         // guard restores env on drop
     }
 
-    /// RCB-56: Does not pick up ancestor.taida/ without packages.tdm.
+    /// Does not pick up ancestor.taida/ without packages.tdm.
     #[test]
     fn test_default_wasm_cache_dir_ignores_non_project_taida() {
         let guard = EnvGuard::new("TAIDA_WASM_RT_CACHE");

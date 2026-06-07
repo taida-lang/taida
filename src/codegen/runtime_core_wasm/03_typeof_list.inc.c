@@ -756,16 +756,32 @@ int64_t taida_list_map(int64_t list_ptr, int64_t fn_ptr) {
     return new_list;
 }
 
+/* Kind-supplying map (native mirror): codegen passes the callback's
+   statically known return kind; UNKNOWN leaves the result kindless. */
+int64_t taida_list_map_k(int64_t list_ptr, int64_t fn_ptr, int64_t ret_ekind) {
+    int64_t result = taida_list_map(list_ptr, fn_ptr);
+    uint32_t k = (uint32_t)ret_ekind & 0xFFu;
+    if (k != WASM_EKIND_UNKNOWN) {
+        int64_t *r = (int64_t *)(intptr_t)result;
+        if (!_wasm_elem_slot_is_array(r[2])) r[2] = (int64_t)k;
+    }
+    return result;
+}
+
 int64_t taida_list_filter(int64_t list_ptr, int64_t fn_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    int64_t elem_tag = list[2];
+    int src_tagged = _wasm_elem_slot_is_array(list[2]);
+    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
     int64_t new_list = taida_list_new();
-    int64_t *nl = (int64_t *)(intptr_t)new_list;
-    nl[2] = elem_tag;
+    if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
     for (int64_t i = 0; i < len; i++) {
         if (taida_invoke_callback1(fn_ptr, list[WASM_LIST_ELEMS + i])) {
-            new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+            if (src_tagged) {
+                new_list = _wasm_list_project_push(new_list, list[WASM_LIST_ELEMS + i], list, i);
+            } else {
+                new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+            }
         }
     }
     return new_list;
@@ -815,13 +831,17 @@ int64_t taida_list_find_index(int64_t list_ptr, int64_t fn_ptr) {
 int64_t taida_list_take_while(int64_t list_ptr, int64_t fn_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    int64_t elem_tag = list[2];
+    int src_tagged = _wasm_elem_slot_is_array(list[2]);
+    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
     int64_t new_list = taida_list_new();
-    int64_t *nl = (int64_t *)(intptr_t)new_list;
-    nl[2] = elem_tag;
+    if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
     for (int64_t i = 0; i < len; i++) {
         if (taida_invoke_callback1(fn_ptr, list[WASM_LIST_ELEMS + i])) {
-            new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+            if (src_tagged) {
+                new_list = _wasm_list_project_push(new_list, list[WASM_LIST_ELEMS + i], list, i);
+            } else {
+                new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+            }
         } else {
             break;
         }
@@ -832,17 +852,21 @@ int64_t taida_list_take_while(int64_t list_ptr, int64_t fn_ptr) {
 int64_t taida_list_drop_while(int64_t list_ptr, int64_t fn_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    int64_t elem_tag = list[2];
+    int src_tagged = _wasm_elem_slot_is_array(list[2]);
+    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
     int64_t new_list = taida_list_new();
-    int64_t *nl = (int64_t *)(intptr_t)new_list;
-    nl[2] = elem_tag;
+    if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
     int64_t dropping = 1;
     for (int64_t i = 0; i < len; i++) {
         if (dropping && taida_invoke_callback1(fn_ptr, list[WASM_LIST_ELEMS + i])) {
             continue;
         }
         dropping = 0;
-        new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+        if (src_tagged) {
+            new_list = _wasm_list_project_push(new_list, list[WASM_LIST_ELEMS + i], list, i);
+        } else {
+            new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+        }
     }
     return new_list;
 }
@@ -879,21 +903,33 @@ int64_t taida_list_none(int64_t list_ptr, int64_t fn_ptr) {
 int64_t taida_list_sort(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    int64_t elem_tag = list[2];
+    int src_tagged = _wasm_elem_slot_is_array(list[2]);
+    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
     int64_t new_list = taida_list_new();
-    int64_t *nl = (int64_t *)(intptr_t)new_list;
-    nl[2] = elem_tag;
-    /* Copy items into temp array (on bump allocator) */
+    if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
+    /* Copy items into temp array (on bump allocator); kinds ride the
+       permutation for array-carrying sources. */
     int64_t *items = (int64_t *)wasm_alloc((unsigned int)(len * 8));
-    for (int64_t i = 0; i < len; i++) items[i] = list[WASM_LIST_ELEMS + i];
+    uint32_t *eks = src_tagged ? (uint32_t *)wasm_alloc((unsigned int)(len * 4)) : 0;
+    for (int64_t i = 0; i < len; i++) {
+        items[i] = list[WASM_LIST_ELEMS + i];
+        if (eks) eks[i] = _wasm_elem_kind_at(list, i);
+    }
     /* Insertion sort ascending */
     for (int64_t i = 1; i < len; i++) {
         int64_t key = items[i];
+        uint32_t kek = eks ? eks[i] : 0;
         int64_t j = i - 1;
-        while (j >= 0 && items[j] > key) { items[j+1] = items[j]; j--; }
+        while (j >= 0 && items[j] > key) {
+            items[j+1] = items[j];
+            if (eks) eks[j+1] = eks[j];
+            j--;
+        }
         items[j+1] = key;
+        if (eks) eks[j+1] = kek;
     }
     for (int64_t i = 0; i < len; i++) {
+        if (src_tagged) _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_list, eks[i]);
         new_list = taida_list_push(new_list, items[i]);
     }
     return new_list;
@@ -902,20 +938,31 @@ int64_t taida_list_sort(int64_t list_ptr) {
 int64_t taida_list_sort_desc(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    int64_t elem_tag = list[2];
+    int src_tagged = _wasm_elem_slot_is_array(list[2]);
+    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
     int64_t new_list = taida_list_new();
-    int64_t *nl = (int64_t *)(intptr_t)new_list;
-    nl[2] = elem_tag;
+    if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
     int64_t *items = (int64_t *)wasm_alloc((unsigned int)(len * 8));
-    for (int64_t i = 0; i < len; i++) items[i] = list[WASM_LIST_ELEMS + i];
+    uint32_t *eks = src_tagged ? (uint32_t *)wasm_alloc((unsigned int)(len * 4)) : 0;
+    for (int64_t i = 0; i < len; i++) {
+        items[i] = list[WASM_LIST_ELEMS + i];
+        if (eks) eks[i] = _wasm_elem_kind_at(list, i);
+    }
     /* Insertion sort descending */
     for (int64_t i = 1; i < len; i++) {
         int64_t key = items[i];
+        uint32_t kek = eks ? eks[i] : 0;
         int64_t j = i - 1;
-        while (j >= 0 && items[j] < key) { items[j+1] = items[j]; j--; }
+        while (j >= 0 && items[j] < key) {
+            items[j+1] = items[j];
+            if (eks) eks[j+1] = eks[j];
+            j--;
+        }
         items[j+1] = key;
+        if (eks) eks[j+1] = kek;
     }
     for (int64_t i = 0; i < len; i++) {
+        if (src_tagged) _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_list, eks[i]);
         new_list = taida_list_push(new_list, items[i]);
     }
     return new_list;
@@ -928,10 +975,10 @@ int64_t taida_list_sort_desc(int64_t list_ptr) {
 int64_t taida_list_unique_by(int64_t list_ptr, int64_t fn_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    int64_t elem_tag = list[2];
+    int src_tagged = _wasm_elem_slot_is_array(list[2]);
+    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
     int64_t new_list = taida_list_new();
-    int64_t *nl_init = (int64_t *)(intptr_t)new_list;
-    nl_init[2] = elem_tag;
+    if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
     if (len == 0) return new_list;
     /* F54B-016 (C2): dedup keys by STRUCTURE (was raw `==`), mirroring the
        interpreter Unique[](by) path: a fingerprint seen-set while keys are
@@ -960,7 +1007,11 @@ int64_t taida_list_unique_by(int64_t list_ptr, int64_t fn_ptr) {
         }
         if (!dup) {
             seen_keys[seen_count++] = key;
-            new_list = taida_list_push(new_list, item);
+            if (src_tagged) {
+                new_list = _wasm_list_project_push(new_list, item, list, i);
+            } else {
+                new_list = taida_list_push(new_list, item);
+            }
         }
     }
     return new_list;
@@ -971,32 +1022,38 @@ int64_t taida_list_unique_by(int64_t list_ptr, int64_t fn_ptr) {
 int64_t taida_list_sort_by(int64_t list_ptr, int64_t fn_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    int64_t elem_tag = list[2];
+    int src_tagged = _wasm_elem_slot_is_array(list[2]);
+    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
     int64_t new_list = taida_list_new();
-    int64_t *nl = (int64_t *)(intptr_t)new_list;
-    nl[2] = elem_tag;
+    if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
     if (len == 0) return new_list;
-    /* Allocate parallel arrays: items and keys */
+    /* Allocate parallel arrays: items and keys (+ kinds for carriers) */
     int64_t *items = (int64_t *)wasm_alloc((unsigned int)(len * 8));
     int64_t *keys = (int64_t *)wasm_alloc((unsigned int)(len * 8));
+    uint32_t *eks = src_tagged ? (uint32_t *)wasm_alloc((unsigned int)(len * 4)) : 0;
     for (int64_t i = 0; i < len; i++) {
         items[i] = list[WASM_LIST_ELEMS + i];
         keys[i] = taida_invoke_callback1(fn_ptr, items[i]);
+        if (eks) eks[i] = _wasm_elem_kind_at(list, i);
     }
     /* Insertion sort ascending by key */
     for (int64_t i = 1; i < len; i++) {
         int64_t kkey = keys[i];
         int64_t kitem = items[i];
+        uint32_t kek = eks ? eks[i] : 0;
         int64_t j = i - 1;
         while (j >= 0 && keys[j] > kkey) {
             keys[j+1] = keys[j];
             items[j+1] = items[j];
+            if (eks) eks[j+1] = eks[j];
             j--;
         }
         keys[j+1] = kkey;
         items[j+1] = kitem;
+        if (eks) eks[j+1] = kek;
     }
     for (int64_t i = 0; i < len; i++) {
+        if (src_tagged) _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_list, eks[i]);
         new_list = taida_list_push(new_list, items[i]);
     }
     return new_list;
@@ -1005,7 +1062,44 @@ int64_t taida_list_sort_by(int64_t list_ptr, int64_t fn_ptr) {
 int64_t taida_list_unique(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    int64_t elem_tag = list[2];
+    if (_wasm_elem_slot_is_array(list[2])) {
+        /* Kind-aware dedup over (value, recorded kind) pairs (mirror of
+           native taida_list_unique). The result rebuilds its own kind
+           entries for the surviving elements (and naturally re-homogenises
+           when only one kind survives). The hash path engages only when
+           every element kind is hashable — Float or unknown kinds fall back
+           to the linear pair scan. */
+        int64_t new_list = taida_list_new();
+        _wasm_seen_k seen;
+        int all_h = 1;
+        for (int64_t i = 0; i < len && all_h; i++)
+            all_h = _wasm_ekind_hashable(list[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(list, i));
+        int use_hash = all_h && _wasm_seen_k_init(&seen, len);
+        for (int64_t i = 0; i < len; i++) {
+            int64_t item = list[WASM_LIST_ELEMS + i];
+            uint32_t ek = _wasm_elem_kind_at(list, i);
+            int dup;
+            if (use_hash) {
+                dup = !_wasm_seen_k_add(&seen, item, ek);
+            } else {
+                int64_t *nl = (int64_t *)(intptr_t)new_list;
+                int64_t nlen = nl[1];
+                dup = 0;
+                for (int64_t j = 0; j < nlen; j++) {
+                    if (_wasm_ekind_value_eq(nl[WASM_LIST_ELEMS + j], _wasm_elem_kind_at(nl, j), item, ek)) {
+                        dup = 1;
+                        break;
+                    }
+                }
+            }
+            if (!dup) {
+                _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_list, ek);
+                new_list = taida_list_push(new_list, item);
+            }
+        }
+        return new_list;
+    }
+    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
     int64_t new_list = taida_list_new();
     int64_t *nl_init = (int64_t *)(intptr_t)new_list;
     nl_init[2] = elem_tag;
@@ -1040,15 +1134,19 @@ int64_t taida_list_flatten(int64_t list_ptr) {
         if (_looks_like_list(item)) {
             int64_t *sub = (int64_t *)(intptr_t)item;
             int64_t slen = sub[1];
-            /* Propagate inner list's elem_tag to result */
-            if (i == 0) {
-                int64_t *nl = (int64_t *)(intptr_t)new_list;
-                nl[2] = sub[2];
-            }
+            /* Every inner element projects through the latch under its
+               recorded kind — a single i==0 stamp can't represent
+               cross-tagged sibling sublists, and the latch naturally
+               keeps a same-kind result homogeneous (native mirror). */
             for (int64_t j = 0; j < slen; j++) {
-                new_list = taida_list_push(new_list, sub[WASM_LIST_ELEMS + j]);
+                new_list = _wasm_list_project_push(new_list, sub[WASM_LIST_ELEMS + j], sub, j);
             }
         } else {
+            /* Non-list element: project under its recorded kind (native
+               mirror — always note, UNKNOWN included, so the latch sees
+               every push). */
+            _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_list,
+                                         _wasm_elem_kind_at(list, i));
             new_list = taida_list_push(new_list, item);
         }
     }
@@ -1058,12 +1156,16 @@ int64_t taida_list_flatten(int64_t list_ptr) {
 int64_t taida_list_reverse(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    int64_t elem_tag = list[2];
+    int src_tagged = _wasm_elem_slot_is_array(list[2]);
+    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
     int64_t new_list = taida_list_new();
-    int64_t *nl = (int64_t *)(intptr_t)new_list;
-    nl[2] = elem_tag;
+    if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
     for (int64_t i = len - 1; i >= 0; i--) {
-        new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+        if (src_tagged) {
+            new_list = _wasm_list_project_push(new_list, list[WASM_LIST_ELEMS + i], list, i);
+        } else {
+            new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+        }
     }
     return new_list;
 }
@@ -1101,15 +1203,24 @@ int64_t taida_list_concat(int64_t list1, int64_t list2) {
     int64_t *l1 = (int64_t *)(intptr_t)list1;
     int64_t *l2 = (int64_t *)(intptr_t)list2;
     int64_t len1 = l1[1], len2 = l2[1];
-    int64_t elem_tag = l1[2];
+    int src_tagged = _wasm_elem_slot_is_array(l1[2]) || _wasm_elem_slot_is_array(l2[2])
+                  || _wasm_elem_tags_cross(l1, l2);
+    int64_t elem_tag = _wasm_elem_tag_for_propagation(l1);
     int64_t new_list = taida_list_new();
-    int64_t *nl = (int64_t *)(intptr_t)new_list;
-    nl[2] = elem_tag;
+    if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
     for (int64_t i = 0; i < len1; i++) {
-        new_list = taida_list_push(new_list, l1[WASM_LIST_ELEMS + i]);
+        if (src_tagged) {
+            new_list = _wasm_list_project_push(new_list, l1[WASM_LIST_ELEMS + i], l1, i);
+        } else {
+            new_list = taida_list_push(new_list, l1[WASM_LIST_ELEMS + i]);
+        }
     }
     for (int64_t i = 0; i < len2; i++) {
-        new_list = taida_list_push(new_list, l2[WASM_LIST_ELEMS + i]);
+        if (src_tagged) {
+            new_list = _wasm_list_project_push(new_list, l2[WASM_LIST_ELEMS + i], l2, i);
+        } else {
+            new_list = taida_list_push(new_list, l2[WASM_LIST_ELEMS + i]);
+        }
     }
     return new_list;
 }
@@ -1117,13 +1228,18 @@ int64_t taida_list_concat(int64_t list1, int64_t list2) {
 int64_t taida_list_append(int64_t list_ptr, int64_t item) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    int64_t elem_tag = list[2];
+    int src_tagged = _wasm_elem_slot_is_array(list[2]);
+    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
     int64_t new_list = taida_list_new();
-    int64_t *nl = (int64_t *)(intptr_t)new_list;
-    nl[2] = elem_tag;
+    if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
     for (int64_t i = 0; i < len; i++) {
-        new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+        if (src_tagged) {
+            new_list = _wasm_list_project_push(new_list, list[WASM_LIST_ELEMS + i], list, i);
+        } else {
+            new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+        }
     }
+    if (src_tagged) _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_list, WASM_EKIND_UNKNOWN);
     new_list = taida_list_push(new_list, item);
     return new_list;
 }
@@ -1131,13 +1247,18 @@ int64_t taida_list_append(int64_t list_ptr, int64_t item) {
 int64_t taida_list_prepend(int64_t list_ptr, int64_t item) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    int64_t elem_tag = list[2];
+    int src_tagged = _wasm_elem_slot_is_array(list[2]);
+    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
     int64_t new_list = taida_list_new();
-    int64_t *nl = (int64_t *)(intptr_t)new_list;
-    nl[2] = elem_tag;
+    if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
+    if (src_tagged) _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_list, WASM_EKIND_UNKNOWN);
     new_list = taida_list_push(new_list, item);
     for (int64_t i = 0; i < len; i++) {
-        new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+        if (src_tagged) {
+            new_list = _wasm_list_project_push(new_list, list[WASM_LIST_ELEMS + i], list, i);
+        } else {
+            new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+        }
     }
     return new_list;
 }
@@ -1145,14 +1266,18 @@ int64_t taida_list_prepend(int64_t list_ptr, int64_t item) {
 int64_t taida_list_take(int64_t list_ptr, int64_t n) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    int64_t elem_tag = list[2];
+    int src_tagged = _wasm_elem_slot_is_array(list[2]);
+    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
     int64_t take_n = n < len ? n : len;
     if (take_n < 0) take_n = 0;
     int64_t new_list = taida_list_new();
-    int64_t *nl = (int64_t *)(intptr_t)new_list;
-    nl[2] = elem_tag;
+    if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
     for (int64_t i = 0; i < take_n; i++) {
-        new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+        if (src_tagged) {
+            new_list = _wasm_list_project_push(new_list, list[WASM_LIST_ELEMS + i], list, i);
+        } else {
+            new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+        }
     }
     return new_list;
 }
@@ -1160,14 +1285,18 @@ int64_t taida_list_take(int64_t list_ptr, int64_t n) {
 int64_t taida_list_drop(int64_t list_ptr, int64_t n) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    int64_t elem_tag = list[2];
+    int src_tagged = _wasm_elem_slot_is_array(list[2]);
+    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
     int64_t skip = n < len ? n : len;
     if (skip < 0) skip = 0;
     int64_t new_list = taida_list_new();
-    int64_t *nl = (int64_t *)(intptr_t)new_list;
-    nl[2] = elem_tag;
+    if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
     for (int64_t i = skip; i < len; i++) {
-        new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+        if (src_tagged) {
+            new_list = _wasm_list_project_push(new_list, list[WASM_LIST_ELEMS + i], list, i);
+        } else {
+            new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
+        }
     }
     return new_list;
 }
@@ -1196,7 +1325,7 @@ int64_t taida_list_enumerate(int64_t list_ptr) {
        slot so primitives render through the tagged fast-path. The
        `index` slot is always INT (tag 0), no explicit stamping needed
        since `taida_pack_new` zero-initialises tags to INT. */
-    int64_t elem_tag = list[2];
+    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
     int64_t new_list = taida_list_new();
     int64_t *nl = (int64_t *)(intptr_t)new_list;
     nl[2] = WASM_TAG_PACK;  /* C24-B: enumerate produces Pack elements */
@@ -1207,7 +1336,7 @@ int64_t taida_list_enumerate(int64_t list_ptr) {
         taida_pack_set_tag(pair, 0, WASM_TAG_INT);
         taida_pack_set_hash(pair, 1, (int64_t)WASM_HASH_VALUE2);
         taida_pack_set(pair, 1, list[WASM_LIST_ELEMS + i]);
-        taida_pack_set_tag(pair, 1, elem_tag);
+        taida_pack_set_tag(pair, 1, _wasm_ekind_to_pack_tag(_wasm_elem_kind_at(list, i), elem_tag));
         new_list = taida_list_push(new_list, pair);
     }
     return new_list;
@@ -1222,8 +1351,8 @@ int64_t taida_list_zip(int64_t list1, int64_t list2) {
     /* C24-B: propagate each source list's elem_type_tag to its pair
        slot so primitives in either position render through tagged
        fast-path dispatch. */
-    int64_t elem_tag1 = l1[2];
-    int64_t elem_tag2 = l2[2];
+    int64_t elem_tag1 = _wasm_elem_tag_for_propagation(l1);
+    int64_t elem_tag2 = _wasm_elem_tag_for_propagation(l2);
     int64_t new_list = taida_list_new();
     int64_t *nl = (int64_t *)(intptr_t)new_list;
     nl[2] = WASM_TAG_PACK;  /* C24-B: zip produces Pack elements */
@@ -1231,10 +1360,10 @@ int64_t taida_list_zip(int64_t list1, int64_t list2) {
         int64_t pair = taida_pack_new(2);
         taida_pack_set_hash(pair, 0, (int64_t)WASM_HASH_FIRST);
         taida_pack_set(pair, 0, l1[WASM_LIST_ELEMS + i]);
-        taida_pack_set_tag(pair, 0, elem_tag1);
+        taida_pack_set_tag(pair, 0, _wasm_ekind_to_pack_tag(_wasm_elem_kind_at(l1, i), elem_tag1));
         taida_pack_set_hash(pair, 1, (int64_t)WASM_HASH_SECOND);
         taida_pack_set(pair, 1, l2[WASM_LIST_ELEMS + i]);
-        taida_pack_set_tag(pair, 1, elem_tag2);
+        taida_pack_set_tag(pair, 1, _wasm_ekind_to_pack_tag(_wasm_elem_kind_at(l2, i), elem_tag2));
         new_list = taida_list_push(new_list, pair);
     }
     return new_list;
@@ -1276,14 +1405,14 @@ int64_t taida_list_first(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     if (len == 0) return taida_lax_empty(0);
-    return taida_lax_new(list[WASM_LIST_ELEMS], 0);
+    return _wasm_lax_new_k(list[WASM_LIST_ELEMS], 0, _wasm_elem_kind_at(list, 0));
 }
 
 int64_t taida_list_last(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     if (len == 0) return taida_lax_empty(0);
-    return taida_lax_new(list[WASM_LIST_ELEMS + len - 1], 0);
+    return _wasm_lax_new_k(list[WASM_LIST_ELEMS + len - 1], 0, _wasm_elem_kind_at(list, len - 1));
 }
 
 int64_t taida_list_min(int64_t list_ptr) {

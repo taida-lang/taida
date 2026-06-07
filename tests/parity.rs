@@ -26,9 +26,9 @@ fn examples_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples")
 }
 
-/// C12B-026 / C13-4: `src/codegen/native_runtime.c` was first split
-/// (C12B-026) into 7 fragment files (`01_core.inc.c` .. `07_net_h3_main.inc.c`)
-/// and then re-aligned (C13-4) to 5 responsibility-based files
+/// `src/codegen/native_runtime.c` was first split
+/// into 7 fragment files (`01_core.inc.c` .. `07_net_h3_main.inc.c`)
+/// and then re-aligned to 5 responsibility-based files
 /// (`core.c`, `os.c`, `tls.c`, `net_h1_h2.c`, `net_h3_quic.c`) plus a
 /// declarative shared header (`runtime.h`). See
 /// `src/codegen/native_runtime/runtime.h` and `mod.rs` for the
@@ -38,9 +38,9 @@ fn examples_dir() -> PathBuf {
 ///
 /// Source-audit parity tests read the C source from disk (rather than
 /// via `include_str!`) so they pick up edits without recompiling the
-/// crate. After the C13-4 merge, those tests must concatenate the 5
+/// crate. After the responsibility-based re-alignment, those tests must concatenate the 5
 /// fragments in the documented order; this helper does exactly that and
-/// is byte-equivalent to both the C12B-026 seven-fragment concatenation
+/// is byte-equivalent to both the earlier seven-fragment concatenation
 /// and the pre-split monolithic `native_runtime.c`.
 fn read_native_runtime_source() -> String {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -58,9 +58,9 @@ fn read_native_runtime_source() -> String {
     out
 }
 
-/// C12B-025 (2026-04-15): `src/interpreter/net_eval.rs` was mechanically split
-/// into `src/interpreter/net_eval/{mod,types,helpers,tests}.rs`.
-/// C13-3 (2026-04-16): further split into `h1/h2/h3/stream/ws`. Audit tests
+/// `src/interpreter/net_eval.rs` was mechanically split
+/// into `src/interpreter/net_eval/{mod,types,helpers,tests}.rs`,
+/// then further split into `h1/h2/h3/stream/ws`. Audit tests
 /// that look for wire-format patterns across the net runtime concatenate the
 /// non-test files so the checks remain path-stable.
 fn read_net_eval_source() -> String {
@@ -987,7 +987,7 @@ fn spawn_tcp_echo_server() -> (u16, mpsc::Receiver<String>, thread::JoinHandle<(
 
 /// Allocate a unique, bindable port for network tests.
 ///
-/// # Race model (C25B-002 root-cause analysis, 2026-04-23)
+/// # Race model (root-cause analysis)
 ///
 /// The classic `bind(0) → get port → drop listener` pattern has a TOCTOU race:
 /// when many tests run in parallel, the OS can re-hand the same just-freed port
@@ -1048,7 +1048,7 @@ const PORT_COOLDOWN_SECS: u64 = 8;
 
 /// Upper bound (exclusive) for our allocator.
 ///
-/// # C26B-003 root-cause fix (2026-04-24)
+/// # Root-cause fix
 ///
 /// The Linux kernel assigns ephemeral ports (for outbound connect(), accept()
 /// client side, short-lived auto-bind etc.) from the range configured in
@@ -1178,7 +1178,7 @@ fn find_free_loopback_port() -> u16 {
     panic!("find_free_loopback_port: could not find a free port after 400 attempts");
 }
 
-/// C25B-002 regression guard: the port allocator must never hand out the same
+/// Regression guard: the port allocator must never hand out the same
 /// port twice within its cooldown window, even under concurrent allocation.
 /// Previously flaked ~1/20 runs in CI under 2C nextest parallelism.
 #[test]
@@ -1462,7 +1462,7 @@ fn native_expected_reject_list() -> Vec<&'static str> {
     ]
 }
 
-/// E32B-023: per-fixture expected reject substring. Falls back to the
+/// Per-fixture expected reject substring. Falls back to the
 /// historical Stream capability message for fixtures not listed here.
 fn native_reject_expected_substring(stem: &str) -> &'static str {
     match stem {
@@ -1695,8 +1695,7 @@ include!(concat!(env!("OUT_DIR"), "/examples_compile_td_tests.rs"));
 /// These are tracked as native backend issues and should be fixed eventually.
 /// When fixed, remove from this list so the parity test catches regressions.
 ///
-/// Tracked as TF-6 through TF-11 in `.dev/FIX_PROGRESS.md`.
-/// TF-6/7/8/9/10/11 + 06_lists all fixed.
+/// The previously-tracked native mismatches (including 06_lists) are all fixed.
 /// 06_lists: Reverse mold was misidentified as string-returning in lower.rs.
 ///
 /// Fixed root causes:
@@ -6111,7 +6110,7 @@ stdout(fromC("2"))
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// RCB-43: Diamond dependency with different symbols from shared module.
+/// Diamond dependency with different symbols from shared module.
 /// B imports funcX from D, C imports funcY from D (distinct symbol sets).
 /// Exercises the diff-symbol code path in the WASM module inliner's IR cache.
 /// Verifies correctness across all backends.
@@ -8461,7 +8460,7 @@ stdout(parseAttempt())
     );
 }
 
-/// NB-20: Content-Length leading-zero padded values — 3-way parity
+/// Content-Length leading-zero padded values — 3-way parity
 /// "00000000000000005" (17 chars) should be accepted as 5 in all 3 backends.
 /// Previously JS rejected this because rawVal.length > 16 without stripping leading zeros.
 #[test]
@@ -8851,7 +8850,7 @@ stdout(parsed.chunked)
 
 /// NET2-2a: httpParseRequestHead chunked Bool field — Interp vs JS only
 /// Tests the actual Bool value of chunked field.
-/// Note: B11-2e resolved the Native Bool display limitation (FB-3).
+/// Note: an earlier fix resolved the Native Bool display limitation.
 /// Native parity is now verified in test_net2_parse_chunked_field_3way_parity.
 #[test]
 fn test_net2_parse_chunked_bool_value_interp_js_parity() {
@@ -10108,7 +10107,7 @@ stdout(outer(multiply))
 
 // ── NB-31: httpServe handler callable check regression tests ──
 
-/// NB-31: Passing a large Int as handler to httpServe must NOT crash the Native
+/// Passing a large Int as handler to httpServe must NOT crash the Native
 /// binary (previously caused a segfault via indirect call to an integer value).
 /// JS and Native should both return a TypeError Result instead of crashing.
 /// Tests BOTH literal and variable-path Int handlers to cover compile-time tag.
@@ -10193,7 +10192,7 @@ stdout(outcome.kind)
     );
 }
 
-/// NB-31: Interpreter should return RuntimeError for non-callable handler.
+/// Interpreter should return RuntimeError for non-callable handler.
 /// This is a different behavior from JS/Native (which return a Result),
 /// but we verify it doesn't silently succeed.
 /// Uses variable-path Int handler to match the JS/Native test.
@@ -10321,7 +10320,7 @@ asyncResult <= httpServe(0, handler, 1, 1000, 128, @(cert <= "c.pem", key <= "k.
     );
 }
 
-/// NB-31: Arithmetic Int expression path (bad <= 999999 + 1).
+/// Arithmetic Int expression path (bad <= 999999 + 1).
 /// Exercises noncallable_type_tag → expr_is_int → BinaryOp detection.
 #[test]
 fn test_nb31_http_serve_arithmetic_int_handler_parity() {
@@ -10387,7 +10386,7 @@ stdout(outcome.kind)
     );
 }
 
-/// NB-31: Int-returning function path (mk n = n + 1 => :Int / bad <= mk(999999)).
+/// Int-returning function path (mk n = n + 1 => :Int / bad <= mk(999999)).
 /// Exercises noncallable_type_tag → expr_is_int → FuncCall return type.
 #[test]
 fn test_nb31_http_serve_func_return_int_handler_parity() {
@@ -10454,7 +10453,7 @@ stdout(outcome.kind)
     );
 }
 
-/// NB-31: Typed Int parameter path (wrap bad: Int = ...).
+/// Typed Int parameter path (wrap bad: Int = ...).
 /// Exercises callable_type_tag → Ident → int_vars (param registration).
 #[test]
 fn test_nb31_http_serve_typed_param_int_handler_parity() {
@@ -10516,7 +10515,7 @@ stdout(outcome.kind)
     );
 }
 
-/// NB-14: httpEncodeResponse with dynamically-typed Bool status via function parameter
+/// httpEncodeResponse with dynamically-typed Bool status via function parameter
 /// must produce "status must be Int, got true" in Native (not "got 1").
 /// Reproduction: `encodeWrap s = @(status <= s, ...)` called with `encodeWrap(true)`.
 #[test]
@@ -10564,7 +10563,7 @@ stdout(attempt())
     );
 }
 
-/// NB-21: httpEncodeResponse with dynamically-typed Bool body via function parameter
+/// httpEncodeResponse with dynamically-typed Bool body via function parameter
 /// must produce "body must be Bytes or Str, got true" in Native (not "got 1").
 #[test]
 fn test_nb21_dynamic_bool_body_native_parity() {
@@ -10608,7 +10607,7 @@ stdout(attempt())
     );
 }
 
-/// NB-14 nested: httpEncodeResponse(encodeWrap(idBool(true))) must preserve Bool tag
+/// Nested: httpEncodeResponse(encodeWrap(idBool(true))) must preserve Bool tag
 /// through nested call chain. The inner idBool call must not overwrite the outer
 /// call's tag frame. Both Interpreter and Native should say "got true".
 #[test]
@@ -10655,7 +10654,7 @@ stdout(attempt())
     );
 }
 
-/// NB-21 nested: httpEncodeResponse(encodeWrap(idBool(true))) with Bool body
+/// Nested: httpEncodeResponse(encodeWrap(idBool(true))) with Bool body
 /// must preserve Bool tag through nested call chain.
 #[test]
 fn test_nb21_nested_call_bool_body_parity() {
@@ -10700,7 +10699,7 @@ stdout(attempt())
     );
 }
 
-/// NB-14 mixed-arg: encodeWrap(true, id(true)) where arg 0 has a known tag (Bool)
+/// Mixed-arg: encodeWrap(true, id(true)) where arg 0 has a known tag (Bool)
 /// but arg 1 passes through a generic `id` function (UNKNOWN). The unset slot must
 /// remain UNKNOWN, not default to INT.
 #[test]
@@ -10750,7 +10749,7 @@ stdout(attempt())
     );
 }
 
-/// NB-21 mixed-arg: encodeWrap(true, id(true)) where the body comes from a generic
+/// Mixed-arg: encodeWrap(true, id(true)) where the body comes from a generic
 /// `id` function. The unset tag slot must not collapse to INT.
 #[test]
 fn test_nb21_mixed_arg_bool_body_parity() {
@@ -10799,7 +10798,7 @@ stdout(attempt())
     );
 }
 
-/// NB-14 IIFE: (_ b = @(status <= b, ...))(id(true)) — direct lambda call must
+/// IIFE: (_ b = @(status <= b, ...))(id(true)) — direct lambda call must
 /// propagate return_tag from id(true) into the IIFE's arg tag slot.
 #[test]
 fn test_nb14_iife_bool_status_parity() {
@@ -10843,7 +10842,7 @@ stdout(attempt())
     );
 }
 
-/// NB-21 IIFE: (_ b = @(status <= 200, ..., body <= b))(id(true)) — body path.
+/// IIFE: (_ b = @(status <= 200, ..., body <= b))(id(true)) — body path.
 #[test]
 fn test_nb21_iife_bool_body_parity() {
     // E32B-035 migration: same `|==` pattern.
@@ -10888,7 +10887,7 @@ stdout(attempt())
 
 // ── NB-11: Non-ASCII path span parity ──────────────────────────────
 
-/// NB-11: URL-encoded non-ASCII path should produce identical span offsets
+/// URL-encoded non-ASCII path should produce identical span offsets
 /// across all 3 backends. Tests latin1 byte-to-character 1:1 property in JS.
 /// Uses the actual UTF-8 character directly (Taida has no \u escape).
 #[test]
@@ -10938,7 +10937,7 @@ stdout(parsed.contentLength)\n\
     );
 }
 
-/// NB-11: Header with non-ASCII value (high bytes) should parse identically.
+/// Header with non-ASCII value (high bytes) should parse identically.
 #[test]
 fn test_nb11_non_ascii_header_value_span_parity() {
     if !node_available() {
@@ -15279,7 +15278,7 @@ stdout(r.requests)
 
 /// NET3-6e: reserved header (Content-Length) rejected on native backend.
 ///
-/// E33B-003: prior to the E32B-079/E32B-080 connection-abort hardening
+/// Prior to the connection-abort hardening
 /// the runtime invoked `exit(1)` on a reserved-header reject. The new
 /// statelessly-close-connection contract terminates the offending
 /// connection without aborting the process, so the assertion now pins
@@ -15582,7 +15581,7 @@ fn e32b_027_assert_native_start_response_rejects(
     );
 }
 
-/// E32B-027: unsafe streaming headers are rejected on Interpreter and JS.
+/// Unsafe streaming headers are rejected on Interpreter and JS.
 #[test]
 fn test_e32b_027_streaming_header_negative_interp_js() {
     if !node_available() {
@@ -15646,7 +15645,7 @@ fn test_e32b_027_streaming_header_negative_interp_js() {
     }
 }
 
-/// E32B-027: unsafe streaming headers are rejected on Native.
+/// Unsafe streaming headers are rejected on Native.
 #[test]
 fn test_e32b_027_streaming_header_negative_native() {
     let cases = [
@@ -21029,9 +21028,9 @@ stdout(r.requests)
     }
 }
 
-/// NB4-10: wsUpgrade rejects stale/fake request packs — 3-backend regression.
+/// wsUpgrade rejects stale/fake request packs — 3-backend regression.
 /// Originally this test pinned *runtime*-side rejection of a fabricated request
-/// pack with wrong `__body_token`. Under C12B-023 v2 (2026-04-15), the checker
+/// pack with wrong `__body_token`. The checker
 /// now rejects **any** user-authored BuchiPack / TypeInst that assigns a
 /// `__`-prefixed field name at compile time with `[E1617]`, which is the
 /// strictly-stronger invariant (PHILOSOPHY I: silent undefined 禁止 — now the
@@ -25249,7 +25248,7 @@ stdout(r.requests)
 // reference (`docs/reference/net_api.md`) promises for TLS
 // construction errors.
 
-/// C26B-002-1: TLS config with missing cert path — 3-backend
+/// Case 1: TLS config with missing cert path — 3-backend
 /// construction-time error parity.
 ///
 /// Every backend must surface an error that mentions "cert" or "tls"
@@ -25355,7 +25354,7 @@ stdout(result.throw.message)
     }
 }
 
-/// C26B-002-2: TLS config with a key but no cert — 3-backend
+/// Case 2: TLS config with a key but no cert — 3-backend
 /// construction-time error parity.
 #[test]
 fn test_net6_1c_c26b002_2_tls_key_only_3backend_parity() {
@@ -25450,13 +25449,13 @@ stdout(result.throw.message)
     }
 }
 
-/// C26B-002-3: TLS config `@()` plaintext fallback — 3-backend
+/// Case 3: TLS config `@()` plaintext fallback — 3-backend
 /// serving parity. Supersedes the existing NET6-1c-2 (which was
 /// construction-only); here we additionally drive a live request to
 /// pin that the plaintext fallback is accepted symmetrically.
 ///
 /// This case exists as a *positive* construction-parity pin alongside
-/// the negative cases above — C26B-002 acceptance demands the matrix
+/// the negative cases above — the acceptance contract demands the matrix
 /// include both accept and reject branches.
 #[test]
 fn test_net6_1c_c26b002_3_tls_plaintext_fallback_3backend_parity() {
@@ -25498,7 +25497,7 @@ stdout(r.requests)
     }
 }
 
-/// C26B-002-4: `tls = @(cert <= "valid-extension.pem", key <= "another.pem")`
+/// Case 4: `tls = @(cert <= "valid-extension.pem", key <= "another.pem")`
 /// where both paths point to files that exist on disk but do not
 /// contain valid PEM content. This exercises the TLS construction
 /// layer *past* file-exists checks: the backend must surface a
@@ -25620,13 +25619,13 @@ stdout(result.throw.message)
     let _ = fs::remove_dir_all(&tmp);
 }
 
-/// C26B-002-5: `tls = @(protocol <= "invalid-proto-token")` is
+/// Case 5: `tls = @(protocol <= "invalid-proto-token")` is
 /// rejected at construction time on all 3 backends.
 ///
 /// This is the protocol-literal validation half of the construction
 /// matrix (the numeric-literal half is already pinned by
 /// `test_nb6_10_non_str_protocol_with_cert_key_rejected_3way_parity`). Both pins
-/// must survive for C26B-002 to be acceptable — a silent fallback on
+/// must survive for the acceptance matrix to hold — a silent fallback on
 /// any backend would leak user-supplied tokens into the ALPN
 /// negotiation and break the handshake with zero diagnostic.
 #[test]
@@ -26540,7 +26539,7 @@ stdout(r.requests)
 // This keeps the 3-backend divergence policy intact (per STABILITY § 5.1 +
 // test_net6_4b_h2_3backend_divergence_documented) while widening coverage.
 
-/// C26B-001-1: h2 POST request handling — 3-backend semantics parity.
+/// h2 POST request handling — 3-backend semantics parity.
 /// Interpreter + Native: server accepts POST and responds with a fixed marker
 /// plus request method/path echoed into headers, confirming request intake.
 /// JS: rejects with H2Unsupported (no server started).
@@ -26809,7 +26808,7 @@ stdout(result.throw.message)
     );
 }
 
-/// C26B-001-2: h2 GET with query string — 3-backend semantics parity.
+/// h2 GET with query string — 3-backend semantics parity.
 /// Interpreter + Native: server responds with fixed body to a GET that carries
 /// a query string (`?q=c26b001`). Ensures query string on the request line does
 /// not perturb h2 frame parsing or response generation.
@@ -27058,7 +27057,7 @@ stdout(result.throw.message)
     );
 }
 
-/// C26B-001-3: h2 status code variation (404) — 3-backend semantics parity.
+/// h2 status code variation (404) — 3-backend semantics parity.
 /// Interpreter + Native: server returns status=404 with a recognizable body.
 /// curl --http2 --write-out formats out the HTTP status code for assertion.
 /// JS: rejects with H2Unsupported (no server started).
@@ -27326,7 +27325,7 @@ stdout(result.throw.message)
     );
 }
 
-/// C26B-001-4: h2 large response body (64 KiB) — 3-backend semantics parity.
+/// h2 large response body (64 KiB) — 3-backend semantics parity.
 /// Interpreter + Native: handler returns a deterministic 64 KiB body that
 /// exceeds the default h2 DATA frame payload boundary (16 KiB per RFC 7540
 /// default MAX_FRAME_SIZE), exercising multi-frame body emission. The body is
@@ -27334,11 +27333,11 @@ stdout(result.throw.message)
 /// verify both length and content integrity across the stream.
 /// JS: rejects with H2Unsupported (no server started).
 ///
-/// NOTE: Per Session 2 investigation (2026-04-24), custom response header
-/// preservation through the Native h2 HPACK encode path exhibits a parity gap
-/// (3 custom headers not visible via `curl --http2 -D -`). That finding is
-/// tracked separately in .dev/C26_BLOCKERS.md (C26B-026) and intentionally
-/// excluded from this C26B-001-4 pin to keep Phase 1 test-only scope intact.
+/// NOTE: custom response header preservation through the Native h2 HPACK
+/// encode path exhibited a parity gap (3 custom headers not visible via
+/// `curl --http2 -D -`). That finding is tracked separately in the internal
+/// tracker and intentionally excluded from this pin to keep the test-only
+/// scope intact.
 #[test]
 fn test_net6_c26b001_4_h2_large_body_3backend_parity() {
     if !node_available() {
@@ -29228,18 +29227,23 @@ fn test_nb6_26_27_28_native_h2_request_pack_parity() {
         .take(220)
         .collect::<Vec<_>>()
         .join("\n");
+    // F55 S2 (2026-06-06): the `body` span is now arity-aware — the 1-arg
+    // (eager) path keeps offset 0 / len body_len, while the 2-arg (streaming)
+    // path empties it (`streaming ? (taida_val)0 : (taida_val)body_len`) so the
+    // handler reads via readBody*. Either way it is still a span pack into
+    // req.raw at offset 0, preserving the D29B-001 arena shape for 1-arg.
     assert!(
         h2_build_section
-            .contains("SET_FIELD(\"body\",        taida_net_make_span(0, (taida_val)body_len)")
-            || h2_build_section
-                .contains("SET_FIELD(\"body\", taida_net_make_span(0, (taida_val)body_len)"),
-        "D29B-001 (Track-ζ Lock-H): h2 `body` field must be a span pack into req.raw at offset 0, len = body_len. Pre-fix Native h2 wrote `body = raw_bytes` (Bytes ref), which forced taida_retain(raw_bytes); post-fix the body span makes the second retain unnecessary and incorrect."
+            .contains("taida_net_make_span(0, streaming ? (taida_val)0 : (taida_val)body_len)"),
+        "D29B-001 (Track-ζ Lock-H) + F55 S2: h2 `body` field must be a span pack into req.raw at offset 0; the 1-arg path keeps len = body_len and only the 2-arg streaming path empties it. Pre-fix Native h2 wrote `body = raw_bytes` (Bytes ref), which forced taida_retain(raw_bytes); post-fix the body span makes the second retain unnecessary and incorrect."
     );
 
-    // NB6-28: Must allocate 14 fields (was 13, missing 'chunked')
+    // NB6-28 + F55 S2: must allocate 14 fields for 1-arg (eager) handlers and
+    // 16 for 2-arg (streaming) handlers (the extra __body_stream / __body_token
+    // sentinels). 'chunked' is among the base 14 (was 13 pre-NB6-28).
     assert!(
-        source.contains("taida_pack_new(14)"),
-        "NB6-28: Native h2 request pack must have 14 fields (including chunked)"
+        source.contains("taida_pack_new(streaming ? 16 : 14)"),
+        "NB6-28 + F55 S2: Native h2 request pack must allocate 14 fields (eager) / 16 fields (streaming, +__body_stream/__body_token)"
     );
 
     // NB6-28: 'chunked' field must be present
@@ -35245,7 +35249,7 @@ stdout(text.endsWith("xyz"))
     assert_backend_parity_for_source(source, "b11_bool_method_return");
 }
 
-/// B11B-004: stdout(side_effect_pack().field) must evaluate the parent
+/// stdout(side_effect_pack().field) must evaluate the parent
 /// expression exactly once.  The side-effect (an inner stdout) must appear
 /// once per call, proving the native FieldAccess tag-lookup path does not
 /// re-evaluate the parent object.
@@ -35262,7 +35266,7 @@ stdout(makePack().value)
     assert_backend_parity_for_source(source, "b11_stdout_field_no_double_eval");
 }
 
-/// B11B-004: stderr(side_effect_pack().field) must also evaluate the parent
+/// stderr(side_effect_pack().field) must also evaluate the parent
 /// expression exactly once.  We verify via stdout side-effect count that the
 /// parent is not double-evaluated in the stderr tag-lookup path.
 #[test]
@@ -35459,9 +35463,9 @@ stdout(p.label)
 // — and `.toString(args)` is a compile-time error (E1508).
 // ────────────────────────────────────────────────────────────────
 
-/// C12-2b: `.toString()` on primitives (Int / Float / Bool / Str).
+/// `.toString()` on primitives (Int / Float / Bool / Str).
 /// Locks in bit-exact output across the 3 backends for the base case
-/// that FB-10 reproduced with `Concat["...", n.toString()]`.
+/// reproduced with `Concat["...", n.toString()]`.
 #[test]
 fn test_c12_2_tostring_primitives_parity() {
     let source = r#"i <= 42
@@ -35496,10 +35500,10 @@ stdout(p.toString())
     assert_eq!(out, "@[1, 2, 3]\n@(a <= 1, b <= 2)");
 }
 
-/// C12-2b: FB-10 exact reproduction — passing `.toString()` result
+/// Exact reproduction — passing `.toString()` result
 /// across variable bind and into Str `+` concatenation. The interpreter
 /// must not raise the `Concat: arguments must both be list or both be
-/// Bytes` error that FB-10 originally reported.
+/// Bytes` error originally reported.
 #[test]
 fn test_c12_2_tostring_string_concat_parity() {
     let source = r#"status <= 404
@@ -35538,7 +35542,7 @@ stdout((n.toString() == Str[n]().getOrDefault("")).toString())
 // continues to compile and run correctly on all three backends.
 // ────────────────────────────────────────────────────────────────
 
-/// C12-3d (updated for E32B-023): tail-only mutual recursion now passes
+/// Tail-only mutual recursion now passes
 /// **only on Interpreter / JS**, where the runtime trampoline handles
 /// arbitrary depth. The Native and wasm-* backends reject the same
 /// program with `[E0700]` because they lower mutual cycles to plain
@@ -35756,7 +35760,7 @@ stdout("done")
 // truncate a null byte and break parity, a known limitation listed
 // in the Bytes-argument follow-up below.
 
-/// C12B-039 case 1: non-printable control bytes (tab and the ESC
+/// Case 1: non-printable control bytes (tab and the ESC
 /// prefix of an ANSI sequence) inside the payload preserve their
 /// byte count exactly across all three backends. The trailing newline
 /// added by `println!` / `console.log` / `printf` is NOT counted —
@@ -35780,7 +35784,7 @@ stdout(m)
     assert_eq!(out, "a\tb\n3\n\u{1b}[31mred\n8");
 }
 
-/// C12B-039 case 2: 108-byte ASCII payload. Guards against any hidden
+/// Case 2: 108-byte ASCII payload. Guards against any hidden
 /// buffer truncation or size cap in the native or wasm runtime's
 /// `taida_io_stdout` when the payload exceeds common small-buffer
 /// thresholds (stack-allocated `char buf[64]` etc).
@@ -35798,7 +35802,7 @@ stdout(n)
     );
 }
 
-/// C12B-039 case 3: byte counts returned from separate `stdout` calls
+/// Case 3: byte counts returned from separate `stdout` calls
 /// compose under arithmetic. This extends
 /// `test_c12_5_stdout_return_is_int_arith_parity` (which only verified
 /// `n + 1`) with an actual multi-stdout accumulation that no single
@@ -35817,7 +35821,7 @@ stdout(n1 + n2)
     assert_eq!(out, "hi\nworld\n7");
 }
 
-/// C12-4c: the canonical FB-17 reproduction — an arm body with a
+/// The canonical reproduction — an arm body with a
 /// bare discarded pipeline (`writeFile(...) => _wr`) followed by
 /// another discarded side effect (`RemoveFile[...]() => _rm`) is
 /// rejected by the parser on every backend.
@@ -36020,7 +36024,7 @@ print_int(42)
     assert_eq!(out, "hello\n42");
 }
 
-/// C12B-020: `expr => _` is a no-op pipeline step that discards the
+/// `expr => _` is a no-op pipeline step that discards the
 /// resulting value while keeping the preceding expression's side
 /// effect. Before this fix, Native reported "Lowering error:
 /// unsupported pipeline step" and JS generated `__p = _;` (a
@@ -36053,7 +36057,7 @@ stdout("second")
     assert_eq!(out, "first\nsecond");
 }
 
-/// C12B-022: Native `TypeIs[param, :PrimitiveType]()` must honour the
+/// Native `TypeIs[param, :PrimitiveType]()` must honour the
 /// actual runtime type tag of the parameter. Before this fix the Native
 /// backend returned `true` for every primitive TypeIs check on a
 /// parameter ident because the compile-time branches assumed any
@@ -36070,7 +36074,7 @@ stdout("second")
 /// in both directions. Float-param is intentionally omitted: passing a
 /// Float through an untyped user function parameter fails Native
 /// codegen with a Verifier error on `main` and this branch alike
-/// (pre-existing Native limitation, unrelated to C12B-022).
+/// (pre-existing Native limitation, unrelated to this case).
 #[test]
 fn test_c12b_022_typeis_int_param_parity() {
     let source = r#"is_int vi: Int =
@@ -36135,10 +36139,10 @@ stdout(is_bool_str("s"))
     assert_eq!(out, "true\ntrue\nfalse\nfalse");
 }
 
-/// C12B-034 regression: Mixed-type values through a user function
+/// Regression: Mixed-type values through a user function
 /// parameter must be memory-safe on wasm (and match Native / JS
 /// output) even when the param-tag ident path routes through the
-/// tagged stdout runtime call. Before C12B-034 the wasm
+/// tagged stdout runtime call. Before this fix the wasm
 /// `taida_io_stdout_with_tag` cast non-Bool `val` to `char*` directly,
 /// which caused SIGSEGV / UB when the parameter was e.g. an Int.
 /// Fixed by routing non-Bool non-Str tags through
@@ -36322,7 +36326,7 @@ stdout("unreachable")
     );
 }
 
-/// C12B-029: Unsupported Regex flag must fail fast on every backend,
+/// Unsupported Regex flag must fail fast on every backend,
 /// not only the interpreter. Before the fix, Native silently returned
 /// a usable Regex pack that no-op'd at every Str method call site.
 /// After the fix, all three backends throw at `Regex(...)` so the
@@ -36358,7 +36362,7 @@ stdout("unreachable")
     }
 }
 
-/// C12B-029: Invalid Regex pattern (unbalanced paren / stray
+/// Invalid Regex pattern (unbalanced paren / stray
 /// quantifier / etc.) must fail fast on every backend. Before the
 /// fix, Native silently returned a pack and then no-op'd at every
 /// `replace` / `match` / `search` call.
@@ -36388,7 +36392,7 @@ stdout("unreachable")
     }
 }
 
-/// C12B-029 positive case: Valid Regex flag + pattern must still
+/// Positive case: Valid Regex flag + pattern must still
 /// construct successfully on every backend — the fail-fast validation
 /// must not regress the canonical constructor path.
 #[test]
@@ -36405,8 +36409,8 @@ stdout("built:" + r.pattern)
     assert_eq!(out, "built:\\d+");
 }
 
-/// C12B-030: Hex escape `\xHH` and Unicode escape `\u{HH..}` must
-/// translate consistently across 3 backends. Before C12B-030 the
+/// Hex escape `\xHH` and Unicode escape `\u{HH..}` must
+/// translate consistently across 3 backends. Before this fix the
 /// Native implementation only supported `\d` / `\w` / `\s` and their
 /// complements, while JS `RegExp` silently treated `\u{41}` as the
 /// literal string `u{41}` because the `u` flag was not enabled.
@@ -36423,7 +36427,7 @@ stdout("BA".replace(r2, "X"))
     assert_eq!(out, "BX\nBX");
 }
 
-/// C12B-040: Bracketed hex escape `\x{HH..}` must behave identically on
+/// Bracketed hex escape `\x{HH..}` must behave identically on
 /// 3 backends for BOTH construct and first-use. The previous JS
 /// implementation appended the `u` flag at compile_regex time but not
 /// at Regex(...) constructor time, so `Regex("\\x{41}")` would pass
@@ -36450,7 +36454,7 @@ stdout("BA".replace(r, "X"))
     assert_eq!(out, "built:\\x{41}\nBX");
 }
 
-/// C12B-040: `\u{41}` bracketed Unicode escape must also round-trip
+/// `\u{41}` bracketed Unicode escape must also round-trip
 /// construct + first-use on all 3 backends.
 #[test]
 fn test_c12b_040_regex_bracketed_unicode_construct_and_first_use_parity() {
@@ -36470,7 +36474,7 @@ stdout("BA".replace(r, "X"))
     assert_eq!(out, "built:\\u{41}\nBX");
 }
 
-/// C12B-040: Identity escape like `\_` (no special meaning) is
+/// Identity escape like `\_` (no special meaning) is
 /// accepted by the Rust `regex` crate (Interpreter) and POSIX ERE
 /// (Native). The previous JS implementation enabled the `u` flag
 /// which made JS reject these escapes at first-use with `Invalid
@@ -36493,7 +36497,7 @@ stdout("a_b".replace(r, "X"))
     assert_eq!(out, "built:\\_\naXb");
 }
 
-/// C12B-040: `match` and `search` go through `__taida_compile_regex`
+/// `match` and `search` go through `__taida_compile_regex`
 /// too, so the construct-vs-first-use asymmetry must be covered on
 /// those code paths. This test uses `\x{HH..}` with `.match` and
 /// `.search` to guard against a future regression where only
@@ -36621,7 +36625,7 @@ stdout(nh.getOrDefault(-1).toString())
     assert_eq!(out, "255\n255\n10\n63\n-255");
 }
 
-/// B11B-005: Int[str, base]() with + sign — 3-way parity
+/// Int[str, base]() with + sign — 3-way parity
 /// Verifies that all 3 backends accept "+" prefix in base-specified parsing,
 /// matching Interpreter's i64::from_str_radix behavior.
 #[test]
@@ -36877,7 +36881,7 @@ stdout(result.get(2).getOrDefault("?"))
     assert_eq!(out, "3\na\nb\nc");
 }
 
-/// B11B-006: split("") must split by Unicode codepoint, not byte
+/// split("") must split by Unicode codepoint, not byte
 #[test]
 fn test_b11_str_split_unicode_parity() {
     let source = r#"
@@ -36893,7 +36897,7 @@ stdout(parts.get(2).getOrDefault("?"))
     assert_eq!(out, "3\nあ\nい\nう");
 }
 
-/// B11B-013: replace() must treat replacement as literal string, not JS meta-syntax
+/// replace() must treat replacement as literal string, not JS meta-syntax
 #[test]
 fn test_b11_str_replace_literal_meta_parity() {
     let source = r#"
@@ -37190,7 +37194,7 @@ stdout(TypeExtends[:Int, :Bool]())
 
 // ── B11B-015: TypeIs with named types and error subtypes ───────────
 
-/// B11B-015: TypeIs[value, :NamedType]() with custom named type
+/// TypeIs[value, :NamedType]() with custom named type
 #[test]
 fn test_b11_typeis_named_type_parity() {
     let source = r#"
@@ -37206,7 +37210,7 @@ stdout(TypeIs[42, :Animal]())
     assert_eq!(out, "true\nfalse\nfalse");
 }
 
-/// B11B-015: TypeIs with error subtype checks
+/// TypeIs with error subtype checks
 #[test]
 fn test_b11_typeis_error_subtype_parity() {
     let source = r#"
@@ -37221,7 +37225,7 @@ stdout(TypeIs[e, :AppError]())
     assert_eq!(out, "true\ntrue");
 }
 
-/// B11B-015: TypeIs negative case (AppError is not Animal)
+/// TypeIs negative case (AppError is not Animal)
 #[test]
 fn test_b11_typeis_error_subtype_negative_parity() {
     let source = r#"
@@ -37249,7 +37253,7 @@ stdout(TypeIs[e, :Animal]())
 // included here; their Exists shape is covered by
 // `wasm_wasi_exists`.
 
-/// C12B-021: writeFile to a valid path returns `Result[Int]` with
+/// writeFile to a valid path returns `Result[Int]` with
 /// isSuccess()==true. The byte count is asserted against the
 /// interpreter's output on all backends.
 #[test]
@@ -37272,7 +37276,7 @@ stdout(r.isError().toString())
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// C12B-021: writeFile to a non-existent parent directory surfaces
+/// writeFile to a non-existent parent directory surfaces
 /// `isError()==true` on every backend. The Error envelope carries
 /// a kind-like marker that we do not pin cross-backend (native
 /// surfaces strerror strings, JS surfaces Node fs codes).
@@ -37297,7 +37301,7 @@ stdout(Result["ok"]())
     assert_full_backend_parity_for_source(source, "c12b_021_result_direct_stdout_field_tags", &[]);
 }
 
-/// C12B-021: Exists on a present path reports isSuccess=true; on a
+/// Exists on a present path reports isSuccess=true; on a
 /// missing path also isSuccess=true (probe itself worked) — the
 /// inner Bool distinguishes the two states. We only assert the
 /// isSuccess bit cross-backend to avoid the wasm Bool-tag gap
@@ -37373,7 +37377,7 @@ stdout(bag.items.has(3).toString())
 // flags) across many calls so every backend hits its cache on all but
 // the first compile.
 
-/// C12B-036: a single Regex reused across 10 `replaceAll` calls must
+/// A single Regex reused across 10 `replaceAll` calls must
 /// produce identical output on all three backends. The loop over the
 /// pattern forces every backend's cache to warm up after the first
 /// compile; subsequent calls must all hit.
@@ -37395,7 +37399,7 @@ stdout("very merry christmas".replaceAll(r, "*"))
     );
 }
 
-/// C12B-036: two different `(pattern, flags)` pairs must not collide
+/// Two different `(pattern, flags)` pairs must not collide
 /// in the cache. Ensures the cache key correctly distinguishes the
 /// `i` flag variant from the plain variant on every backend.
 #[test]
@@ -37413,7 +37417,7 @@ stdout("hello world".replaceAll(ci, "*"))
     assert_eq!(out, "HELLO world\n* world\n* world\n* world");
 }
 
-/// C12B-036: repeated `search` on the same regex must return identical
+/// Repeated `search` on the same regex must return identical
 /// results. If any backend's cache returned a stale object (e.g. JS's
 /// `g` flag `lastIndex` issue) this would produce drifting search
 /// indices. Native's POSIX `regex_t` is stateless so only JS needs
@@ -37435,7 +37439,7 @@ stdout("abc123def".search(r))
     assert_eq!(out, "3\n3\n2\n3");
 }
 
-/// C12B-036: repeated `match` on the same regex must return identical
+/// Repeated `match` on the same regex must return identical
 /// BuchiPack fields. Locks the invariant that caching the compiled
 /// regex does not leak match state between invocations.
 #[test]
@@ -37469,7 +37473,7 @@ stdout(m2.start)
 // and error-close 1011). These tests lock that fix in and guard against
 // regressions to the flaky state.
 
-/// Shared WS handshake + frame-drain helper used by the C12B-041 regression
+/// Shared WS handshake + frame-drain helper used by the auto-close regression
 /// tests. Connects to `127.0.0.1:port`, performs the WebSocket upgrade, then
 /// reads until the connection is closed by the server. Returns the raw
 /// concatenated frame bytes or `None` if the handshake never succeeded within
@@ -37553,7 +37557,7 @@ fn c12b_041_connect_and_drain_ws(port: u16) -> Option<Vec<u8>> {
 
 /// Parse minimal unmasked server-to-client frames: returns
 /// `(Vec<(opcode, payload)>, saw_close_opcode)`. Only handles short payloads
-/// (<=125 bytes), which is all the C12B-041 scenarios emit.
+/// (<=125 bytes), which is all the auto-close scenarios emit.
 fn c12b_041_parse_frames(all_frames: &[u8]) -> (Vec<(u8, Vec<u8>)>, bool) {
     let mut out: Vec<(u8, Vec<u8>)> = Vec::new();
     let mut saw_close = false;
@@ -37575,7 +37579,7 @@ fn c12b_041_parse_frames(all_frames: &[u8]) -> (Vec<(u8, Vec<u8>)>, bool) {
     (out, saw_close)
 }
 
-/// C12B-041 (1): Run the exact same handler-return auto-close scenario as
+/// Scenario 1: Run the exact same handler-return auto-close scenario as
 /// `test_net4_ws_auto_close_on_return_interp` **10 times back-to-back**.
 ///
 /// Each iteration must complete cleanly (text frame `goodbye` + close frame).
@@ -37588,9 +37592,9 @@ fn c12b_041_parse_frames(all_frames: &[u8]) -> (Vec<(u8, Vec<u8>)>, bool) {
 /// because under `cargo test --release` full-parallel load the iteration-8
 /// handshake can legitimately fail from OS-level resource contention (accept
 /// backlog / ephemeral port churn) — that is not what this regression test
-/// guards against. See C12B-042 for the root cause analysis.
+/// guards against.
 ///
-/// Crucially, a C12B-041 server-side teardown regression would cause every
+/// Crucially, a server-side teardown regression would cause every
 /// attempt's **assertions** (not handshake) to fail, so retrying the
 /// handshake does not mask the bug class this test was created for.
 #[test]
@@ -37701,7 +37705,7 @@ stdout(outcome.ok.toString())
     }
 }
 
-/// C12B-041 (2): Handler explicitly calls `wsClose(ws)` before returning.
+/// Scenario 2: Handler explicitly calls `wsClose(ws)` before returning.
 /// Even when the handler closes, the outer `dispatch_request` is responsible
 /// for the final TCP teardown; the `finalize_websocket_close` sequence must
 /// run so the client never sees RST in place of FIN.
@@ -37765,7 +37769,7 @@ stdout(outcome.ok.toString())
     assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
 }
 
-/// C12B-041 (3): Shortest possible scenario — `wsSend(ws, ...)` immediately
+/// Scenario 3: Shortest possible scenario — `wsSend(ws, ...)` immediately
 /// followed by handler return, with no explicit close. Exercises the
 /// auto-close path with the tightest timing window between the text frame
 /// and the close frame (the one that regressed in the first place).
@@ -37824,7 +37828,7 @@ stdout(outcome.ok.toString())
     assert_eq!(stdout, "true", "httpServe result mismatch: {:?}", stdout);
 }
 
-/// C12B-041 (4): Error path — handler calls `wsClose(ws, 1004)` (a reserved
+/// Scenario 4: Error path — handler calls `wsClose(ws, 1004)` (a reserved
 /// close code) which raises a runtime error. `dispatch_request` catches the
 /// error and sends a 1011 close frame. The `finalize_websocket_close` helper
 /// must run here too so the client observes the 1011 frame + FIN cleanly.
@@ -37912,7 +37916,7 @@ stdout(outcome.ok.toString())
 // These guards appended at EOF per worktree contract (P3 ↔ P1 file boundary).
 // ──────────────────────────────────────────────────────────────────────────
 
-/// C26B-003 guard 1: the allocator must never return a port inside the
+/// Guard 1: the allocator must never return a port inside the
 /// kernel's ephemeral range on Linux. This is the root-cause invariant
 /// that eliminates kernel-assigned ephemeral-collision during handoff.
 #[test]
@@ -37961,7 +37965,7 @@ fn c26b_003_allocator_stays_below_ephemeral_range() {
     }
 }
 
-/// C26B-003 guard 2: simulate the parent→child handoff race under heavy
+/// Guard 2: simulate the parent→child handoff race under heavy
 /// concurrent allocation. After each allocation, spawn a lightweight
 /// "child" thread that sleeps briefly (emulating subprocess startup) then
 /// tries to bind. With the ephemeral-range restriction, the kernel cannot
@@ -38001,7 +38005,7 @@ fn c26b_003_handoff_race_20x_concurrent_children() {
     );
 }
 
-/// C26B-003 guard 3: long-run stability — 100 sequential allocate+bind
+/// Guard 3: long-run stability — 100 sequential allocate+bind
 /// cycles must all succeed. This is the "100x pin" that the blocker
 /// acceptance criteria explicitly calls for ("CI 100 連続 run で port-bind
 /// 起因 flaky 0 件"). Sequential is cheaper than 100 subprocesses while
@@ -38029,7 +38033,7 @@ fn c26b_003_sequential_100x_allocate_then_bind() {
     );
 }
 
-/// C26B-026: Native h2 HPACK encode must preserve custom response headers.
+/// Native h2 HPACK encode must preserve custom response headers.
 ///
 /// Regression pin for the Round 1 finding where a handler that returns
 /// three custom headers via `headers <= @[@(name, value), ...]` ended up
@@ -38659,7 +38663,7 @@ stdout(result.throw.message)
     );
 }
 
-/// C26B-001-5: h2 PUT method variation — 3-backend semantics parity.
+/// h2 PUT method variation — 3-backend semantics parity.
 /// Exercises HEADERS(no END_STREAM) + DATA(END_STREAM) framing for a
 /// non-POST body-carrying method. handler echoes req.method so client
 /// can verify the method was roundtripped intact.
@@ -38668,7 +38672,7 @@ fn test_net6_c26b001_5_h2_method_put_3backend_parity() {
     c26b001_r3_h2_method_variation_test("put", "PUT", "c26b001_5");
 }
 
-/// C26B-001-6: h2 DELETE method variation — 3-backend semantics parity.
+/// h2 DELETE method variation — 3-backend semantics parity.
 /// Body-less DELETE exercises HEADERS(END_STREAM) framing path. handler
 /// echoes req.method ("DELETE") for verification.
 #[test]
@@ -38676,7 +38680,7 @@ fn test_net6_c26b001_6_h2_method_delete_3backend_parity() {
     c26b001_r3_h2_method_variation_test("delete", "DELETE", "c26b001_6");
 }
 
-/// C26B-001-7: h2 PATCH method variation — 3-backend semantics parity.
+/// h2 PATCH method variation — 3-backend semantics parity.
 /// PATCH is a newer idempotent-optional method (RFC 5789) that frameworks
 /// often overlook. Body-carrying so exercises HEADERS + DATA path.
 #[test]
@@ -39365,7 +39369,7 @@ debug(r)
 // curl --http2, JS asserts `H2Unsupported` on transpile/run (NET6-4b-2
 // documented divergence).
 
-/// Helper for C27B-001 _8/_9/_10 — single-request h2 round trip.
+/// Helper for h2 cases 8/9/10 — single-request h2 round trip.
 /// Returns (response_body, server_stdout) per backend (interp + native).
 fn c27b001_h2_single_request_test(
     case_tag: &'static str,
@@ -39540,7 +39544,7 @@ fn c27b001_h2_single_request_test(
     );
 }
 
-/// C27B-001-8: h2 with multiple custom response headers (4 in one frame).
+/// h2 with multiple custom response headers (4 in one frame).
 /// Pins HPACK encoder behaviour for non-trivial header tables across
 /// interp + native.
 #[test]
@@ -39575,7 +39579,7 @@ stdout(r.requests)
     );
 }
 
-/// C27B-001-9: h2 OPTIONS method (CORS-preflight shape).
+/// h2 OPTIONS method (CORS-preflight shape).
 /// Body-less request, less common verb, exercises HEADERS(END_STREAM)
 /// framing on the request side and 200 OK response on a non-GET/POST path.
 #[test]
@@ -39606,7 +39610,7 @@ stdout(r.requests)
     );
 }
 
-/// C27B-001-10: h2 keep-alive sequential 2 requests over one TLS session.
+/// h2 keep-alive sequential 2 requests over one TLS session.
 /// Validates that the h2 server reuses the same connection across two
 /// distinct streams and increments `r.requests` to 2. Rather than driving
 /// two streams directly (curl supports that with multiple URLs in one
@@ -39922,7 +39926,7 @@ stdout(m1.has_value.toString())
 // rule: existing assertion writes are forbidden, append-only is allowed).
 // ===========================================================================
 
-/// Shared helper for D28B-002 h2 response-shape parity tests.
+/// Shared helper for the h2 response-shape parity tests.
 ///
 /// Runs interpreter + native to serve h2 with TLS, fires one curl
 /// --http2 request with the given method + body, then asserts
@@ -40198,7 +40202,7 @@ stdout(result.throw.message)
     );
 }
 
-/// D28B-002-1 (Round 2 wG): h2 HEAD method response (status 200, no body).
+/// Case 1: h2 HEAD method response (status 200, no body).
 ///
 /// curl --http2 -X HEAD never receives a body even when the handler returns
 /// one, but the Native h2 emit path must still set END_STREAM correctly so
@@ -40225,7 +40229,7 @@ fn test_net6_3b_native_h2_d28b002_1_head_no_body_4backend_parity() {
     );
 }
 
-/// D28B-002-2 (Round 2 wG): h2 OPTIONS method (CORS-preflight semantics).
+/// Case 2: h2 OPTIONS method (CORS-preflight semantics).
 ///
 /// OPTIONS is a non-GET / non-POST method. Body-less request, body-bearing
 /// response (CORS handlers typically reply with permissive headers + 204
@@ -40257,7 +40261,7 @@ fn test_net6_3b_native_h2_d28b002_2_options_method_4backend_parity() {
     );
 }
 
-/// D28B-002-3 (Round 2 wG): h2 empty body response (status 200, body="").
+/// Case 3: h2 empty body response (status 200, body="").
 ///
 /// Empty body forces the no_body shortcut path in
 /// `taida_net_h2_serve_connection` (line ~6032: `has_body=0`, single
@@ -40284,13 +40288,13 @@ fn test_net6_3b_native_h2_d28b002_3_empty_body_response_4backend_parity() {
     );
 }
 
-/// D28B-002-4 (Round 2 wG): h2 multiple custom response headers (5 headers).
+/// Case 4: h2 multiple custom response headers (5 headers).
 ///
 /// The response builder must emit each header through HPACK encoding.
-/// Pre-C26B-026 the h2 emit path silently dropped custom headers because
+/// Previously the h2 emit path silently dropped custom headers because
 /// of a Lax-pack unwrap mismatch (`taida_list_get` wrapped each entry in
 /// a Lax pack but the emit path looked up `name`/`value` on the outer Lax
-/// pack). This test pins the post-C26B-026 contract: 5 distinct custom
+/// pack). This test pins the corrected contract: 5 distinct custom
 /// headers all reach the client.
 #[test]
 fn test_net6_3b_native_h2_d28b002_4_multi_custom_headers_4backend_parity() {
@@ -40322,7 +40326,7 @@ fn test_net6_3b_native_h2_d28b002_4_multi_custom_headers_4backend_parity() {
     );
 }
 
-/// D28B-002-5 (Round 2 wG): h2 status 201 Created.
+/// Case 5: h2 status 201 Created.
 ///
 /// Common 2xx variant for resource creation. h2 emit path must encode
 /// `:status` 201 (not as a static-table pseudo, which only covers 200 /
@@ -40347,7 +40351,7 @@ fn test_net6_3b_native_h2_d28b002_5_status_201_created_4backend_parity() {
     );
 }
 
-/// D28B-002-6 (Round 2 wG): h2 status 500 Internal Server Error.
+/// Case 6: h2 status 500 Internal Server Error.
 ///
 /// 5xx variant exercise. 500 IS in the static HPACK table so the emit
 /// path uses an indexed pseudo; the body still goes through the normal
@@ -40373,7 +40377,7 @@ fn test_net6_3b_native_h2_d28b002_6_status_500_4backend_parity() {
     );
 }
 
-/// D28B-002-7 (Round 2 wG): h2 long path (1024 chars) request.
+/// Case 7: h2 long path (1024 chars) request.
 ///
 /// The h2 path field is unbounded by HTTP/2 itself; Taida's wire-limit
 /// check is HTTP_WIRE_MAX_PATH_LEN = 2048 (per src/interpreter/net_eval/h1.rs).
@@ -40419,7 +40423,7 @@ fn test_net6_3b_native_h2_d28b002_7_long_path_4backend_parity() {
     );
 }
 
-/// D28B-002-8 (Round 2 wG): h2 long response header value (256 chars).
+/// Case 8: h2 long response header value (256 chars).
 ///
 /// HPACK encoding must round-trip a 256-char header value. The emit
 /// path uses the H2Header `value[]` fixed-size buffer (256 bytes per
@@ -40455,7 +40459,7 @@ fn test_net6_3b_native_h2_d28b002_8_long_header_value_4backend_parity() {
     );
 }
 
-/// D28B-002-9 (Round 2 wG): h2 UTF-8 multi-byte body content.
+/// Case 9: h2 UTF-8 multi-byte body content.
 ///
 /// Body containing Japanese / accented Latin characters. Native h2
 /// emit must treat the body as a raw byte stream (no per-codepoint
@@ -40495,7 +40499,7 @@ fn test_net6_3b_native_h2_d28b002_9_utf8_body_4backend_parity() {
     );
 }
 
-/// D28B-002-10 (Round 2 wG): h2 response with empty headers list.
+/// Case 10: h2 response with empty headers list.
 ///
 /// Edge: handler returns `headers <= @[]` (empty list). The h2 emit
 /// path must still send the mandatory `:status` pseudo header plus
@@ -40522,7 +40526,7 @@ fn test_net6_3b_native_h2_d28b002_10_empty_headers_list_4backend_parity() {
     );
 }
 
-/// D28B-002-11 (Round 2 wG): wasm-wasi h2 compile-time rejection regression.
+/// Case 11: wasm-wasi h2 compile-time rejection regression.
 ///
 /// Companion to test_net2_6f_wasm_all_profiles_httpserve_still_rejected
 /// (which pins all 4 wasm profiles with the default protocol path).
@@ -40530,7 +40534,7 @@ fn test_net6_3b_native_h2_d28b002_10_empty_headers_list_4backend_parity() {
 /// wasm-wasi to confirm rejection is enforced even when the user
 /// requests h2 by name. The 4-backend parity for h2 = "interp + native
 /// serve, JS + wasm-wasi reject" -- this case is the wasm-wasi half of
-/// that contract for the 10-case D28B-002 set.
+/// that contract for the 10-case acceptance set.
 #[test]
 fn test_net6_3b_native_h2_d28b002_11_wasm_wasi_h2_compile_reject() {
     let source = r#">>> taida-lang/net => @(httpServe, HttpProtocol)
@@ -40600,14 +40604,14 @@ stdout(result.ok)
 // implementation pin (h2 and h3 share Strategy V1-A) is the
 // cost-effective shape.
 
-/// D29B-001 wire-parity: SpanEquals against `req.headers(0).name` returns
+/// Wire-parity: SpanEquals against `req.headers(0).name` returns
 /// the same Bool under h1 and h2 (post-fix both `true`; pre-fix h2 was
 /// silently `false` because the name was a Str rather than a span pack
 /// into req.raw).
 ///
 /// The handler echoes the SpanEquals result into the response body so the
 /// curl client can observe it. h1 is the reference shape (parse_request_head
-/// already produces span packs); h2 is the post-D29B-001 fix.
+/// already produces span packs); h2 is the post-fix shape.
 #[test]
 fn test_d29b_001_h2_span_headers_equals_h1_wire_parity() {
     if !cc_available() {
@@ -40779,7 +40783,7 @@ stdout(r.requests)
     );
 }
 
-/// D29B-011 structural-parity guard surfaced from parity.rs (so anyone
+/// Structural-parity guard surfaced from parity.rs (so anyone
 /// running `cargo test --release --test parity` sees it). The full
 /// structural pin lives in `tests/d29b_011_h3_headers_span_parity.rs`;
 /// here we only assert that the symmetric implementation marker is
@@ -41997,7 +42001,7 @@ stdout(JSON["true", Int]().hasValue().toString())
     assert_native_and_js_when_available(source, "json_strict_mismatch_lax_empty_backend_parity");
 }
 
-/// F54B-016 (G4): Set / `Unique` must dedup by STRUCTURE across every backend,
+/// Set / `Unique` must dedup by STRUCTURE across every backend,
 /// not by raw pointer identity. This builds structurally-equal-but-distinct-
 /// pointer strings (via `+`), BuchiPacks and Lists, then checks that set /
 /// union / intersect / diff / unique sizes agree with the interpreter (the
@@ -42039,13 +42043,13 @@ stdout(Unique[uniqList]().length().toString())
     }
 }
 
-/// F54B-016 (G4 follow-up): Bytes must dedup by STRUCTURE across backends, like
+/// Follow-up: Bytes must dedup by STRUCTURE across backends, like
 /// the other key-eligible variants. native dedups Bytes by content (TKIND_BYTES);
 /// WASM originally had no Bytes branch in `_wasm_value_eq` / `_wasm_fp_accum` /
 /// `_wasm_value_hashable`, so structurally-equal distinct-pointer Bytes fell back
 /// to raw pointer identity and over-counted. `.unmold()` strips the Lax wrapper
 /// so the Set holds raw Bytes -- a `Lax[Bytes]` element would instead trip the
-/// separate JS Lax-equality gap (F54B-020), unrelated to Bytes dedup. The
+/// separate JS Lax-equality gap, unrelated to Bytes dedup. The
 /// `Bytes[...]()` constructor mold is wasm-full only (not wasm-min / wasm-wasi),
 /// so this checks interpreter / native / JS + wasm-full. Interpreter reference
 /// output is `2 1 2 1` (size{ab,cd}=2, unique{ab,ab,ab}=1, union=2, intersect=1).
@@ -42083,7 +42087,7 @@ stdout(sa.intersect(sb).size().toString())
     }
 }
 
-/// F54B-016 (G4 follow-up): `Unique[](by)` must dedup the extracted keys by
+/// Follow-up: `Unique[](by)` must dedup the extracted keys by
 /// STRUCTURE. native / WASM `taida_list_unique_by` compared keys by raw value /
 /// pointer, so a `by` callback returning a freshly-built (distinct-pointer)
 /// structurally-equal key (here `s + "!"`) was not deduped, diverging from the
@@ -42118,7 +42122,7 @@ stdout(u.length().toString())
     }
 }
 
-/// F54B-014 (G5): the abi `header(...)` helper must return a NEW WebResponse
+/// The abi `header(...)` helper must return a NEW WebResponse
 /// and leave the input response untouched. native/WASM stored the headers
 /// list pointer into each derived response pack without copying, and
 /// `taida_list_push` mutates the spine in place, so deriving twice from the
@@ -42170,7 +42174,7 @@ stdout(h3.name + "=" + h3.value)
     }
 }
 
-/// F54B-020 (G7): JS `__taida_equals` / `__taida_fingerprint` excluded every
+/// JS `__taida_equals` / `__taida_fingerprint` excluded every
 /// `__`-prefixed key, which also dropped the closure-mold DATA fields
 /// (`__value` / `__default` / `__type` / `__error`), so any two Lax values
 /// with the same `has_value` compared equal regardless of payload — JS
@@ -42214,7 +42218,7 @@ stdout(Unique[@[i1, i2, i3, i4]]().length().toString())
     }
 }
 
-/// F54B-020 companion: the original reproducer kept the `Lax[Bytes]` wrapper
+/// Companion: the original reproducer kept the `Lax[Bytes]` wrapper
 /// (no `.unmold()`), which is exactly the shape the `__`-filter bug
 /// collapsed. `Bytes[...]()` molds exist on interpreter / native / JS
 /// (wasm-full only on WASM, so WASM is skipped here). Expected `1 2 2`.
@@ -42246,7 +42250,7 @@ stdout(Unique[@[a, b, c]]().length().toString())
     }
 }
 
-/// F54B-009 (G6): pool waiting-semaphore contract across backends.
+/// Pool waiting-semaphore contract across backends.
 /// - `resource` is now `Lax`: failure-side on a fresh slot (the caller
 ///   builds the resource), `Lax(value)` when an idle BYO resource
 ///   deposited via poolRelease is reused.
@@ -42331,7 +42335,7 @@ stdout("zero=" + bad.kind)
     }
 }
 
-/// F54B-019 (G8 tier 1): Float comparison operators must use f64 semantics
+/// Tier 1: Float comparison operators must use f64 semantics
 /// on native/WASM. The lowering routed every Float-involved Eq/NotEq to the
 /// raw i64 comparison (so `3 == 3.0` was false — the bit pattern of 3.0 is
 /// not 3) and Lt/Gt/GtEq were unconditionally raw (so `-1.0 < -2.0` was
@@ -42381,7 +42385,7 @@ stdout((2.5 >= g).toString())
     }
 }
 
-/// F54B-019 (G8 tier 2): Set×Set operations across numeric domains.
+/// Tier 2: Set×Set operations across numeric domains.
 /// Sets carry one elem_type_tag; when the two operands of union /
 /// intersect / diff pin DIFFERENT scalar domains (or a Float domain is
 /// in play), native/WASM previously compared raw i64 values — the f64
@@ -42529,5 +42533,429 @@ stdout("val=" + res)
     if node_available() {
         let js = run_js_src(source, label).expect("js run");
         assert_eq!(interp, js, "interpreter/js pool pending-acquire parity");
+    }
+}
+
+/// Regression: float-family binary ops used to guess the kind of each
+/// operand from its magnitude (a ±2^20 window decided "plain integer"
+/// vs "f64 bit pattern"), so a statically-typed Int operand outside
+/// that window was reinterpreted as f64 bits: `2000000 == 2000000.0`
+/// was false and `2000000 + 0.5` evaluated to 0.5 on native/WASM. The
+/// lowering now lifts statically-known Int operands with
+/// `taida_int_to_float` at the call site, and the Div/Mod molds (which
+/// always pre-widened) are pinned here against the same boundary.
+/// Expected: true true 2000000.5 4000000.0 1000000.0 1.0
+#[test]
+fn test_float_op_large_int_lift_parity() {
+    let source = r#"
+stdout((2000000 == 2000000.0).toString())
+a <= 0 - 2000000
+b <= 0.0 - 2000000.0
+stdout((a == b).toString())
+stdout(2000000 + 0.5)
+stdout(2000000.0 * 2)
+Div[2000000, 2.0]() >=> d
+stdout(d)
+Mod[2000001.0, 2]() >=> m
+stdout(m)
+"#;
+    let label = "float_op_large_int_lift";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["true", "true", "2000000.5", "4000000.0", "1000000.0", "1.0"],
+        "interpreter large-int float lift reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native large-int float lift parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js large-int float lift parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min large-int float lift parity"
+        );
+    }
+}
+
+/// Regression: passing an operator expression directly to stdout
+/// (`stdout(3.0 * 2)`) printed the raw f64 bit pattern as an Int on
+/// native/WASM, while the variable-bound form (`x <= 3.0 * 2;
+/// stdout(x)`) printed 6.0. The compile-time tag inference had no arm
+/// for binary/unary operator results, so the polymorphic printer
+/// received UNKNOWN and fell back to the Int rendering. The tag arms
+/// now mirror the operator dispatch exactly.
+/// Expected: 6.0 3.0 true -1.5 false
+#[test]
+fn test_stdout_direct_operator_expr_tag_parity() {
+    let source = r#"
+stdout(3.0 * 2)
+stdout(2.5 + 0.5)
+stdout((1 == 1.0).toString())
+stdout(0 - 1.5)
+stdout((2.5 < 1).toString())
+"#;
+    let label = "stdout_direct_operator_expr_tag";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["6.0", "3.0", "true", "-1.5", "false"],
+        "interpreter direct operator-expr stdout reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native direct operator-expr stdout parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(
+            interp, js,
+            "interpreter/js direct operator-expr stdout parity"
+        );
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min direct operator-expr stdout parity"
+        );
+    }
+}
+
+/// Regression: heterogeneous container literals lost per-element type
+/// identity on native/WASM (one container-level tag slot), so a Bool
+/// collided with Int in setOf, an Int/Float pair failed to cross over
+/// in Unique, same-ordinal variants of different enums merged, and
+/// membership/insertion followed the collapsed view. Containers now
+/// carry a per-element kind array materialised at the first mixed
+/// stamp, and dedup/membership compare (value, kind) pairs.
+/// Expected: 2 1 2 2 2 3
+#[test]
+fn test_value_tag_mixed_container_dedup_parity() {
+    let source = r#"
+stdout(setOf(@[1, true]).size())
+Unique[@[1, 1.0]]() >=> u
+stdout(u.length())
+Enum => Color = :Red :Green
+Enum => Size = :Small :Large
+stdout(setOf(@[Color:Red(), Size:Small()]).size())
+stdout(setOf(@[Color:Red(), Size:Small(), 0]).size())
+s <= setOf(@[1, true])
+s.add(2 == 2) => s2
+stdout(s2.size())
+s.add(0) => s3
+stdout(s3.size())
+"#;
+    let label = "value_tag_mixed_container_dedup";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["2", "1", "2", "2", "2", "3"],
+        "interpreter mixed-container dedup reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native mixed-container dedup parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js mixed-container dedup parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min mixed-container dedup parity"
+        );
+    }
+}
+
+/// Regression: a value unmolded out of a mixed list lost its runtime
+/// kind, so the comparison after `xs.get(1) >=> a` took the raw-int
+/// fast path and a Float payload never equalled an Int literal. The
+/// list accessors now stamp the element's recorded kind on the Lax
+/// payload and the unmold captures it as a shadow for tagged poly
+/// comparisons.
+/// Expected: true true
+#[test]
+fn test_value_tag_readback_shadow_kind_parity() {
+    let source = r#"
+xs <= @[1, 1.0]
+xs.get(1) >=> a
+stdout((a == 1).toString())
+xs.get(0) >=> b
+stdout((b == 1.0).toString())
+"#;
+    let label = "value_tag_readback_shadow_kind";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["true", "true"],
+        "interpreter read-back shadow kind reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native read-back shadow kind parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js read-back shadow kind parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min read-back shadow kind parity"
+        );
+    }
+}
+
+/// Regression: the tagged Set entry points (has / add / remove) passed
+/// only the probe's *static* EKIND constant, ignoring the unmold shadow
+/// kind that a runtime-kind binding carries (`xs.get(i) >=> a`). Native
+/// then treated a dynamic Float probe as statically-typed, losing the
+/// Int/Float numeric crossing that the interpreter and JS apply.
+/// Expected: true 1 1 1
+#[test]
+fn test_value_tag_set_probe_shadow_kind_parity() {
+    let source = r#"
+xs <= @[1, 1.0]
+xs.get(1) >=> a
+s <= setOf(@[1])
+stdout(s.has(a).toString())
+stdout(s.add(a).size().toString())
+stdout(setOf(@[a]).size().toString())
+s2 <= setOf(@[1.0, 2])
+stdout(s2.remove(a).size().toString())
+"#;
+    let label = "value_tag_set_probe_shadow_kind";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["true", "1", "1", "1"],
+        "interpreter set-probe shadow kind reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native set-probe shadow kind parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js set-probe shadow kind parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min set-probe shadow kind parity"
+        );
+    }
+}
+
+/// Regression: comparing two lists with == fell through to a raw
+/// pointer comparison on native/WASM, so even two identical
+/// homogeneous literals compared false, and the Int/Float crossing
+/// inside elements never applied. Statically-known list operands now
+/// run the kind-aware structural walk.
+/// Expected: true true false false
+#[test]
+fn test_value_tag_list_structural_eq_parity() {
+    let source = r#"
+xs <= @[1, 2]
+ys <= @[1, 2]
+stdout((xs == ys).toString())
+ms <= @[1, 1.0]
+ns <= @[1.0, 1]
+stdout((ms == ns).toString())
+zs <= @[1, 2.0]
+stdout((ms == zs).toString())
+stdout((ms != ns).toString())
+"#;
+    let label = "value_tag_list_structural_eq";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["true", "true", "false", "false"],
+        "interpreter list structural eq reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native list structural eq parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js list structural eq parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min list structural eq parity"
+        );
+    }
+}
+
+/// Regression: a nested list containing a Float rode an
+/// order-sensitive fingerprint through unique/setOf (the hashability
+/// gate could not see the Float inside), so permuted Int/Float pairs
+/// failed to dedup. The gate now consults each element's recorded
+/// kind and the linear path walks kind-aware pairs.
+/// Expected: 2
+#[test]
+fn test_value_tag_nested_mixed_unique_parity() {
+    let source = r#"
+Unique[@[@[1, 1.0], @[1.0, 1], @[2.0, 3]]]() >=> u
+stdout(u.length())
+"#;
+    let label = "value_tag_nested_mixed_unique";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["2"],
+        "interpreter nested mixed unique reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native nested mixed unique parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js nested mixed unique parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min nested mixed unique parity"
+        );
+    }
+}
+
+/// Regression: derived list operations (Reverse / Concat / Sort / Take
+/// and friends) collapsed an array-carrying source to the bare mixed
+/// sentinel, so a downstream setOf lost the Int/Float crossing one
+/// composition step after the literal; and removing with a probe of a
+/// different numeric kind missed the crossing entirely. Derived ops now
+/// project per-element kinds (sorts ride them through the permutation)
+/// and removal takes the probe's static kind.
+/// Expected: 1 2 1 2 1 1
+#[test]
+fn test_value_tag_derived_op_projection_parity() {
+    let source = r#"
+stdout(setOf(Reverse[@[1, 1.0]]()).size())
+stdout(setOf(Concat[@[1, 1.0], @[2]]()).size())
+stdout(setOf(Take[@[1, 1.0, 1], 2]()).size())
+stdout(setOf(Sort[@[2, 1.0, 1]]()).size())
+stdout(setOf(@[1.0, 2]).remove(1).size())
+Unique[Drop[@[5, 1, 1.0], 1]()]() >=> u
+stdout(u.length())
+"#;
+    let label = "value_tag_derived_op_projection";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["1", "2", "1", "2", "1", "1"],
+        "interpreter derived-op projection reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native derived-op projection parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js derived-op projection parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min derived-op projection parity"
+        );
+    }
+}
+
+/// Regression: composing two HOMOGENEOUS containers with different
+/// concrete tags (union/concat of an INT container with a BOOL/Float
+/// container) slipped past the array-carrier check and produced a
+/// result claiming one homogeneous tag while holding foreign elements
+/// — and the union latch stamped tags after the push, mis-indexing
+/// the materialised kind array. Cross-tagged compositions now take
+/// the kind-aware projection (latch stamps pre-push), an unmolded
+/// payload's shadow no longer leaks into a same-named lambda
+/// parameter, and Sub/Mul results report the INT kind their actual
+/// int-helper dispatch produces.
+/// Expected: 2 true false 2 true true 2
+#[test]
+fn test_value_tag_cross_tagged_composition_parity() {
+    let source = r#"
+s1 <= setOf(@[1])
+s2 <= setOf(@[true])
+u <= s1.union(s2)
+stdout(u.size())
+stdout(u.has(true))
+stdout(u.has(2))
+Concat[@[1], @[true]]() >=> c
+stdout(setOf(c).size())
+xs <= @[1, 1.0]
+xs.get(1) >=> a
+check <= _ a: Int = (a == 1)
+stdout(check(1).toString())
+stdout((a == 1).toString())
+@[2, 5].min() >=> m
+stdout(setOf(@[m - 1, true]).size())
+"#;
+    let label = "value_tag_cross_tagged_composition";
+    let interp = run_interpreter_src(source, label).expect("interpreter run");
+    let tokens: Vec<&str> = interp.split_whitespace().collect();
+    assert_eq!(
+        tokens,
+        ["2", "true", "false", "2", "true", "true", "2"],
+        "interpreter cross-tagged composition reference output"
+    );
+    if cc_available() {
+        let native = run_native_src(source, label).expect("native run");
+        assert_eq!(
+            interp, native,
+            "interpreter/native cross-tagged composition parity"
+        );
+    }
+    if node_available() {
+        let js = run_js_src(source, label).expect("js run");
+        assert_eq!(interp, js, "interpreter/js cross-tagged composition parity");
+    }
+    if let Ok(Some(wasm)) = run_wasm_min_src(source, label) {
+        assert_eq!(
+            interp, wasm,
+            "interpreter/wasm-min cross-tagged composition parity"
+        );
     }
 }

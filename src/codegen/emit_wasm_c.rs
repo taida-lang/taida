@@ -645,6 +645,38 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_list_set_elem_tag" => {
             "void taida_list_set_elem_tag(int64_t list_ptr, int64_t tag);".to_string()
         }
+        // Value-tag track: EKIND-form stamp + tagged Set membership /
+        // insertion (kind | enum-type-id<<8 in the third argument).
+        "taida_list_note_push_ekind" => {
+            "void taida_list_note_push_ekind(int64_t list_ptr, int64_t ekind);".to_string()
+        }
+        "taida_set_has_tagged" => {
+            "int64_t taida_set_has_tagged(int64_t set_ptr, int64_t item, int64_t ekind);"
+                .to_string()
+        }
+        "taida_set_add_tagged" => {
+            "int64_t taida_set_add_tagged(int64_t set_ptr, int64_t item, int64_t ekind);"
+                .to_string()
+        }
+        "taida_collection_has_tagged" => {
+            "int64_t taida_collection_has_tagged(int64_t ptr, int64_t item, int64_t ekind);"
+                .to_string()
+        }
+        "taida_collection_remove_tagged" => {
+            "int64_t taida_collection_remove_tagged(int64_t ptr, int64_t item, int64_t ekind);"
+                .to_string()
+        }
+        "taida_lax_value_ekind" => {
+            "int64_t taida_lax_value_ekind(int64_t maybe_lax);".to_string()
+        }
+        "taida_poly_eq_tagged" => {
+            "int64_t taida_poly_eq_tagged(int64_t a, int64_t eka, int64_t b, int64_t ekb);"
+                .to_string()
+        }
+        "taida_poly_neq_tagged" => {
+            "int64_t taida_poly_neq_tagged(int64_t a, int64_t eka, int64_t b, int64_t ekb);"
+                .to_string()
+        }
         // W-4: HashMap runtime functions
         "taida_hashmap_new" => "int64_t taida_hashmap_new(void);".to_string(),
         "taida_hashmap_set" => {
@@ -847,6 +879,19 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_str_from_float" => "int64_t taida_str_from_float(int64_t v);".to_string(),
         // taida-lang/crypto: pure SHA-256 is available in every WASM profile.
         "taida_sha256" => "int64_t taida_sha256(int64_t value);".to_string(),
+        // F55 S4: extended crypto. The hash family / HMAC / *Encode /
+        // constantTimeEquals return Str / Bool only (no Bytes constructor),
+        // so they are available on every WASM profile (implemented in
+        // runtime_core_wasm/02_containers.inc.c alongside sha256). The
+        // decode / randomBytes producers (which build Bytes) are gated to
+        // wasm-wasi / wasm-full further below.
+        "taida_crypto_sha512" | "taida_crypto_sha384" | "taida_crypto_sha224"
+        | "taida_crypto_hex_encode" | "taida_crypto_base64_encode" => {
+            format!("int64_t {}(int64_t value);", name)
+        }
+        "taida_crypto_hmac_sha256" | "taida_crypto_constant_time_equals" => {
+            format!("int64_t {}(int64_t a, int64_t b);", name)
+        }
         // W-5: Lax method helpers
         "taida_can_throw_payload" => "int64_t taida_can_throw_payload(int64_t val);".to_string(),
         // W-5: Float comparison
@@ -959,6 +1004,11 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         // WC-3: List HOF functions (all profiles — implemented in runtime_core_wasm.c)
         "taida_list_map" | "taida_list_filter" => {
             format!("int64_t {}(int64_t list, int64_t fn_ptr);", name)
+        }
+        // Value-tag track: kind-supplying map (callback's static return kind).
+        "taida_list_map_k" => {
+            "int64_t taida_list_map_k(int64_t list, int64_t fn_ptr, int64_t ret_ekind);"
+                .to_string()
         }
         "taida_list_fold" | "taida_list_foldr" => {
             format!("int64_t {}(int64_t list, int64_t init, int64_t fn_ptr);", name)
@@ -1338,6 +1388,35 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_bytes_from_raw" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
             "int64_t taida_bytes_from_raw(int64_t ptr, int64_t len);".to_string()
         }
+        // F55 S4: crypto producers that build Bytes (hexDecode / base64Decode
+        // -> Lax[Bytes], randomBytes -> Bytes). They depend on the Bytes
+        // constructor + (for randomBytes) the WASI random_get import, both
+        // available only on wasm-wasi / wasm-full (implemented in
+        // runtime_wasi_io.c). wasm-min / wasm-edge reject these below.
+        "taida_crypto_hex_decode" | "taida_crypto_base64_decode" | "taida_crypto_random_bytes"
+            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
+        {
+            format!("int64_t {}(int64_t value);", name)
+        }
+        "taida_crypto_hex_decode" | "taida_crypto_base64_decode" | "taida_crypto_random_bytes"
+            if matches!(profile, WasmProfile::Min | WasmProfile::Edge) =>
+        {
+            let profile_name = if profile == WasmProfile::Min {
+                "wasm-min"
+            } else {
+                "wasm-edge"
+            };
+            return Err(WasmCEmitError {
+                message: format!(
+                    "{} does not support runtime function '{}' \
+                     (crypto Bytes producers require the wasm-wasi / wasm-full \
+                     Bytes runtime; randomBytes additionally needs the WASI \
+                     random_get import). Use wasm-wasi, wasm-full, or the \
+                     native backend instead.",
+                    profile_name, name
+                ),
+            });
+        }
         "taida_bytes_new_filled"
             if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
         {
@@ -1682,6 +1761,7 @@ fn emit_inst(
                 || name == "taida_release"
                 || name == "taida_str_retain"
                 || name == "taida_list_set_elem_tag"
+                || name == "taida_list_note_push_ekind"
                 || name == "taida_hashmap_set_value_tag"
                 || name == "taida_set_set_elem_tag"
                 || name == "taida_error_ceiling_pop"

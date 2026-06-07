@@ -72,7 +72,7 @@ fn taida_bin() -> PathBuf {
     common::taida_bin()
 }
 
-/// C26B-025: rewrite `packages.tdm` self-identity to match the
+/// Rewrite `packages.tdm` self-identity to match the
 /// version about to be published, then amend the initial commit so
 /// the working tree stays clean for `taida ingot publish`.
 fn bump_manifest_to(project: &Path, pkg: &str, version: &str) {
@@ -247,7 +247,7 @@ fn force_version_actually_pushes_the_forced_tag() {
     );
 }
 
-/// C26B-025: publish must refuse when `packages.tdm` self-identity
+/// Publish must refuse when `packages.tdm` self-identity
 /// disagrees with the tag about to be pushed. This is the primary
 /// regression guard for the terminal `@a.7` incident.
 #[test]
@@ -281,7 +281,7 @@ fn c26b_025_publish_rejects_stale_manifest_self_identity() {
     );
 }
 
-/// C26B-025: label addendum ("manifest a.5" + "--label rc" = tag
+/// Label addendum ("manifest a.5" + "--label rc" = tag
 /// "a.5.rc") is a legitimate match and must NOT be rejected. This
 /// keeps the common RC workflow ergonomic.
 #[test]

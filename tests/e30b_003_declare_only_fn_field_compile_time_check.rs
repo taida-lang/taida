@@ -60,7 +60,7 @@ fn run_check(source: &str, label: &str) -> (String, bool) {
     (combined, output.status.success())
 }
 
-/// E30B-003 acceptance #1: TypeDef variant with declare-only function
+/// Acceptance #1: TypeDef variant with declare-only function
 /// field whose return type is opaque (unknown alias) → `[E1410]` fires.
 #[test]
 fn e30b_003_typedef_opaque_return_emits_e1410() {
@@ -87,7 +87,7 @@ fn e30b_003_typedef_opaque_return_emits_e1410() {
     );
 }
 
-/// E30B-003 acceptance #2: Mold variant with declare-only function field
+/// Acceptance #2: Mold variant with declare-only function field
 /// whose return type is opaque → `[E1410]` fires.
 #[test]
 fn e30b_003_mold_opaque_return_emits_e1410() {
@@ -109,7 +109,7 @@ fn e30b_003_mold_opaque_return_emits_e1410() {
     );
 }
 
-/// E30B-003 acceptance #3: Error variant with declare-only function field
+/// Acceptance #3: Error variant with declare-only function field
 /// whose return type is opaque → `[E1410]` fires. The parameter type
 /// was changed from `Unit` to `Str` so the opaque-return diagnostic is
 /// the only thing the checker complains about (without `[E1520]` from
@@ -134,7 +134,7 @@ fn e30b_003_error_opaque_return_emits_e1410() {
     );
 }
 
-/// E30B-003 acceptance #4: declare-only function field with generatable
+/// Acceptance #4: declare-only function field with generatable
 /// return type (Str = primitive) → 0 errors. Pin Phase 4 acceptance
 /// regression: declare-only fn fields with auto-generatable returns must
 /// continue to be accepted in all class-like variants.
@@ -165,7 +165,7 @@ stdout(p.name)
     );
 }
 
-/// E30B-003 acceptance #5: A method body (full method definition, not
+/// Acceptance #5: A method body (full method definition, not
 /// declare-only) with opaque return type must NOT fire `[E1410]`. The
 /// `is_declare_only_fn_field` predicate requires `is_method == false`,
 /// so a method-with-body bypasses the Phase 5 reject path. (Note: the
@@ -204,7 +204,7 @@ stdout(p.compute())
     );
 }
 
-/// E30B-003 acceptance #6: Phase 4 (E30B-002) regression guard — the four
+/// Acceptance #6: Phase 4 regression guard — the four
 /// existing accepted patterns must continue to type-check cleanly after
 /// Phase 5 land. This test uses inline copies of the e30b_002_*_passes
 /// fixtures to ensure no silent regression.

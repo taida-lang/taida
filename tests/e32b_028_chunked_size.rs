@@ -402,7 +402,7 @@ fn chunked_process_survival_three_backend() {
     }
 }
 
-/// E32B-053: chunk-size with leading OWS (space before the hex digits) must
+/// chunk-size with leading OWS (space before the hex digits) must
 /// be rejected as malformed by all three backends — RFC 7230 §4.1 forbids
 /// OWS within `chunk-size`. Reverse-proxy interpretation drift around OWS
 /// is the canonical request-smuggling vector this test pins.
@@ -456,7 +456,7 @@ fn e32b_053_chunk_size_leading_ows_rejected_three_backend() {
     }
 }
 
-/// E32B-053: chunk-size with 16 hex digits (one more than the 15-digit cap)
+/// chunk-size with 16 hex digits (one more than the 15-digit cap)
 /// even when its magnitude fits in a `usize` must be rejected — leading
 /// zeros count toward the cap. This pins the leading-zero policy across
 /// the three backends.
@@ -504,7 +504,7 @@ fn e32b_053_chunk_size_leading_zero_overflows_cap_three_backend() {
     }
 }
 
-/// E32B-053 follow-up: leading-OWS chunk-size must be rejected on the
+/// Follow-up: leading-OWS chunk-size must be rejected on the
 /// streaming path (`readBodyAll`) too. The Codex review uncovered that
 /// the 2026-05-07 fix only touched the eager helpers, so JS
 /// `__taida_net_readBodyAllImpl` / `__taida_net_readBodyChunkChunkedSync`
@@ -560,7 +560,7 @@ fn e32b_053_streaming_chunk_size_leading_ows_rejected_three_backend() {
     }
 }
 
-/// E32B-051: chunk-ext flood. A single chunk-size line (`1;` followed by a
+/// chunk-ext flood. A single chunk-size line (`1;` followed by a
 /// 2 MiB padding) must be rejected as malformed by the eager path on all
 /// three backends. Without the per-line cap shared between Interpreter / JS /
 /// Native this test would force unbounded CRLF scans on the smaller backends.
@@ -626,7 +626,7 @@ fn e32b_051_chunk_extension_flood_rejected_three_backend() {
     }
 }
 
-/// E32B-052: trailer-count flood. After the terminator chunk a body that
+/// trailer-count flood. After the terminator chunk a body that
 /// emits 200 trailer lines (each `X-N: 1`) must be rejected on all three
 /// backends — well past the shared 64-line cap.
 #[test]
@@ -683,7 +683,7 @@ fn e32b_052_trailer_count_flood_rejected_three_backend() {
     }
 }
 
-/// E32B-051 (streaming-path closure): a 2 MiB chunk-extension flood directed
+/// Streaming-path closure: a 2 MiB chunk-extension flood directed
 /// at a 2-arg streaming handler (`readBodyAll`) must be rejected by every
 /// backend. This guards the per-line cap at the streaming path, which is a
 /// distinct line reader from the eager `chunked_body_complete` decoder. A
@@ -753,7 +753,7 @@ fn e32b_051_streaming_chunk_extension_flood_rejected_three_backend() {
     }
 }
 
-/// E32B-052 (streaming-path closure): a 200-line trailer flood must be
+/// Streaming-path closure: a 200-line trailer flood must be
 /// rejected on the streaming path (`readBodyAll`) as malformed framing —
 /// not silently consumed as success — on all three backends.
 #[test]
@@ -812,7 +812,7 @@ fn e32b_052_streaming_trailer_count_flood_rejected_three_backend() {
     }
 }
 
-/// E32B-052: trailer-bytes flood. 32 trailer lines (well under the 64-count
+/// trailer-bytes flood. 32 trailer lines (well under the 64-count
 /// cap), each carrying a 512-byte name+value pair, sum to ~16 KiB — twice
 /// the 8 KiB total-bytes cap. All three backends must reject the message.
 #[test]
@@ -870,7 +870,7 @@ fn e32b_052_trailer_bytes_flood_rejected_three_backend() {
     }
 }
 
-/// E32B-068: oversized chunk-size on the readBodyChunk streaming path.
+/// Oversized chunk-size on the readBodyChunk streaming path.
 /// The eager-path test (`e32b_028_oversized_chunk_size_eager_400_three_backend`)
 /// pins the 1-arg handler reject. This sibling pins the 2-arg streaming
 /// `readBodyChunk` reject so the per-chunk path cannot bypass the cap by

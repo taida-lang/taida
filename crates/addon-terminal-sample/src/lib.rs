@@ -1,7 +1,7 @@
-//! `taida-addon-terminal-sample` — minimal terminal addon for RC1.5.
+//! `taida-addon-terminal-sample` — minimal terminal addon using the prebuilt-addon pipeline.
 //!
 //! This is the **proof-of-concept addon** that exercises the install-time
-//! prebuild pipeline (RC1.5). It exposes exactly 5 sync functions over
+//! prebuilt-addon pipeline. It exposes exactly 5 sync functions over
 //! the frozen ABI v1:
 //!
 //! - `termPrint(s: Str) -> Unit` — print a string to stdout (no newline)

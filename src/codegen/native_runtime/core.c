@@ -15,6 +15,10 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
+// F55 S4: getentropy(2) for crypto.randomBytes (glibc / macOS / *BSD).
+#if defined(__linux__) || defined(__APPLE__) || defined(__unix__)
+#include <sys/random.h>
+#endif
 
 // FL-9: Safe realloc wrapper — aborts on NULL with a diagnostic message.
 // Usage: TAIDA_REALLOC(ptr, new_size, context_label)
@@ -142,6 +146,15 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 #define TAIDA_TAG_CLOSURE 6
 #define TAIDA_TAG_HMAP    7
 #define TAIDA_TAG_SET     8
+// Value-tag track: Enum gets its own kind (was lowered as bare INT
+// ordinals, making same-ordinal variants of different enums and Int(n)
+// indistinguishable inside containers) and Bytes is split out of the
+// PACK umbrella so kind-aware equality can short-circuit on it. These
+// names are deliberately in the TAIDA_TAG_* namespace — the pack field
+// enum descriptor registry uses its own unrelated numeric scheme and
+// must not be conflated with these container kinds.
+#define TAIDA_TAG_ENUM    9
+#define TAIDA_TAG_BYTES   10
 #define TAIDA_TAG_UNKNOWN -1
 // C23B-007 (2026-04-22): HETEROGENEOUS sentinel distinct from UNKNOWN.
 // Used by taida_list_set_elem_tag / taida_hashmap_set_value_tag after a
@@ -152,6 +165,192 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 // conservative path) — the container's lifetime memory accounting was
 // already leaky for unknown-tag containers before this change.
 #define TAIDA_TAG_HETEROGENEOUS -2
+
+// ── Per-element kind array (value-tag track) ────────────────────────────
+// The elem-tag slot of a container (list[3] / set[3] / hmap[3]) is
+// three-state:
+//   v >= 0                    homogeneous TAIDA_TAG_* (legacy behaviour)
+//   v == -1 / -2              UNKNOWN / HETEROGENEOUS with NO per-element
+//                             info (legacy degraded state; also the
+//                             conservative result of derived containers
+//                             whose source had a kind array)
+//   v >= 4096 (pointer)       per-element kind array, implicitly
+//                             HETEROGENEOUS. Layout: u32[0] = capacity,
+//                             u32[1 + i] = kind|aux for element i (kept
+//                             in lockstep with list[2]).
+// Each u32 entry packs the kind in the low 8 bits and an auxiliary
+// payload (the enum type id for TAIDA_TAG_ENUM) in the upper 24 bits.
+// 0xFF in the kind byte means "unknown" (e.g. a dynamically-typed push).
+// The array is plain POD owned by the container: cloned on container
+// clone, freed on container free, never retained.
+//
+// Raw reads/writes of slot [3] outside the helpers below are forbidden —
+// every legacy direct access has been rewritten onto this API so a slot
+// holding an array pointer can never be misread as a plain tag.
+#define TAIDA_EKIND_UNKNOWN 0xFFu
+#define TAIDA_EKIND(kind, aux) ((uint32_t)((uint32_t)((kind) & 0xFF) | ((uint32_t)(aux) << 8)))
+#define TAIDA_EKIND_KIND(ek)  ((uint32_t)((ek) & 0xFFu))
+#define TAIDA_EKIND_AUX(ek)   ((uint32_t)((ek) >> 8))
+
+static int taida_elem_slot_is_array(taida_val v) { return v >= 4096; }
+
+// Classify the slot for kind-level decisions: returns the homogeneous
+// tag, TAIDA_TAG_UNKNOWN, or TAIDA_TAG_HETEROGENEOUS (for both the
+// array-less degraded state and the array-carrying state).
+static taida_val taida_elem_tag_kind(const taida_val *c) {
+    taida_val v = c[3];
+    if (taida_elem_slot_is_array(v)) return TAIDA_TAG_HETEROGENEOUS;
+    return v;
+}
+
+// Read the slot for propagation into a DERIVED container. Never returns
+// the array pointer: a derived container must build its own array (via
+// the append helper inside its own loop) or conservatively degrade to
+// HETEROGENEOUS-without-array, which downstream consumers treat exactly
+// like the legacy mixed state.
+static taida_val taida_elem_tag_for_propagation(const taida_val *c) {
+    taida_val v = c[3];
+    if (taida_elem_slot_is_array(v)) return TAIDA_TAG_HETEROGENEOUS;
+    return v;
+}
+
+// Per-element kind|aux for element i. Homogeneous containers report the
+// single tag (aux 0), array carriers report the recorded entry, and the
+// array-less UNKNOWN/HETEROGENEOUS states report EKIND unknown.
+static uint32_t taida_elem_kind_at(const taida_val *c, taida_val i) {
+    taida_val v = c[3];
+    if (taida_elem_slot_is_array(v)) {
+        const uint32_t *arr = (const uint32_t *)(taida_ptr)v;
+        if (i >= 0 && i < c[2]) return arr[1 + i];
+        return TAIDA_EKIND_UNKNOWN;
+    }
+    if (v >= 0) return TAIDA_EKIND((uint32_t)v, 0);
+    return TAIDA_EKIND_UNKNOWN;
+}
+
+// Free the kind array (if any) and reset the slot to the array-less
+// HETEROGENEOUS state. Called from the container release path.
+static void taida_elem_tags_free(taida_val *c) {
+    taida_val v = c[3];
+    if (taida_elem_slot_is_array(v)) {
+        free((void *)(taida_ptr)v);
+        c[3] = TAIDA_TAG_HETEROGENEOUS;
+    }
+}
+
+// Append one kind entry to a container that already carries an array,
+// growing it when the recorded capacity is exhausted. `idx` is the
+// element index the entry belongs to (== list[2] at the matching
+// pre-push call site).
+static void taida_elem_tags_append(taida_val *c, taida_val idx, uint32_t ekind) {
+    uint32_t *arr = (uint32_t *)(taida_ptr)c[3];
+    uint32_t cap = arr[0];
+    if ((uint64_t)idx + 1 > cap) {
+        uint32_t new_cap = cap ? cap * 2 : 16;
+        while (new_cap < (uint64_t)idx + 1) new_cap *= 2;
+        uint32_t *bigger = (uint32_t *)TAIDA_MALLOC(
+            taida_safe_mul((size_t)new_cap + 1, sizeof(uint32_t), "elem_tags grow"),
+            "elem_tags grow");
+        memcpy(bigger, arr, ((size_t)cap + 1) * sizeof(uint32_t));
+        bigger[0] = new_cap;
+        free(arr);
+        arr = bigger;
+        c[3] = (taida_val)(taida_ptr)arr;
+    }
+    arr[1 + idx] = ekind;
+}
+
+// Materialise the per-element array for a container whose first `len`
+// elements all carry `old_tag` (guaranteed by the homogeneous latch at
+// the downgrade point), then record `new_ekind` for the element about to
+// be appended at index `len`.
+static void taida_elem_tags_materialise(taida_val *c, taida_val old_tag,
+                                        taida_val len, uint32_t new_ekind) {
+    uint32_t cap = 16;
+    while (cap < (uint64_t)len + 1) cap *= 2;
+    uint32_t *arr = (uint32_t *)TAIDA_MALLOC(
+        taida_safe_mul((size_t)cap + 1, sizeof(uint32_t), "elem_tags new"),
+        "elem_tags new");
+    arr[0] = cap;
+    uint32_t old_ekind = old_tag >= 0 ? TAIDA_EKIND((uint32_t)old_tag, 0)
+                                      : TAIDA_EKIND_UNKNOWN;
+    for (taida_val i = 0; i < len; i++) arr[1 + i] = old_ekind;
+    arr[1 + len] = new_ekind;
+    c[3] = (taida_val)(taida_ptr)arr;
+}
+
+// Map a per-element kind entry back onto the TAIDA_TAG_* domain consumed
+// by the elem retain/release helpers (EKIND unknown → TAIDA_TAG_UNKNOWN,
+// i.e. the legacy leak-rather-than-crash path).
+static taida_val taida_ekind_to_tag(uint32_t ek) {
+    uint32_t k = TAIDA_EKIND_KIND(ek);
+    return k == TAIDA_EKIND_UNKNOWN ? TAIDA_TAG_UNKNOWN : (taida_val)k;
+}
+
+// Project one element (with its source-recorded kind) into a derived
+// container, then push it. The single write-side entry point for the
+// array-carrying paths of every list/Set projection; when the source is
+// NOT an array carrier the caller keeps its legacy single-tag retain and
+// must not call this.
+static void taida_list_elem_retain(taida_val elem, taida_val elem_tag);      // defined below
+taida_ptr taida_list_push(taida_ptr list_ptr, taida_val item);               // defined below
+static void taida_elem_tags_note_push_ek(taida_val *c, uint32_t ek);         // defined below
+static taida_val taida_list_project_push(taida_val dst, taida_val item,
+                                         const taida_val *src, taida_val src_idx) {
+    uint32_t ek = taida_elem_kind_at(src, src_idx);
+    taida_list_elem_retain(item, taida_ekind_to_tag(ek));
+    taida_elem_tags_note_push_ek((taida_val *)dst, ek);
+    return taida_list_push(dst, item);
+}
+
+// True when two single-tag containers pin DIFFERENT concrete tags — the
+// projection must go per-element even though neither side carries an
+// array (the "homogeneous but cross-tagged" composition hole: e.g.
+// concat/union of an INT container with a BOOL container).
+static int taida_elem_tags_cross(const taida_val *a, const taida_val *b) {
+    taida_val ta = a[3], tb = b[3];
+    return ta >= 0 && tb >= 0 && ta != tb;
+}
+
+// Kind entry → pack field tag domain: known kinds map directly except
+// ENUM (the pack tag's display consumers don't understand 9 — fall back
+// to the caller-supplied legacy propagation tag).
+static taida_val taida_ekind_to_pack_tag(uint32_t ek, taida_val fallback) {
+    uint32_t k = TAIDA_EKIND_KIND(ek);
+    if (k == TAIDA_EKIND_UNKNOWN || k == (uint32_t)TAIDA_TAG_ENUM) return fallback;
+    return (taida_val)k;
+}
+
+// Record the kind entry for the element about to be pushed (pre-push
+// contract: the append index is c[2]). Mirrors taida_list_set_elem_tag
+// but takes a full kind|aux entry so enum type ids survive container
+// projection. A fresh container stays homogeneous as long as entries are
+// plain same-kind tags; an aux-carrying entry (enum) or a kind conflict
+// materialises the array. Used by the runtime-internal builders
+// (unique / set_from_list / Set ops) when projecting from an
+// array-carrying source.
+static void taida_elem_tags_note_push_ek(taida_val *c, uint32_t ek) {
+    taida_val existing = c[3];
+    if (taida_elem_slot_is_array(existing)) {
+        taida_elem_tags_append(c, c[2], ek);
+        return;
+    }
+    if (existing == TAIDA_TAG_HETEROGENEOUS) return; // degraded: stay degraded
+    uint32_t k = TAIDA_EKIND_KIND(ek);
+    taida_val tag = (k == TAIDA_EKIND_UNKNOWN) ? TAIDA_TAG_UNKNOWN : (taida_val)k;
+    if (TAIDA_EKIND_AUX(ek) == 0) {
+        if (existing == TAIDA_TAG_UNKNOWN || existing == tag) {
+            c[3] = tag;
+            return;
+        }
+        taida_elem_tags_materialise(c, existing, c[2], ek);
+        return;
+    }
+    // Aux-carrying (enum) entry: the single slot cannot hold the type id,
+    // so go straight to the array form (existing elements keep their
+    // homogeneous tag, or UNKNOWN on a fresh container).
+    taida_elem_tags_materialise(c, existing, c[2], ek);
+}
 
 // ============================================================================
 // NO-4: Native Ownership Rules (runtime helper 監査ルール)
@@ -662,6 +861,7 @@ taida_ptr taida_list_get(taida_ptr list_ptr, taida_val index);
 taida_val taida_set_new(void);
 taida_val taida_set_has(taida_ptr set_ptr, taida_val item);
 taida_ptr taida_set_remove(taida_ptr set_ptr, taida_val item);
+taida_val taida_set_remove_k(taida_val set_ptr, taida_val item, uint32_t probe_ek);
 taida_ptr taida_set_add(taida_ptr set_ptr, taida_val item);
 void taida_set_set_elem_tag(taida_ptr set_ptr, taida_val tag);
 // Str state check methods
@@ -2668,9 +2868,23 @@ taida_val taida_release(taida_ptr ptr) {
             if (TAIDA_IS_LIST(ptr)) {
                 taida_val *lobj = (taida_val*)ptr;
                 taida_val llen = lobj[2];
-                taida_val etag = lobj[3];
-                for (taida_val i = 0; i < llen; i++) {
-                    taida_list_elem_release(lobj[4 + i], etag);
+                if (taida_elem_slot_is_array(lobj[3])) {
+                    // Per-element carrier: release each element by its
+                    // recorded kind (heap kinds recurse precisely instead
+                    // of the legacy leak-on-mixed degradation), then drop
+                    // the kind array itself before the spine is freed or
+                    // recycled through the freelist.
+                    for (taida_val i = 0; i < llen; i++) {
+                        taida_list_elem_release(
+                            lobj[4 + i],
+                            taida_ekind_to_tag(taida_elem_kind_at(lobj, i)));
+                    }
+                    taida_elem_tags_free(lobj);
+                } else {
+                    taida_val etag = taida_elem_tag_kind(lobj);
+                    for (taida_val i = 0; i < llen; i++) {
+                        taida_list_elem_release(lobj[4 + i], etag);
+                    }
                 }
             }
             // Closure: release env pack (exclusively owned)
@@ -2685,16 +2899,26 @@ taida_val taida_release(taida_ptr ptr) {
             if (TAIDA_IS_SET(ptr)) {
                 taida_val *sobj = (taida_val*)ptr;
                 taida_val slen = sobj[2];
-                taida_val etag = sobj[3];  // elem_type_tag
-                for (taida_val i = 0; i < slen; i++) {
-                    taida_list_elem_release(sobj[4 + i], etag);
+                if (taida_elem_slot_is_array(sobj[3])) {
+                    // Per-element carrier — mirror of the List branch.
+                    for (taida_val i = 0; i < slen; i++) {
+                        taida_list_elem_release(
+                            sobj[4 + i],
+                            taida_ekind_to_tag(taida_elem_kind_at(sobj, i)));
+                    }
+                    taida_elem_tags_free(sobj);
+                } else {
+                    taida_val etag = taida_elem_tag_kind(sobj);  // elem_type_tag
+                    for (taida_val i = 0; i < slen; i++) {
+                        taida_list_elem_release(sobj[4 + i], etag);
+                    }
                 }
             }
             // NO-1: HashMap — recursively release all keys and values
             if (TAIDA_IS_HMAP(ptr)) {
                 taida_val *hobj = (taida_val*)ptr;
                 taida_val hcap = hobj[1];
-                taida_val vtag = hobj[3];  // value_type_tag
+                taida_val vtag = taida_elem_tag_kind(hobj);  // value_type_tag
                 for (taida_val i = 0; i < hcap; i++) {
                     taida_val sh = hobj[HM_HEADER + i * 3];
                     taida_val sk = hobj[HM_HEADER + i * 3 + 1];
@@ -3479,24 +3703,26 @@ taida_val taida_pack_call_field3(taida_val pack_ptr, taida_val field_hash, taida
 // Used when copying elements from one list to another (shared ownership).
 static void taida_list_elem_retain(taida_val elem, taida_val elem_tag) {
     if (elem_tag == TAIDA_TAG_PACK || elem_tag == TAIDA_TAG_LIST || elem_tag == TAIDA_TAG_CLOSURE
-        || elem_tag == TAIDA_TAG_HMAP || elem_tag == TAIDA_TAG_SET) {
+        || elem_tag == TAIDA_TAG_HMAP || elem_tag == TAIDA_TAG_SET
+        || elem_tag == TAIDA_TAG_BYTES) {
         if (elem > 4096) taida_retain(elem);
     } else if (elem_tag == TAIDA_TAG_STR) {
         if (elem > 4096) taida_str_retain(elem);
     }
-    // INT, FLOAT, BOOL, UNKNOWN → no-op
+    // INT, FLOAT, BOOL, ENUM, UNKNOWN → no-op
 }
 
 // Release a list element based on the list's elem_type_tag.
 // Used when freeing a list to release owned elements.
 static void taida_list_elem_release(taida_val elem, taida_val elem_tag) {
     if (elem_tag == TAIDA_TAG_PACK || elem_tag == TAIDA_TAG_LIST || elem_tag == TAIDA_TAG_CLOSURE
-        || elem_tag == TAIDA_TAG_HMAP || elem_tag == TAIDA_TAG_SET) {
+        || elem_tag == TAIDA_TAG_HMAP || elem_tag == TAIDA_TAG_SET
+        || elem_tag == TAIDA_TAG_BYTES) {
         if (elem > 4096) taida_release(elem);
     } else if (elem_tag == TAIDA_TAG_STR) {
         if (elem > 4096) taida_str_release(elem);
     }
-    // INT, FLOAT, BOOL, UNKNOWN → no-op (conservative: leak rather than crash)
+    // INT, FLOAT, BOOL, ENUM, UNKNOWN → no-op (conservative: leak rather than crash)
 }
 
 taida_ptr taida_list_new(void) {
@@ -3535,14 +3761,36 @@ void taida_list_set_elem_tag(taida_ptr list_ptr, taida_val tag) {
     // end up with the last element's tag and confuse downstream tag-aware
     // consumers. Latch on HETEROGENEOUS(-2) so once downgraded the container
     // stays mixed for its lifetime; re-promotion is forbidden.
+    //
+    // Value-tag track: instead of throwing the per-element information away
+    // at the downgrade point, the first conflict materialises the kind
+    // array (every element already in the list is guaranteed to carry the
+    // old homogeneous tag by the latch invariant) and subsequent calls
+    // append to it. Contract: at codegen pre-push call sites list[2] is the
+    // index of the element about to be pushed. Runtime-internal bulk
+    // callers only ever (re)assert a single tag on a fresh or same-tag
+    // container, so they can never reach the materialise/append branches.
     taida_val *list = (taida_val*)list_ptr;
     taida_val existing = list[3];
+    if (taida_elem_slot_is_array(existing)) {
+        uint32_t ek = tag >= 0 ? TAIDA_EKIND((uint32_t)tag, 0) : TAIDA_EKIND_UNKNOWN;
+        taida_elem_tags_append(list, list[2], ek);
+        return;
+    }
     if (existing == TAIDA_TAG_HETEROGENEOUS) return;
     if (existing == TAIDA_TAG_UNKNOWN || existing == tag) {
         list[3] = tag;
     } else {
-        list[3] = TAIDA_TAG_HETEROGENEOUS;
+        uint32_t ek = tag >= 0 ? TAIDA_EKIND((uint32_t)tag, 0) : TAIDA_EKIND_UNKNOWN;
+        taida_elem_tags_materialise(list, existing, list[2], ek);
     }
+}
+
+// EKIND-form sibling of taida_list_set_elem_tag for codegen call sites:
+// takes the full kind|aux entry (enum type id in the upper bits, 0xFF
+// kind byte for unknown) so list literals can record enum identities.
+void taida_list_note_push_ekind(taida_ptr list_ptr, taida_val ekind_arg) {
+    taida_elem_tags_note_push_ek((taida_val *)list_ptr, (uint32_t)ekind_arg);
 }
 
 taida_ptr taida_list_push(taida_ptr list_ptr, taida_val item) {
@@ -3586,27 +3834,50 @@ taida_val taida_list_length(taida_val list_ptr) {
     return ((taida_val*)list_ptr)[2];
 }
 
+// Kind-stamped Lax constructor: identical to taida_lax_new but records
+// the payload's known scalar kind on the __value field tag, so an
+// unmolding call site can read it back (taida_lax_value_ekind) and run
+// exact pair comparisons on the payload. Heap kinds keep whatever the
+// retain-and-tag heuristic classified; ENUM stays on the heuristic path
+// too for now (the pack field tag's existing consumers only understand
+// the legacy scalar tags — recording 9 there would change rendering).
+static taida_val taida_lax_new_k(taida_val value, taida_val default_value, uint32_t ekind) {
+    taida_val pack = taida_lax_new(value, default_value);
+    uint32_t k = ekind & 0xFFu;
+    // Stamp every known kind except ENUM (the pack field tag's existing
+    // display consumers only understand the legacy scalar/heap tags, so
+    // recording 9 would change rendering — enum payloads stay on the
+    // heuristic tag and read back as unknown). Stamping STR here matters:
+    // the constructor's retain-and-tag heuristic can leave a bare INT(0)
+    // on a string payload, and a reader that trusted it would compare a
+    // genuine Str under INT semantics.
+    if (k != TAIDA_EKIND_UNKNOWN && k != (uint32_t)TAIDA_TAG_ENUM) {
+        taida_pack_set_tag(pack, 1, (taida_val)k);
+    }
+    return pack;
+}
+
 taida_val taida_list_get(taida_val list_ptr, taida_val index) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     if (index < 0 || index >= len) {
         return taida_lax_empty(0);  // OOB returns empty Lax (v0.5.0)
     }
-    return taida_lax_new(list[4 + index], 0);
+    return taida_lax_new_k(list[4 + index], 0, taida_elem_kind_at(list, index));
 }
 
 taida_val taida_list_first(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     if (len == 0) return taida_lax_empty(0);
-    return taida_lax_new(list[4], 0);
+    return taida_lax_new_k(list[4], 0, taida_elem_kind_at(list, 0));
 }
 
 taida_val taida_list_last(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     if (len == 0) return taida_lax_empty(0);
-    return taida_lax_new(list[4 + len - 1], 0);
+    return taida_lax_new_k(list[4 + len - 1], 0, taida_elem_kind_at(list, len - 1));
 }
 
 taida_val taida_list_sum(taida_val list_ptr) {
@@ -3622,13 +3893,17 @@ taida_val taida_list_sum(taida_val list_ptr) {
 taida_val taida_list_reverse(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
-    taida_val elem_tag = list[3];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     for (taida_val i = len - 1; i >= 0; i--) {
-        taida_list_elem_retain(list[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, list[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+        } else {
+            taida_list_elem_retain(list[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, list[4 + i]);
+        }
     }
     return new_list;
 }
@@ -3659,18 +3934,36 @@ taida_val taida_list_map(taida_val list_ptr, taida_val fn_ptr) {
     return new_list;
 }
 
+// Kind-supplying map: codegen passes the callback's statically known
+// return kind so a type-changing map keeps an exact container kind; an
+// UNKNOWN entry leaves the result kindless (documented residual — a
+// dynamically-kinded callback return needs a function-return shadow).
+taida_val taida_list_map_k(taida_val list_ptr, taida_val fn_ptr, taida_val ret_ekind) {
+    taida_val result = taida_list_map(list_ptr, fn_ptr);
+    uint32_t k = (uint32_t)ret_ekind & 0xFFu;
+    if (k != TAIDA_EKIND_UNKNOWN) {
+        taida_val *r = (taida_val*)result;
+        if (!taida_elem_slot_is_array(r[3])) r[3] = (taida_val)k;
+    }
+    return result;
+}
+
 // list.filter(fn_ptr) - fn_ptr takes (taida_val) -> taida_val (truthy/falsy)
 taida_val taida_list_filter(taida_val list_ptr, taida_val fn_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
-    taida_val elem_tag = list[3];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     for (taida_val i = 0; i < len; i++) {
         if (taida_invoke_callback1(fn_ptr, list[4 + i])) {
-            taida_list_elem_retain(list[4 + i], elem_tag);
-            new_list = taida_list_push(new_list, list[4 + i]);
+            if (src_tagged) {
+                new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+            } else {
+                taida_list_elem_retain(list[4 + i], elem_tag);
+                new_list = taida_list_push(new_list, list[4 + i]);
+            }
         }
     }
     return new_list;
@@ -3917,7 +4210,8 @@ taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end) {
     if (TAIDA_IS_LIST(value)) {
         taida_val *list = (taida_val*)value;
         taida_val len = list[2];
-        taida_val elem_tag = list[3];
+        int src_tagged = taida_elem_slot_is_array(list[3]);
+        taida_val elem_tag = taida_elem_tag_for_propagation(list);
         taida_val s = start;
         taida_val e = end;
         if (s < 0) s = 0;
@@ -3925,11 +4219,14 @@ taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end) {
         if (e < 0 || e > len) e = len;
         if (e < s) e = s;
         taida_val out = taida_list_new();
-        taida_val *ol = (taida_val*)out;
-        ol[3] = elem_tag;  // propagate elem_type_tag
+        if (!src_tagged) ((taida_val*)out)[3] = elem_tag;  // propagate elem_type_tag
         for (taida_val i = s; i < e; i++) {
-            taida_list_elem_retain(list[4 + i], elem_tag);
-            out = taida_list_push(out, list[4 + i]);
+            if (src_tagged) {
+                out = taida_list_project_push(out, list[4 + i], list, i);
+            } else {
+                taida_list_elem_retain(list[4 + i], elem_tag);
+                out = taida_list_push(out, list[4 + i]);
+            }
         }
         return out;
     }
@@ -5502,17 +5799,26 @@ taida_val taida_list_concat(taida_val list1, taida_val list2) {
     taida_val *l1 = (taida_val*)list1;
     taida_val *l2 = (taida_val*)list2;
     taida_val len1 = l1[2], len2 = l2[2];
-    taida_val elem_tag = l1[3];
+    int src_tagged = taida_elem_slot_is_array(l1[3]) || taida_elem_slot_is_array(l2[3])
+                  || taida_elem_tags_cross(l1, l2);
+    taida_val elem_tag = taida_elem_tag_for_propagation(l1);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag from first list
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag from first list
     for (taida_val i = 0; i < len1; i++) {
-        taida_list_elem_retain(l1[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, l1[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, l1[4 + i], l1, i);
+        } else {
+            taida_list_elem_retain(l1[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, l1[4 + i]);
+        }
     }
     for (taida_val i = 0; i < len2; i++) {
-        taida_list_elem_retain(l2[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, l2[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, l2[4 + i], l2, i);
+        } else {
+            taida_list_elem_retain(l2[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, l2[4 + i]);
+        }
     }
     return new_list;
 }
@@ -5559,27 +5865,47 @@ taida_val taida_list_join(taida_val list_ptr, const char* sep) {
 taida_val taida_list_sort(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
-    taida_val elem_tag = list[3];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     if (len == 0) return new_list;
     // M-07: Overflow guard + NULL check on items allocation.
     size_t items_size = taida_safe_mul((size_t)len, sizeof(taida_val), "list_sort items");
     taida_val *items = (taida_val*)TAIDA_MALLOC(items_size, "list_sort");
+    // Kinds ride the permutation so an array-carrying source keeps each
+    // element's identity through the reorder.
+    uint32_t *eks = NULL;
+    if (src_tagged) {
+        eks = (uint32_t*)TAIDA_MALLOC(taida_safe_mul((size_t)len, sizeof(uint32_t), "list_sort kinds"), "list_sort kinds");
+        for (taida_val i = 0; i < len; i++) eks[i] = taida_elem_kind_at(list, i);
+    }
     for (taida_val i = 0; i < len; i++) items[i] = list[4 + i];
     // Simple insertion sort
     for (taida_val i = 1; i < len; i++) {
         taida_val key = items[i];
+        uint32_t kek = eks ? eks[i] : 0;
         taida_val j = i - 1;
-        while (j >= 0 && items[j] > key) { items[j+1] = items[j]; j--; }
+        while (j >= 0 && items[j] > key) {
+            items[j+1] = items[j];
+            if (eks) eks[j+1] = eks[j];
+            j--;
+        }
         items[j+1] = key;
+        if (eks) eks[j+1] = kek;
     }
     for (taida_val i = 0; i < len; i++) {
-        taida_list_elem_retain(items[i], elem_tag);
-        new_list = taida_list_push(new_list, items[i]);
+        if (src_tagged) {
+            taida_list_elem_retain(items[i], taida_ekind_to_tag(eks[i]));
+            taida_elem_tags_note_push_ek((taida_val*)new_list, eks[i]);
+            new_list = taida_list_push(new_list, items[i]);
+        } else {
+            taida_list_elem_retain(items[i], elem_tag);
+            new_list = taida_list_push(new_list, items[i]);
+        }
     }
     free(items);
+    free(eks);
     return new_list;
 }
 
@@ -5632,6 +5958,7 @@ static unsigned char taida_bytes_byte_at(taida_val v, size_t i) {
 
 // Structural equality aligned with `ValueKey::eq` over the key-eligible subset;
 // raw identity for everything else.
+static int taida_list_struct_eq_k(taida_val *la, taida_val *lb); // kind-aware list walk (below)
 static int taida_value_struct_eq(taida_val a, taida_val b) {
     if (a == b) return 1;
     taida_value_kind_t ka = taida_value_kind(a);
@@ -5653,12 +5980,12 @@ static int taida_value_struct_eq(taida_val a, taida_val b) {
             return 1;
         }
         case TKIND_LIST: {
+            // Value-tag track: element pairs compare under their recorded
+            // kinds (single-tag containers report it via taida_elem_kind_at),
+            // so nested Bool↔Int stops colliding and nested Int↔Float
+            // crosses over like the interpreter's Value::eq.
             taida_val *la = (taida_val*)a, *lb = (taida_val*)b;
-            taida_val n = la[2];
-            if (n != lb[2]) return 0;
-            for (taida_val i = 0; i < n; i++)
-                if (!taida_value_struct_eq(la[4 + i], lb[4 + i])) return 0;
-            return 1;
+            return taida_list_struct_eq_k(la, lb);
         }
         case TKIND_PACK: {
             taida_val *pa = (taida_val*)a, *pb = (taida_val*)b;
@@ -5702,6 +6029,11 @@ static void taida_fnv_bytes(uint64_t *h, const void *p, size_t n) {
     for (size_t i = 0; i < n; i++) { *h ^= b[i]; *h *= TAIDA_FNV_PRIME; }
 }
 
+// Forward declaration: the structural accumulator and the kind-aware one
+// are mutually recursive (lists hash their elements under recorded kinds;
+// non-scalar kinds delegate back to the structural walk).
+static void taida_fp_accum_k(taida_val v, uint32_t ekind, uint64_t *h);
+
 static void taida_fp_accum(taida_val v, uint64_t *h) {
     switch (taida_value_kind(v)) {
         case TKIND_STR: {
@@ -5723,7 +6055,12 @@ static void taida_fp_accum(taida_val v, uint64_t *h) {
             unsigned char tag = 7; taida_fnv_bytes(h, &tag, 1);
             taida_val *l = (taida_val*)v; taida_val n = l[2];
             uint64_t nn = (uint64_t)n; taida_fnv_bytes(h, &nn, sizeof(nn));
-            for (taida_val i = 0; i < n; i++) taida_fp_accum(l[4 + i], h);
+            // Value-tag track: elements hash under their recorded kind so a
+            // nested Bool no longer collides with Int (homogeneous lists
+            // report their single tag through taida_elem_kind_at, which
+            // keeps the legacy fingerprints for Int/Str/... lists stable).
+            for (taida_val i = 0; i < n; i++)
+                taida_fp_accum_k(l[4 + i], taida_elem_kind_at(l, i), h);
             break;
         }
         case TKIND_PACK: {
@@ -5754,12 +6091,21 @@ static uint64_t taida_value_fingerprint(taida_val v) {
     uint64_t h = TAIDA_FNV_OFFSET; taida_fp_accum(v, &h); return h;
 }
 
+static int taida_elem_hashable_for_gate(taida_val v, uint32_t ekind); // below
+
 static int taida_value_hashable(taida_val v) {
     switch (taida_value_kind(v)) {
         case TKIND_SCALAR: case TKIND_STR: case TKIND_BYTES: return 1;
         case TKIND_LIST: {
+            // Value-tag track: gate on each element's recorded kind. A
+            // nested list whose elements include a Float must take the
+            // linear path (interp parity: Float is never hashable), and
+            // the legacy walk could not see that — a Float's bit pattern
+            // classifies as a plain scalar. Kind-less elements keep the
+            // legacy structural classification.
             taida_val *l = (taida_val*)v; taida_val n = l[2];
-            for (taida_val i = 0; i < n; i++) if (!taida_value_hashable(l[4 + i])) return 0;
+            for (taida_val i = 0; i < n; i++)
+                if (!taida_elem_hashable_for_gate(l[4 + i], taida_elem_kind_at(l, i))) return 0;
             return 1;
         }
         case TKIND_PACK: {
@@ -5769,6 +6115,173 @@ static int taida_value_hashable(taida_val v) {
         }
         default: return 0; // TKIND_OTHER (HashMap / Set / Closure / Async)
     }
+}
+
+// Hashability of one element under its recorded kind, for the legacy
+// whole-container gate: a known Float forces the linear path, a known
+// scalar kind is hashable, a kind-less element falls back to the
+// structural classifier (so untagged containers keep their historical
+// behaviour bit-for-bit), and heap kinds recurse structurally.
+static int taida_elem_hashable_for_gate(taida_val v, uint32_t ekind) {
+    uint32_t k = TAIDA_EKIND_KIND(ekind);
+    switch (k) {
+        case TAIDA_TAG_INT:
+        case TAIDA_TAG_BOOL:
+        case TAIDA_TAG_ENUM:
+            return 1;
+        case TAIDA_TAG_FLOAT:
+            return 0;
+        case TAIDA_EKIND_UNKNOWN:
+            return taida_value_hashable(v);
+        default:
+            return taida_value_hashable(v);
+    }
+}
+
+// -- Value-tag track: kind-aware equality / fingerprint / membership --------
+// When a container carries a per-element kind array, dedup and membership
+// run on (value, ekind) pairs: Bool stops colliding with Int, the
+// Int↔Float crossing follows f64 semantics regardless of magnitude, and
+// same-ordinal variants of different enums stay distinct (type id in the
+// aux bits) while still crossing over to Int(n)/Float(n) the way the
+// interpreter's equality does. A side without kind information (EKIND
+// unknown) degrades to the legacy structural comparison so old containers
+// stay bit-compatible.
+static double _l2d(taida_val v); // defined with the float helpers below
+
+static int taida_ekind_value_eq(taida_val a, uint32_t eka, taida_val b, uint32_t ekb);
+
+// Kind-aware list equality: element pairs compare under their recorded
+// kinds. taida_elem_kind_at reports the single tag for homogeneous
+// containers, so this is also the engine for plain nested lists.
+static int taida_list_struct_eq_k(taida_val *la, taida_val *lb) {
+    taida_val n = la[2];
+    if (n != lb[2]) return 0;
+    for (taida_val i = 0; i < n; i++) {
+        if (!taida_ekind_value_eq(la[4 + i], taida_elem_kind_at(la, i), lb[4 + i],
+                                  taida_elem_kind_at(lb, i)))
+            return 0;
+    }
+    return 1;
+}
+
+static int taida_ekind_value_eq(taida_val a, uint32_t eka, taida_val b, uint32_t ekb) {
+    uint32_t ka = TAIDA_EKIND_KIND(eka), kb = TAIDA_EKIND_KIND(ekb);
+    if (ka == TAIDA_EKIND_UNKNOWN || kb == TAIDA_EKIND_UNKNOWN)
+        return taida_value_struct_eq(a, b);
+    switch (ka) {
+        case TAIDA_TAG_INT:
+            switch (kb) {
+                case TAIDA_TAG_INT:
+                case TAIDA_TAG_ENUM:  return a == b; // Int(n) == ordinal n (interp crossing)
+                case TAIDA_TAG_FLOAT: return (double)a == _l2d(b);
+                default: return 0; // BOOL and every heap kind: unequal
+            }
+        case TAIDA_TAG_BOOL:
+            return kb == TAIDA_TAG_BOOL ? (a == b) : 0;
+        case TAIDA_TAG_FLOAT:
+            switch (kb) {
+                case TAIDA_TAG_FLOAT: return _l2d(a) == _l2d(b); // IEEE: NaN!=NaN, +0==-0
+                case TAIDA_TAG_INT:
+                case TAIDA_TAG_ENUM:  return _l2d(a) == (double)b;
+                default: return 0;
+            }
+        case TAIDA_TAG_ENUM:
+            switch (kb) {
+                case TAIDA_TAG_ENUM:
+                    // Type id (aux) AND ordinal must match. Note the
+                    // deliberate non-transitivity inherited from the
+                    // interpreter: two same-ordinal enums of different
+                    // types are unequal to each other yet each equal to
+                    // the bare Int(ordinal).
+                    return eka == ekb && a == b;
+                case TAIDA_TAG_INT:   return a == b;
+                case TAIDA_TAG_FLOAT: return (double)a == _l2d(b);
+                default: return 0;
+            }
+        case TAIDA_TAG_LIST:
+            if (kb != TAIDA_TAG_LIST) return 0;
+            if (a == b) return 1;
+            if (!TAIDA_IS_LIST(a) || !TAIDA_IS_LIST(b)) return taida_value_struct_eq(a, b);
+            return taida_list_struct_eq_k((taida_val*)a, (taida_val*)b);
+        default:
+            // Remaining heap kinds (STR / BYTES / PACK / SET / HMAP /
+            // CLOSURE): same-kind structural equality, cross-kind unequal.
+            if (ka != kb) return 0;
+            return taida_value_struct_eq(a, b);
+    }
+}
+
+// Kind-aware fingerprint. Int and Enum share tag 0 + ordinal — mirroring
+// the interpreter's ValueKey, which deliberately leaves the enum type id
+// out of the hash and lets equality confirmation distinguish same-ordinal
+// enums — while Bool gets its own tag byte so it stops colliding with
+// Int(0/1). Everything else reuses the structural accumulator.
+static void taida_fp_accum_k(taida_val v, uint32_t ekind, uint64_t *h) {
+    switch (TAIDA_EKIND_KIND(ekind)) {
+        case TAIDA_TAG_INT:
+        case TAIDA_TAG_ENUM: {
+            unsigned char tag = 0; taida_fnv_bytes(h, &tag, 1);
+            int64_t s = (int64_t)v; taida_fnv_bytes(h, &s, sizeof(s));
+            break;
+        }
+        case TAIDA_TAG_BOOL: {
+            unsigned char tag = 1; taida_fnv_bytes(h, &tag, 1);
+            int64_t s = (int64_t)v; taida_fnv_bytes(h, &s, sizeof(s));
+            break;
+        }
+        default:
+            taida_fp_accum(v, h);
+            break;
+    }
+}
+
+// Kind-aware hashability gate. Float is never hashable (interp parity:
+// NaN / ±0.0 / Int↔Float crossing force the linear path), and an unknown
+// kind also forces the linear path so legacy-fingerprint values and
+// kind-fingerprint values can never share one seen-set inconsistently.
+static int taida_ekind_hashable(taida_val v, uint32_t ekind) {
+    switch (TAIDA_EKIND_KIND(ekind)) {
+        case TAIDA_TAG_INT:
+        case TAIDA_TAG_BOOL:
+        case TAIDA_TAG_ENUM:
+            return 1;
+        case TAIDA_TAG_FLOAT:
+            return 0;
+        case TAIDA_EKIND_UNKNOWN:
+            return 0;
+        default:
+            return taida_value_hashable(v);
+    }
+}
+
+// Read back the kind recorded on a Lax pack's __value field (EKIND form;
+// EKIND unknown when the input is not pack-shaped or the recorded tag is
+// not a scalar kind). Unmolding call sites use this to carry a runtime
+// "shadow kind" alongside the payload value.
+taida_val taida_lax_value_ekind(taida_val maybe_lax) {
+    if (!TAIDA_IS_PACK(maybe_lax)) return (taida_val)TAIDA_EKIND_UNKNOWN;
+    taida_val tag = taida_pack_get_field_tag((taida_ptr)maybe_lax, (taida_val)HASH___VALUE);
+    // Only Lax packs built by taida_lax_new_k reach this reader (the
+    // unmold shadow whitelist is restricted to the accessors that use
+    // it), so the recorded tag is trustworthy across the known range.
+    if (tag >= TAIDA_TAG_INT && tag <= TAIDA_TAG_BYTES && tag != TAIDA_TAG_ENUM)
+        return tag;
+    return (taida_val)TAIDA_EKIND_UNKNOWN;
+}
+
+// Tagged polymorphic equality: when both operands carry a known kind the
+// pair semantics engine decides (Bool≠Int, Int↔Float f64 crossing at any
+// magnitude, ...); any unknown side falls back to the legacy poly
+// comparison so untagged call sites keep their historical behaviour.
+taida_val taida_poly_eq_tagged(taida_val a, taida_val eka, taida_val b, taida_val ekb) {
+    uint32_t ka = (uint32_t)eka & 0xFFu, kb = (uint32_t)ekb & 0xFFu;
+    if (ka == TAIDA_EKIND_UNKNOWN || kb == TAIDA_EKIND_UNKNOWN) return taida_poly_eq(a, b);
+    return taida_ekind_value_eq(a, (uint32_t)eka, b, (uint32_t)ekb) ? 1 : 0;
+}
+
+taida_val taida_poly_neq_tagged(taida_val a, taida_val eka, taida_val b, taida_val ekb) {
+    return taida_poly_eq_tagged(a, eka, b, ekb) ? 0 : 1;
 }
 
 typedef struct {
@@ -5814,6 +6327,50 @@ static int taida_seen_contains(taida_seen *s, taida_val v) {
     }
 }
 
+// Kind-aware seen-set: entries carry (value, ekind) pairs so collision
+// confirmation runs under taida_ekind_value_eq. Engaged only when every
+// element kind passes taida_ekind_hashable — Float or unknown kinds fall
+// back to the linear pair-equality scan, matching the interpreter's
+// all-or-nothing ValueKey gating (and its complexity profile).
+typedef struct {
+    uint64_t *fps; taida_val *vals; uint32_t *eks; unsigned char *used; size_t mask;
+} taida_seen_k;
+
+static int taida_seen_k_init(taida_seen_k *s, taida_val hint) {
+    size_t cap = 16, want = (size_t)(hint > 0 ? hint : 1) * 2 + 1;
+    while (cap < want) cap <<= 1;
+    s->mask = cap - 1;
+    s->fps  = (uint64_t*)calloc(cap, sizeof(uint64_t));
+    s->vals = (taida_val*)calloc(cap, sizeof(taida_val));
+    s->eks  = (uint32_t*)calloc(cap, sizeof(uint32_t));
+    s->used = (unsigned char*)calloc(cap, sizeof(unsigned char));
+    if (!s->fps || !s->vals || !s->eks || !s->used) {
+        free(s->fps); free(s->vals); free(s->eks); free(s->used);
+        s->fps = NULL; s->vals = NULL; s->eks = NULL; s->used = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+static void taida_seen_k_free(taida_seen_k *s) {
+    free(s->fps); free(s->vals); free(s->eks); free(s->used);
+    s->fps = NULL; s->vals = NULL; s->eks = NULL; s->used = NULL;
+}
+
+static int taida_seen_k_add(taida_seen_k *s, taida_val v, uint32_t ek) {
+    uint64_t fp = TAIDA_FNV_OFFSET;
+    taida_fp_accum_k(v, ek, &fp);
+    size_t i = (size_t)fp & s->mask;
+    for (;;) {
+        if (!s->used[i]) {
+            s->used[i] = 1; s->fps[i] = fp; s->vals[i] = v; s->eks[i] = ek;
+            return 1;
+        }
+        if (s->fps[i] == fp && taida_ekind_value_eq(s->vals[i], s->eks[i], v, ek)) return 0;
+        i = (i + 1) & s->mask;
+    }
+}
+
 static int taida_list_all_hashable(taida_val *list) {
     taida_val n = list[2];
     for (taida_val i = 0; i < n; i++) if (!taida_value_hashable(list[4 + i])) return 0;
@@ -5823,7 +6380,45 @@ static int taida_list_all_hashable(taida_val *list) {
 taida_val taida_list_unique(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
-    taida_val elem_tag = list[3];
+    if (taida_elem_slot_is_array(list[3])) {
+        // Kind-aware dedup over (value, recorded kind) pairs. The result
+        // rebuilds its own kind entries for the surviving elements (and
+        // naturally re-homogenises when only one kind survives). The hash
+        // path engages only when every element kind is hashable — Float
+        // or unknown kinds fall back to the linear pair scan.
+        taida_val new_list = taida_list_new();
+        taida_seen_k seen;
+        int all_h = 1;
+        for (taida_val i = 0; i < len && all_h; i++)
+            all_h = taida_ekind_hashable(list[4 + i], taida_elem_kind_at(list, i));
+        int use_hash = all_h && taida_seen_k_init(&seen, len);
+        for (taida_val i = 0; i < len; i++) {
+            taida_val item = list[4 + i];
+            uint32_t ek = taida_elem_kind_at(list, i);
+            int dup;
+            if (use_hash) {
+                dup = !taida_seen_k_add(&seen, item, ek);
+            } else {
+                taida_val *nl = (taida_val*)new_list;
+                taida_val nlen = nl[2];
+                dup = 0;
+                for (taida_val j = 0; j < nlen; j++) {
+                    if (taida_ekind_value_eq(nl[4 + j], taida_elem_kind_at(nl, j), item, ek)) {
+                        dup = 1;
+                        break;
+                    }
+                }
+            }
+            if (!dup) {
+                taida_list_elem_retain(item, taida_ekind_to_tag(ek));
+                taida_elem_tags_note_push_ek((taida_val*)new_list, ek);
+                new_list = taida_list_push(new_list, item);
+            }
+        }
+        if (use_hash) taida_seen_k_free(&seen);
+        return new_list;
+    }
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
     taida_val *nl_init = (taida_val*)new_list;
     nl_init[3] = elem_tag;  // propagate elem_type_tag
@@ -5861,19 +6456,20 @@ taida_val taida_list_flatten(taida_val list_ptr) {
         if (TAIDA_IS_LIST(item)) {
             taida_val *sub = (taida_val*)item;
             taida_val slen = sub[2];
-            taida_val sub_tag = sub[3];
-            // Propagate inner list's elem_tag to result
-            if (i == 0) {
-                taida_val *nl = (taida_val*)new_list;
-                nl[3] = sub_tag;
-            }
+            // Every inner element projects through the latch under its
+            // recorded kind — a single i==0 stamp can't represent
+            // cross-tagged sibling sublists (@[@[1], @[true]]), and the
+            // latch naturally keeps a same-kind result homogeneous.
             for (taida_val j = 0; j < slen; j++) {
-                taida_list_elem_retain(sub[4 + j], sub_tag);
-                new_list = taida_list_push(new_list, sub[4 + j]);
+                new_list = taida_list_project_push(new_list, sub[4 + j], sub, j);
             }
         } else {
-            // Non-list element: retain using outer list's elem_tag
-            taida_list_elem_retain(item, list[3]);
+            // Non-list element: project under its recorded kind so an
+            // array-carrying outer list keeps each element's identity
+            // (and retains heap elements precisely).
+            uint32_t ek = taida_elem_kind_at(list, i);
+            taida_list_elem_retain(item, taida_ekind_to_tag(ek));
+            taida_elem_tags_note_push_ek((taida_val*)new_list, ek);
             new_list = taida_list_push(new_list, item);
         }
     }
@@ -5907,15 +6503,22 @@ taida_val taida_list_min(taida_val list_ptr) {
 taida_val taida_list_append(taida_val list_ptr, taida_val item) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
-    taida_val elem_tag = list[3];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     for (taida_val i = 0; i < len; i++) {
-        taida_list_elem_retain(list[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, list[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+        } else {
+            taida_list_elem_retain(list[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, list[4 + i]);
+        }
     }
-    // New item: no retain (ownership transferred from caller)
+    // New item: no retain (ownership transferred from caller). The
+    // appended value's kind is unknown at this boundary — record it as
+    // such so an array-carrying result stays honest.
+    if (src_tagged) taida_elem_tags_note_push_ek((taida_val*)new_list, TAIDA_EKIND_UNKNOWN);
     new_list = taida_list_push(new_list, item);
     return new_list;
 }
@@ -5923,15 +6526,21 @@ taida_val taida_list_append(taida_val list_ptr, taida_val item) {
 taida_val taida_list_prepend(taida_val list_ptr, taida_val item) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
-    taida_val elem_tag = list[3];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
-    // New item: no retain (ownership transferred from caller)
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
+    // New item: no retain (ownership transferred from caller); its kind
+    // is unknown at this boundary.
+    if (src_tagged) taida_elem_tags_note_push_ek((taida_val*)new_list, TAIDA_EKIND_UNKNOWN);
     new_list = taida_list_push(new_list, item);
     for (taida_val i = 0; i < len; i++) {
-        taida_list_elem_retain(list[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, list[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+        } else {
+            taida_list_elem_retain(list[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, list[4 + i]);
+        }
     }
     return new_list;
 }
@@ -5939,27 +6548,45 @@ taida_val taida_list_prepend(taida_val list_ptr, taida_val item) {
 taida_val taida_list_sort_desc(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
-    taida_val elem_tag = list[3];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     if (len == 0) return new_list;
     // M-07: Overflow guard + NULL check on items allocation.
     size_t items_size = taida_safe_mul((size_t)len, sizeof(taida_val), "list_sort_desc items");
     taida_val *items = (taida_val*)TAIDA_MALLOC(items_size, "list_sort_desc");
+    uint32_t *eks = NULL;
+    if (src_tagged) {
+        eks = (uint32_t*)TAIDA_MALLOC(taida_safe_mul((size_t)len, sizeof(uint32_t), "list_sort_desc kinds"), "list_sort_desc kinds");
+        for (taida_val i = 0; i < len; i++) eks[i] = taida_elem_kind_at(list, i);
+    }
     for (taida_val i = 0; i < len; i++) items[i] = list[4 + i];
     // Insertion sort descending
     for (taida_val i = 1; i < len; i++) {
         taida_val key = items[i];
+        uint32_t kek = eks ? eks[i] : 0;
         taida_val j = i - 1;
-        while (j >= 0 && items[j] < key) { items[j+1] = items[j]; j--; }
+        while (j >= 0 && items[j] < key) {
+            items[j+1] = items[j];
+            if (eks) eks[j+1] = eks[j];
+            j--;
+        }
         items[j+1] = key;
+        if (eks) eks[j+1] = kek;
     }
     for (taida_val i = 0; i < len; i++) {
-        taida_list_elem_retain(items[i], elem_tag);
-        new_list = taida_list_push(new_list, items[i]);
+        if (src_tagged) {
+            taida_list_elem_retain(items[i], taida_ekind_to_tag(eks[i]));
+            taida_elem_tags_note_push_ek((taida_val*)new_list, eks[i]);
+            new_list = taida_list_push(new_list, items[i]);
+        } else {
+            taida_list_elem_retain(items[i], elem_tag);
+            new_list = taida_list_push(new_list, items[i]);
+        }
     }
     free(items);
+    free(eks);
     return new_list;
 }
 
@@ -5971,10 +6598,10 @@ taida_val taida_list_sort_desc(taida_val list_ptr) {
 taida_val taida_list_unique_by(taida_val list_ptr, taida_val fn_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
-    taida_val elem_tag = list[3];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl_init = (taida_val*)new_list;
-    nl_init[3] = elem_tag;
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;
     if (len == 0) return new_list;
     // F54B-016 (C2): dedup keys by STRUCTURE (was raw `==`), mirroring the
     // interpreter Unique[](by) path (mold_eval.rs): a fingerprint seen-set while
@@ -6004,8 +6631,12 @@ taida_val taida_list_unique_by(taida_val list_ptr, taida_val fn_ptr) {
         }
         if (!dup) {
             seen_keys[seen_count++] = key;
-            taida_list_elem_retain(item, elem_tag);
-            new_list = taida_list_push(new_list, item);
+            if (src_tagged) {
+                new_list = taida_list_project_push(new_list, item, list, i);
+            } else {
+                taida_list_elem_retain(item, elem_tag);
+                new_list = taida_list_push(new_list, item);
+            }
         }
     }
     if (use_hash) taida_seen_free(&seen);
@@ -6018,14 +6649,19 @@ taida_val taida_list_unique_by(taida_val list_ptr, taida_val fn_ptr) {
 taida_val taida_list_sort_by(taida_val list_ptr, taida_val fn_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
-    taida_val elem_tag = list[3];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;
     if (len == 0) return new_list;
     size_t items_size = taida_safe_mul((size_t)len, sizeof(taida_val), "list_sort_by items");
     taida_val *items = (taida_val*)TAIDA_MALLOC(items_size, "list_sort_by items");
     taida_val *keys = (taida_val*)TAIDA_MALLOC(items_size, "list_sort_by keys");
+    uint32_t *eks = NULL;
+    if (src_tagged) {
+        eks = (uint32_t*)TAIDA_MALLOC(taida_safe_mul((size_t)len, sizeof(uint32_t), "list_sort_by kinds"), "list_sort_by kinds");
+        for (taida_val i = 0; i < len; i++) eks[i] = taida_elem_kind_at(list, i);
+    }
     for (taida_val i = 0; i < len; i++) {
         items[i] = list[4 + i];
         keys[i] = taida_invoke_callback1(fn_ptr, items[i]);
@@ -6034,21 +6670,31 @@ taida_val taida_list_sort_by(taida_val list_ptr, taida_val fn_ptr) {
     for (taida_val i = 1; i < len; i++) {
         taida_val kkey = keys[i];
         taida_val kitem = items[i];
+        uint32_t kek = eks ? eks[i] : 0;
         taida_val j = i - 1;
         while (j >= 0 && keys[j] > kkey) {
             keys[j+1] = keys[j];
             items[j+1] = items[j];
+            if (eks) eks[j+1] = eks[j];
             j--;
         }
         keys[j+1] = kkey;
         items[j+1] = kitem;
+        if (eks) eks[j+1] = kek;
     }
     for (taida_val i = 0; i < len; i++) {
-        taida_list_elem_retain(items[i], elem_tag);
-        new_list = taida_list_push(new_list, items[i]);
+        if (src_tagged) {
+            taida_list_elem_retain(items[i], taida_ekind_to_tag(eks[i]));
+            taida_elem_tags_note_push_ek((taida_val*)new_list, eks[i]);
+            new_list = taida_list_push(new_list, items[i]);
+        } else {
+            taida_list_elem_retain(items[i], elem_tag);
+            new_list = taida_list_push(new_list, items[i]);
+        }
     }
     free(items);
     free(keys);
+    free(eks);
     return new_list;
 }
 
@@ -6109,15 +6755,19 @@ taida_val taida_list_foldr(taida_val list_ptr, taida_val init, taida_val fn_ptr)
 taida_val taida_list_take(taida_val list_ptr, taida_val n) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
-    taida_val elem_tag = list[3];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val take_n = n < len ? n : len;
     if (take_n < 0) take_n = 0;
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     for (taida_val i = 0; i < take_n; i++) {
-        taida_list_elem_retain(list[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, list[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+        } else {
+            taida_list_elem_retain(list[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, list[4 + i]);
+        }
     }
     return new_list;
 }
@@ -6126,14 +6776,18 @@ taida_val taida_list_take(taida_val list_ptr, taida_val n) {
 taida_val taida_list_take_while(taida_val list_ptr, taida_val fn_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
-    taida_val elem_tag = list[3];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     for (taida_val i = 0; i < len; i++) {
         if (taida_invoke_callback1(fn_ptr, list[4 + i])) {
-            taida_list_elem_retain(list[4 + i], elem_tag);
-            new_list = taida_list_push(new_list, list[4 + i]);
+            if (src_tagged) {
+                new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+            } else {
+                taida_list_elem_retain(list[4 + i], elem_tag);
+                new_list = taida_list_push(new_list, list[4 + i]);
+            }
         } else {
             break;
         }
@@ -6145,15 +6799,19 @@ taida_val taida_list_take_while(taida_val list_ptr, taida_val fn_ptr) {
 taida_val taida_list_drop(taida_val list_ptr, taida_val n) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
-    taida_val elem_tag = list[3];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val skip = n < len ? n : len;
     if (skip < 0) skip = 0;
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     for (taida_val i = skip; i < len; i++) {
-        taida_list_elem_retain(list[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, list[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+        } else {
+            taida_list_elem_retain(list[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, list[4 + i]);
+        }
     }
     return new_list;
 }
@@ -6162,18 +6820,22 @@ taida_val taida_list_drop(taida_val list_ptr, taida_val n) {
 taida_val taida_list_drop_while(taida_val list_ptr, taida_val fn_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
-    taida_val elem_tag = list[3];
+    int src_tagged = taida_elem_slot_is_array(list[3]);
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);
     taida_val new_list = taida_list_new();
-    taida_val *nl = (taida_val*)new_list;
-    nl[3] = elem_tag;  // propagate elem_type_tag
+    if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;  // propagate elem_type_tag
     taida_val dropping = 1;
     for (taida_val i = 0; i < len; i++) {
         if (dropping && taida_invoke_callback1(fn_ptr, list[4 + i])) {
             continue;
         }
         dropping = 0;
-        taida_list_elem_retain(list[4 + i], elem_tag);
-        new_list = taida_list_push(new_list, list[4 + i]);
+        if (src_tagged) {
+            new_list = taida_list_project_push(new_list, list[4 + i], list, i);
+        } else {
+            taida_list_elem_retain(list[4 + i], elem_tag);
+            new_list = taida_list_push(new_list, list[4 + i]);
+        }
     }
     return new_list;
 }
@@ -6208,24 +6870,28 @@ taida_val taida_list_zip(taida_val list1, taida_val list2) {
     taida_val *l2 = (taida_val*)list2;
     taida_val len1 = l1[2], len2 = l2[2];
     taida_val min_len = len1 < len2 ? len1 : len2;
-    taida_val elem_tag1 = l1[3];  // ソースリスト1の要素型タグ
-    taida_val elem_tag2 = l2[3];  // ソースリスト2の要素型タグ
+    taida_val elem_tag1 = taida_elem_tag_for_propagation(l1);  // ソースリスト1の要素型タグ
+    taida_val elem_tag2 = taida_elem_tag_for_propagation(l2);  // ソースリスト2の要素型タグ
     taida_val new_list = taida_list_new();
     taida_val *nl = (taida_val*)new_list;
     nl[3] = TAIDA_TAG_PACK;  // zip produces Pack elements
     for (taida_val i = 0; i < min_len; i++) {
-        // Create a BuchiPack with fields: first, second
+        // Create a BuchiPack with fields: first, second. Field tags come
+        // from each element's recorded kind (per-element for array
+        // carriers; the single propagation tag otherwise — ENUM/unknown
+        // entries fall back to it because pack tag consumers only
+        // understand the legacy domain).
+        taida_val ft1 = taida_ekind_to_pack_tag(taida_elem_kind_at(l1, i), elem_tag1);
+        taida_val ft2 = taida_ekind_to_pack_tag(taida_elem_kind_at(l2, i), elem_tag2);
         taida_val pair = taida_pack_new(2);
         pair = taida_pack_set_hash(pair, 0, (taida_val)HASH_FIRST);
         pair = taida_pack_set(pair, 0, l1[4 + i]);
-        // tag + retain for first field based on source list's elem_type_tag
-        taida_pack_set_tag(pair, 0, elem_tag1);
-        taida_list_elem_retain(l1[4 + i], elem_tag1);
+        taida_pack_set_tag(pair, 0, ft1);
+        taida_list_elem_retain(l1[4 + i], ft1);
         pair = taida_pack_set_hash(pair, 1, (taida_val)HASH_SECOND);
         pair = taida_pack_set(pair, 1, l2[4 + i]);
-        // tag + retain for second field based on source list's elem_type_tag
-        taida_pack_set_tag(pair, 1, elem_tag2);
-        taida_list_elem_retain(l2[4 + i], elem_tag2);
+        taida_pack_set_tag(pair, 1, ft2);
+        taida_list_elem_retain(l2[4 + i], ft2);
         new_list = taida_list_push(new_list, pair);
     }
     return new_list;
@@ -6235,7 +6901,7 @@ taida_val taida_list_enumerate(taida_val list_ptr) {
     taida_register_zip_enumerate_field_names();  // C24-B
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
-    taida_val elem_tag = list[3];  // ソースリストの要素型タグ
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);  // ソースリストの要素型タグ
     taida_val new_list = taida_list_new();
     taida_val *nl = (taida_val*)new_list;
     nl[3] = TAIDA_TAG_PACK;  // enumerate produces Pack elements
@@ -6247,9 +6913,11 @@ taida_val taida_list_enumerate(taida_val list_ptr) {
         // index は INT なのでタグはデフォルト(0)のまま、retain 不要
         pair = taida_pack_set_hash(pair, 1, (taida_val)HASH_VALUE);
         pair = taida_pack_set(pair, 1, list[4 + i]);
-        // value フィールドにソースリストの elem_type_tag に基づいて tag + retain
-        taida_pack_set_tag(pair, 1, elem_tag);
-        taida_list_elem_retain(list[4 + i], elem_tag);
+        // value フィールドは要素の recorded kind に基づいて tag + retain
+        // （配列持ちソースは per-element、それ以外は単一 propagation tag）
+        taida_val vft = taida_ekind_to_pack_tag(taida_elem_kind_at(list, i), elem_tag);
+        taida_pack_set_tag(pair, 1, vft);
+        taida_list_elem_retain(list[4 + i], vft);
         new_list = taida_list_push(new_list, pair);
     }
     return new_list;
@@ -7150,13 +7818,21 @@ void taida_set_set_elem_tag(taida_val set_ptr, taida_val tag) {
     ((taida_val*)set_ptr)[3] = tag;
 }
 
-static taida_val taida_set_contains(taida_val set_ptr, taida_val item) {
+// Kind-aware membership core: the set side reports each element's
+// recorded kind, the probe item's kind comes from the caller (EKIND
+// unknown degrades pairs to the legacy structural comparison, so the
+// 2-arg wrapper below is behaviour-identical to the historical scan).
+static taida_val taida_set_contains_k(taida_val set_ptr, taida_val item, uint32_t ek) {
     taida_val *list = (taida_val*)set_ptr;
     taida_val len = list[2];  // length at index 2
     for (taida_val i = 0; i < len; i++) {
-        if (taida_value_struct_eq(list[4 + i], item)) return 1;
+        if (taida_ekind_value_eq(list[4 + i], taida_elem_kind_at(list, i), item, ek)) return 1;
     }
     return 0;
+}
+
+static taida_val taida_set_contains(taida_val set_ptr, taida_val item) {
+    return taida_set_contains_k(set_ptr, item, TAIDA_EKIND_UNKNOWN);
 }
 
 // ── F54 tier 2: numeric-domain aware Set×Set comparison ──────────
@@ -7211,7 +7887,43 @@ static int taida_tagged_set_contains(const taida_val *container, taida_val conta
 taida_val taida_set_from_list(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];  // length at index 2
-    taida_val elem_tag = list[3];  // NO-2: propagate elem_type_tag from source list
+    if (taida_elem_slot_is_array(list[3])) {
+        // Kind-aware dedup over (value, recorded kind) pairs — see
+        // taida_list_unique for the same projection. The resulting Set
+        // keeps per-element kinds so later membership tests stay exact.
+        taida_val new_set = taida_set_new();
+        taida_seen_k seen;
+        int all_h = 1;
+        for (taida_val i = 0; i < len && all_h; i++)
+            all_h = taida_ekind_hashable(list[4 + i], taida_elem_kind_at(list, i));
+        int use_hash = all_h && taida_seen_k_init(&seen, len);
+        for (taida_val i = 0; i < len; i++) {
+            taida_val item = list[4 + i];
+            uint32_t ek = taida_elem_kind_at(list, i);
+            int dup;
+            if (use_hash) {
+                dup = !taida_seen_k_add(&seen, item, ek);
+            } else {
+                taida_val *ns = (taida_val*)new_set;
+                taida_val nlen = ns[2];
+                dup = 0;
+                for (taida_val j = 0; j < nlen; j++) {
+                    if (taida_ekind_value_eq(ns[4 + j], taida_elem_kind_at(ns, j), item, ek)) {
+                        dup = 1;
+                        break;
+                    }
+                }
+            }
+            if (!dup) {
+                taida_list_elem_retain(item, taida_ekind_to_tag(ek));
+                taida_elem_tags_note_push_ek((taida_val*)new_set, ek);
+                new_set = taida_list_push(new_set, item);
+            }
+        }
+        if (use_hash) taida_seen_k_free(&seen);
+        return new_set;
+    }
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);  // NO-2: propagate elem_type_tag from source list
     taida_val new_set = taida_set_new();
     ((taida_val*)new_set)[3] = elem_tag;  // NO-2: set elem_type_tag
     taida_seen seen;
@@ -7235,7 +7947,7 @@ taida_val taida_set_add(taida_val set_ptr, taida_val item) {
     // Use taida_list_push for correct list manipulation
     taida_val *list = (taida_val*)set_ptr;
     taida_val len = list[2];
-    taida_val elem_tag = list[3];  // NO-2: propagate elem_type_tag
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);  // NO-2: propagate elem_type_tag
     // Clone the set, then push the new item
     taida_val new_set = taida_set_new();
     ((taida_val*)new_set)[3] = elem_tag;  // NO-2: set elem_type_tag
@@ -7249,13 +7961,33 @@ taida_val taida_set_add(taida_val set_ptr, taida_val item) {
 }
 
 taida_val taida_set_remove(taida_val set_ptr, taida_val item) {
+    return taida_set_remove_k(set_ptr, item, TAIDA_EKIND_UNKNOWN);
+}
+
+
+taida_val taida_set_remove_k(taida_val set_ptr, taida_val item, uint32_t probe_ek) {
     taida_val *list = (taida_val*)set_ptr;
     taida_val len = list[2];  // length at index 2
-    taida_val elem_tag = list[3];  // NO-2: propagate elem_type_tag
+    if (taida_elem_slot_is_array(list[3])) {
+        // Kind-aware removal: survivors keep their recorded kinds (the
+        // probe item has no kind here, so the pair comparison degrades to
+        // structural for it — same membership the 2-arg has() reports).
+        taida_val new_set = taida_set_new();
+        for (taida_val i = 0; i < len; i++) {
+            uint32_t ek = taida_elem_kind_at(list, i);
+            if (!taida_ekind_value_eq(list[4 + i], ek, item, probe_ek)) {
+                taida_list_elem_retain(list[4 + i], taida_ekind_to_tag(ek));
+                taida_elem_tags_note_push_ek((taida_val*)new_set, ek);
+                new_set = taida_list_push(new_set, list[4 + i]);
+            }
+        }
+        return new_set;
+    }
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);  // NO-2: propagate elem_type_tag
     taida_val new_set = taida_set_new();
     ((taida_val*)new_set)[3] = elem_tag;  // NO-2: set elem_type_tag
     for (taida_val i = 0; i < len; i++) {
-        if (!taida_value_struct_eq(list[4 + i], item)) {
+        if (!taida_ekind_value_eq(list[4 + i], taida_elem_kind_at(list, i), item, probe_ek)) {
             taida_list_elem_retain(list[4 + i], elem_tag);  // NO-2: retain-on-copy
             new_set = taida_list_push(new_set, list[4 + i]);
         }
@@ -7265,6 +7997,37 @@ taida_val taida_set_remove(taida_val set_ptr, taida_val item) {
 
 taida_val taida_set_has(taida_val set_ptr, taida_val item) {
     return taida_set_contains(set_ptr, item);
+}
+
+// Tagged entry points: codegen passes the probe/insert argument's static
+// kind (an EKIND entry — kind in the low byte, enum type id in the upper
+// bits) so single-value membership and insertion follow the same pair
+// semantics as construction-time dedup. An UNKNOWN entry degrades to the
+// legacy structural behaviour.
+taida_val taida_set_has_tagged(taida_val set_ptr, taida_val item, taida_val ekind_arg) {
+    return taida_set_contains_k(set_ptr, item, (uint32_t)ekind_arg);
+}
+
+taida_val taida_set_add_tagged(taida_val set_ptr, taida_val item, taida_val ekind_arg) {
+    uint32_t ek = (uint32_t)ekind_arg;
+    if (taida_set_contains_k(set_ptr, item, ek)) {
+        return set_ptr;  // already present under pair semantics
+    }
+    // Clone the set, projecting each element's recorded kind into the
+    // result, then append the new item under the caller's kind.
+    taida_val *list = (taida_val*)set_ptr;
+    taida_val len = list[2];
+    taida_val new_set = taida_set_new();
+    for (taida_val i = 0; i < len; i++) {
+        uint32_t eki = taida_elem_kind_at(list, i);
+        taida_list_elem_retain(list[4 + i], taida_ekind_to_tag(eki));
+        taida_elem_tags_note_push_ek((taida_val*)new_set, eki);
+        new_set = taida_list_push(new_set, list[4 + i]);
+    }
+    taida_list_elem_retain(item, taida_ekind_to_tag(ek));
+    taida_elem_tags_note_push_ek((taida_val*)new_set, ek);
+    new_set = taida_list_push(new_set, item);
+    return new_set;
 }
 
 taida_val taida_set_size(taida_val set_ptr) {
@@ -7279,7 +8042,18 @@ taida_val taida_set_to_list(taida_val set_ptr) {
     // Clone the set as a regular list (not tagged as Set)
     taida_val *list = (taida_val*)set_ptr;
     taida_val len = list[2];  // length at index 2
-    taida_val elem_tag = list[3];  // NO-2: propagate elem_type_tag
+    if (taida_elem_slot_is_array(list[3])) {
+        // Kind-aware clone: the list keeps the set's per-element kinds.
+        taida_val new_list = taida_list_new();
+        for (taida_val i = 0; i < len; i++) {
+            uint32_t ek = taida_elem_kind_at(list, i);
+            taida_list_elem_retain(list[4 + i], taida_ekind_to_tag(ek));
+            taida_elem_tags_note_push_ek((taida_val*)new_list, ek);
+            new_list = taida_list_push(new_list, list[4 + i]);
+        }
+        return new_list;
+    }
+    taida_val elem_tag = taida_elem_tag_for_propagation(list);  // NO-2: propagate elem_type_tag
     taida_val new_list = taida_list_new();  // regular list, refcount=1 (not SET tag)
     ((taida_val*)new_list)[3] = elem_tag;  // NO-2: set elem_type_tag on result list
     for (taida_val i = 0; i < len; i++) {
@@ -7294,8 +8068,30 @@ taida_val taida_set_union(taida_val set_a, taida_val set_b) {
     taida_val *b = (taida_val*)set_b;
     taida_val a_len = a[2];  // length at index 2
     taida_val b_len = b[2];
-    taida_val elem_tag = a[3];  // NO-2: propagate elem_type_tag from set_a
-    taida_val tag_b = b[3];
+    if (taida_elem_slot_is_array(a[3]) || taida_elem_slot_is_array(b[3])
+        || taida_elem_tags_cross(a, b)) {
+        // Kind-aware linear union. Array-carrying sets are literal-sized,
+        // so the O(|a|·|b|) pair scan keeps exact (value, kind) semantics
+        // without a hash path; the result rebuilds its own kind entries.
+        taida_val result = taida_set_new();
+        for (taida_val i = 0; i < a_len; i++) {
+            uint32_t ek = taida_elem_kind_at(a, i);
+            taida_list_elem_retain(a[4 + i], taida_ekind_to_tag(ek));
+            taida_elem_tags_note_push_ek((taida_val*)result, ek);
+            result = taida_list_push(result, a[4 + i]);
+        }
+        for (taida_val i = 0; i < b_len; i++) {
+            uint32_t ek = taida_elem_kind_at(b, i);
+            if (!taida_set_contains_k(result, b[4 + i], ek)) {
+                taida_list_elem_retain(b[4 + i], taida_ekind_to_tag(ek));
+                taida_elem_tags_note_push_ek((taida_val*)result, ek);
+                result = taida_list_push(result, b[4 + i]);
+            }
+        }
+        return result;
+    }
+    taida_val elem_tag = taida_elem_tag_for_propagation(a);  // NO-2: propagate elem_type_tag from set_a
+    taida_val tag_b = taida_elem_tag_for_propagation(b);
     // F54 tier 2: when the two sets pin different scalar domains (or a
     // Float domain is in play), dedup across them numerically — b is a
     // Set, hence already unique, so the dup test only needs "is b[i]
@@ -7326,15 +8122,17 @@ taida_val taida_set_union(taida_val set_a, taida_val set_b) {
             dup = taida_set_contains(result, b[4 + i]);
         }
         if (!dup) {
+            // F54 tier 2: every actually-added b element stamps its tag
+            // through the shared latch — BEFORE the push (the latch's
+            // materialise path indexes the element about to be pushed at
+            // result[2], so a post-push call would mis-index the kind
+            // array). An UNKNOWN-tagged result (empty-a union) promotes
+            // to tag_b and a matching tag is a no-op; genuine cross-tag
+            // unions never reach here any more (the kind-aware branch
+            // above owns them).
+            taida_list_set_elem_tag(result, tag_b);
             taida_list_elem_retain(b[4 + i], tag_b);  // NO-2: retain-on-copy
             result = taida_list_push(result, b[4 + i]);
-            // F54 tier 2: every actually-added b element stamps its tag
-            // through the shared latch. An UNKNOWN-tagged result (empty-a
-            // union) promotes to tag_b, a matching tag is a no-op, and a
-            // genuine cross-domain add downgrades to HETEROGENEOUS
-            // (structural engine + no-op elem release: leak-not-crash,
-            // same policy as the rest of the tag system).
-            taida_list_set_elem_tag(result, tag_b);
         }
     }
     if (use_hash) taida_seen_free(&seen);
@@ -7344,9 +8142,25 @@ taida_val taida_set_union(taida_val set_a, taida_val set_b) {
 taida_val taida_set_intersect(taida_val set_a, taida_val set_b) {
     taida_val *a = (taida_val*)set_a;
     taida_val a_len = a[2];  // length at index 2
-    taida_val elem_tag = a[3];  // NO-2: propagate elem_type_tag
     taida_val *b = (taida_val*)set_b;
-    taida_val tag_b = b[3];
+    if (taida_elem_slot_is_array(a[3]) || taida_elem_slot_is_array(b[3])
+        || taida_elem_tags_cross(a, b)) {
+        // Kind-aware linear intersection (see union above for rationale).
+        // The result holds a-side elements only, projected with their
+        // recorded kinds.
+        taida_val result = taida_set_new();
+        for (taida_val i = 0; i < a_len; i++) {
+            uint32_t ek = taida_elem_kind_at(a, i);
+            if (taida_set_contains_k(set_b, a[4 + i], ek)) {
+                taida_list_elem_retain(a[4 + i], taida_ekind_to_tag(ek));
+                taida_elem_tags_note_push_ek((taida_val*)result, ek);
+                result = taida_list_push(result, a[4 + i]);
+            }
+        }
+        return result;
+    }
+    taida_val elem_tag = taida_elem_tag_for_propagation(a);  // NO-2: propagate elem_type_tag
+    taida_val tag_b = taida_elem_tag_for_propagation(b);
     // F54 tier 2: tagged numeric membership when scalar domains differ.
     // The result holds a-side elements only, so the a tag stays honest.
     int numeric_cross = taida_set_numeric_cross(elem_tag, tag_b);
@@ -7377,9 +8191,23 @@ taida_val taida_set_intersect(taida_val set_a, taida_val set_b) {
 taida_val taida_set_diff(taida_val set_a, taida_val set_b) {
     taida_val *a = (taida_val*)set_a;
     taida_val a_len = a[2];  // length at index 2
-    taida_val elem_tag = a[3];  // NO-2: propagate elem_type_tag
     taida_val *b = (taida_val*)set_b;
-    taida_val tag_b = b[3];
+    if (taida_elem_slot_is_array(a[3]) || taida_elem_slot_is_array(b[3])
+        || taida_elem_tags_cross(a, b)) {
+        // Kind-aware linear difference (see union above for rationale).
+        taida_val result = taida_set_new();
+        for (taida_val i = 0; i < a_len; i++) {
+            uint32_t ek = taida_elem_kind_at(a, i);
+            if (!taida_set_contains_k(set_b, a[4 + i], ek)) {
+                taida_list_elem_retain(a[4 + i], taida_ekind_to_tag(ek));
+                taida_elem_tags_note_push_ek((taida_val*)result, ek);
+                result = taida_list_push(result, a[4 + i]);
+            }
+        }
+        return result;
+    }
+    taida_val elem_tag = taida_elem_tag_for_propagation(a);  // NO-2: propagate elem_type_tag
+    taida_val tag_b = taida_elem_tag_for_propagation(b);
     // F54 tier 2: tagged numeric membership when scalar domains differ.
     int numeric_cross = taida_set_numeric_cross(elem_tag, tag_b);
     taida_val result = taida_set_new();
@@ -7588,6 +8416,17 @@ taida_val taida_collection_has(taida_val ptr, taida_val item) {
     return taida_set_has(ptr, item);
 }
 
+// Tagged sibling: codegen supplies the probe argument's static kind so
+// Set membership follows pair semantics; HashMaps keep their key-hash
+// path (key kinds are a separate system).
+taida_val taida_collection_has_tagged(taida_val ptr, taida_val item, taida_val ekind_arg) {
+    if (taida_is_hashmap(ptr)) {
+        taida_val key_hash = taida_value_hash(item);
+        return taida_hashmap_has(ptr, key_hash, item);
+    }
+    return taida_set_contains_k(ptr, item, (uint32_t)ekind_arg);
+}
+
 // .remove(key_or_item) — HashMap: hash-based removal, Set: linear scan
 taida_val taida_collection_remove(taida_val ptr, taida_val item) {
     if (taida_is_hashmap(ptr)) {
@@ -7596,6 +8435,16 @@ taida_val taida_collection_remove(taida_val ptr, taida_val item) {
     }
     // Set: linear scan removal
     return taida_set_remove(ptr, item);
+}
+
+// Tagged sibling: the probe's static kind drives pair-semantics removal
+// on Sets (mirrors has/add); HashMaps keep their key-hash path.
+taida_val taida_collection_remove_tagged(taida_val ptr, taida_val item, taida_val ekind_arg) {
+    if (taida_is_hashmap(ptr)) {
+        taida_val key_hash = taida_value_hash(item);
+        return taida_hashmap_remove_immut(ptr, key_hash, item);
+    }
+    return taida_set_remove_k(ptr, item, (uint32_t)ekind_arg);
 }
 
 // .size() — works on both HashMap and Set (both store length at ptr[2])
@@ -10857,9 +11706,15 @@ taida_val taida_debug_json(taida_val json_ptr) {
 static double _l2d(taida_val v) { union { taida_val l; double d; } u; u.l = v; return u.d; }
 static taida_val _d2l(double v) { union { taida_val l; double d; } u; u.d = v; return u.l; }
 
-// Smart conversion: if the bit pattern represents a "reasonable" f64, use it as-is.
-// If it looks like a small integer (-1M..1M), convert from integer.
-// This heuristic handles both ConstFloat (bitcast) and ConstInt paths.
+// Magnitude heuristic, DYNAMIC operands only: statically-typed Int
+// operands of float-family ops are lifted to genuine f64 bits at the
+// call site (taida_int_to_float emitted by the lowering), so this
+// fallback only decides for dynamically-typed values whose kind never
+// reached the runtime. Small bit patterns (within ±2^20 — a range no
+// non-denormal f64 occupies) are treated as plain integers; everything
+// else as an f64 bit pattern. Known residual: a dynamic Int beyond
+// ±2^20 misclassifies — the tagged poly comparisons remove that for
+// equality, and arithmetic keeps it until kinds ride those paths too.
 static double _to_double(taida_val v) {
     // If v is a small integer (common case for literals like 16, 100, etc.)
     // f64 encoding of small integers has specific bit patterns
@@ -12288,6 +13143,459 @@ taida_val taida_sha256(taida_val value) {
         return taida_sha256_hex_from_bytes(NULL, 0);
     }
     taida_val out = taida_sha256_hex_from_bytes((const unsigned char*)s, slen);
+    return out;
+}
+
+// ── F55 S4: extended crypto surface ───────────────────────────────────
+// SHA-512 / 384 / 224, HMAC-SHA256, constant-time equality, hex/base64
+// encode/decode, randomBytes. Hand-written (no external dependency); each
+// matches the Rust reference in src/crypto.rs byte-for-byte.
+
+// Materialize a Str|Bytes taida_val into a freshly malloc'd raw buffer.
+// On success returns 1 and sets *out (caller frees) + *out_len. On a value
+// that is neither Str nor Bytes, returns 0. Caps input at 256 MiB.
+#define TAIDA_CRYPTO_MAX_INPUT (256LL * 1024LL * 1024LL)
+static int taida_crypto_materialize(taida_val value, unsigned char **out, size_t *out_len) {
+    if (TAIDA_IS_BYTES_CONTIG(value)) {
+        taida_val len = taida_bytes_contig_len(value);
+        if (len < 0 || len > TAIDA_CRYPTO_MAX_INPUT) return 0;
+        unsigned char *buf = (unsigned char*)TAIDA_MALLOC((size_t)(len > 0 ? len : 1), "crypto_in");
+        if (len > 0) memcpy(buf, taida_bytes_contig_data(value), (size_t)len);
+        *out = buf;
+        *out_len = (size_t)len;
+        return 1;
+    }
+    if (TAIDA_IS_BYTES(value)) {
+        taida_val len = taida_bytes_len(value);
+        if (len < 0 || len > TAIDA_CRYPTO_MAX_INPUT) return 0;
+        taida_val *bytes = (taida_val*)value;
+        unsigned char *buf = (unsigned char*)TAIDA_MALLOC((size_t)(len > 0 ? len : 1), "crypto_in");
+        for (taida_val i = 0; i < len; i++) buf[i] = (unsigned char)bytes[2 + i];
+        *out = buf;
+        *out_len = (size_t)len;
+        return 1;
+    }
+    const char *s = (const char*)value;
+    size_t slen = 0;
+    if (!taida_str_byte_len(s, &slen)) return 0;
+    if (slen > (size_t)TAIDA_CRYPTO_MAX_INPUT) return 0;
+    unsigned char *buf = (unsigned char*)TAIDA_MALLOC(slen > 0 ? slen : 1, "crypto_in");
+    if (slen > 0) memcpy(buf, s, slen);
+    *out = buf;
+    *out_len = slen;
+    return 1;
+}
+
+// SHA-512 / SHA-384 core (64-bit words, 1024-bit blocks).
+typedef struct {
+    uint64_t state[8];
+    uint64_t total_lo; // total length in bytes, low 64 bits
+    unsigned char block[128];
+    size_t block_len;
+} taida_sha512_ctx;
+
+static const uint64_t TAIDA_SHA512_K[80] = {
+    0x428a2f98d728ae22ULL, 0x7137449123ef65cdULL, 0xb5c0fbcfec4d3b2fULL, 0xe9b5dba58189dbbcULL,
+    0x3956c25bf348b538ULL, 0x59f111f1b605d019ULL, 0x923f82a4af194f9bULL, 0xab1c5ed5da6d8118ULL,
+    0xd807aa98a3030242ULL, 0x12835b0145706fbeULL, 0x243185be4ee4b28cULL, 0x550c7dc3d5ffb4e2ULL,
+    0x72be5d74f27b896fULL, 0x80deb1fe3b1696b1ULL, 0x9bdc06a725c71235ULL, 0xc19bf174cf692694ULL,
+    0xe49b69c19ef14ad2ULL, 0xefbe4786384f25e3ULL, 0x0fc19dc68b8cd5b5ULL, 0x240ca1cc77ac9c65ULL,
+    0x2de92c6f592b0275ULL, 0x4a7484aa6ea6e483ULL, 0x5cb0a9dcbd41fbd4ULL, 0x76f988da831153b5ULL,
+    0x983e5152ee66dfabULL, 0xa831c66d2db43210ULL, 0xb00327c898fb213fULL, 0xbf597fc7beef0ee4ULL,
+    0xc6e00bf33da88fc2ULL, 0xd5a79147930aa725ULL, 0x06ca6351e003826fULL, 0x142929670a0e6e70ULL,
+    0x27b70a8546d22ffcULL, 0x2e1b21385c26c926ULL, 0x4d2c6dfc5ac42aedULL, 0x53380d139d95b3dfULL,
+    0x650a73548baf63deULL, 0x766a0abb3c77b2a8ULL, 0x81c2c92e47edaee6ULL, 0x92722c851482353bULL,
+    0xa2bfe8a14cf10364ULL, 0xa81a664bbc423001ULL, 0xc24b8b70d0f89791ULL, 0xc76c51a30654be30ULL,
+    0xd192e819d6ef5218ULL, 0xd69906245565a910ULL, 0xf40e35855771202aULL, 0x106aa07032bbd1b8ULL,
+    0x19a4c116b8d2d0c8ULL, 0x1e376c085141ab53ULL, 0x2748774cdf8eeb99ULL, 0x34b0bcb5e19b48a8ULL,
+    0x391c0cb3c5c95a63ULL, 0x4ed8aa4ae3418acbULL, 0x5b9cca4f7763e373ULL, 0x682e6ff3d6b2b8a3ULL,
+    0x748f82ee5defb2fcULL, 0x78a5636f43172f60ULL, 0x84c87814a1f0ab72ULL, 0x8cc702081a6439ecULL,
+    0x90befffa23631e28ULL, 0xa4506cebde82bde9ULL, 0xbef9a3f7b2c67915ULL, 0xc67178f2e372532bULL,
+    0xca273eceea26619cULL, 0xd186b8c721c0c207ULL, 0xeada7dd6cde0eb1eULL, 0xf57d4f7fee6ed178ULL,
+    0x06f067aa72176fbaULL, 0x0a637dc5a2c898a6ULL, 0x113f9804bef90daeULL, 0x1b710b35131c471bULL,
+    0x28db77f523047d84ULL, 0x32caab7b40c72493ULL, 0x3c9ebe0a15c9bebcULL, 0x431d67c49c100d4cULL,
+    0x4cc5d4becb3e42b6ULL, 0x597f299cfc657e2aULL, 0x5fcb6fab3ad6faecULL, 0x6c44198c4a475817ULL
+};
+
+static uint64_t taida_sha512_rotr(uint64_t x, unsigned n) {
+    return (x >> n) | (x << (64 - n));
+}
+
+static void taida_sha512_transform(taida_sha512_ctx *ctx, const unsigned char block[128]) {
+    uint64_t w[80];
+    for (int i = 0; i < 16; i++) {
+        int j = i * 8;
+        w[i] = ((uint64_t)block[j] << 56) | ((uint64_t)block[j+1] << 48) |
+               ((uint64_t)block[j+2] << 40) | ((uint64_t)block[j+3] << 32) |
+               ((uint64_t)block[j+4] << 24) | ((uint64_t)block[j+5] << 16) |
+               ((uint64_t)block[j+6] << 8) | (uint64_t)block[j+7];
+    }
+    for (int i = 16; i < 80; i++) {
+        uint64_t s0 = taida_sha512_rotr(w[i-15], 1) ^ taida_sha512_rotr(w[i-15], 8) ^ (w[i-15] >> 7);
+        uint64_t s1 = taida_sha512_rotr(w[i-2], 19) ^ taida_sha512_rotr(w[i-2], 61) ^ (w[i-2] >> 6);
+        w[i] = w[i-16] + s0 + w[i-7] + s1;
+    }
+    uint64_t a = ctx->state[0], b = ctx->state[1], c = ctx->state[2], d = ctx->state[3];
+    uint64_t e = ctx->state[4], f = ctx->state[5], g = ctx->state[6], h = ctx->state[7];
+    for (int i = 0; i < 80; i++) {
+        uint64_t s1 = taida_sha512_rotr(e, 14) ^ taida_sha512_rotr(e, 18) ^ taida_sha512_rotr(e, 41);
+        uint64_t ch = (e & f) ^ ((~e) & g);
+        uint64_t temp1 = h + s1 + ch + TAIDA_SHA512_K[i] + w[i];
+        uint64_t s0 = taida_sha512_rotr(a, 28) ^ taida_sha512_rotr(a, 34) ^ taida_sha512_rotr(a, 39);
+        uint64_t maj = (a & b) ^ (a & c) ^ (b & c);
+        uint64_t temp2 = s0 + maj;
+        h = g; g = f; f = e; e = d + temp1; d = c; c = b; b = a; a = temp1 + temp2;
+    }
+    ctx->state[0] += a; ctx->state[1] += b; ctx->state[2] += c; ctx->state[3] += d;
+    ctx->state[4] += e; ctx->state[5] += f; ctx->state[6] += g; ctx->state[7] += h;
+}
+
+static void taida_sha512_update(taida_sha512_ctx *ctx, const unsigned char *data, size_t len) {
+    if (!data || len == 0) return;
+    ctx->total_lo += (uint64_t)len;
+    size_t pos = 0;
+    while (pos < len) {
+        size_t need = 128 - ctx->block_len;
+        size_t take = (len - pos < need) ? (len - pos) : need;
+        memcpy(ctx->block + ctx->block_len, data + pos, take);
+        ctx->block_len += take;
+        pos += take;
+        if (ctx->block_len == 128) {
+            taida_sha512_transform(ctx, ctx->block);
+            ctx->block_len = 0;
+        }
+    }
+}
+
+// Finish the SHA-512 core and write the first out_len bytes of the digest.
+static void taida_sha512_final(taida_sha512_ctx *ctx, unsigned char *out, size_t out_len) {
+    // 128-bit length field; we only ever feed <= 256 MiB so the high 64 bits
+    // of the bit length are always 0.
+    uint64_t bit_len = ctx->total_lo * 8ULL;
+    ctx->block[ctx->block_len++] = 0x80;
+    if (ctx->block_len > 112) {
+        while (ctx->block_len < 128) ctx->block[ctx->block_len++] = 0;
+        taida_sha512_transform(ctx, ctx->block);
+        ctx->block_len = 0;
+    }
+    while (ctx->block_len < 112) ctx->block[ctx->block_len++] = 0;
+    // high 64 bits of the 128-bit length = 0
+    for (int i = 0; i < 8; i++) ctx->block[112 + i] = 0;
+    for (int i = 0; i < 8; i++) ctx->block[120 + i] = (unsigned char)(bit_len >> (56 - i * 8));
+    taida_sha512_transform(ctx, ctx->block);
+    unsigned char full[64];
+    for (int i = 0; i < 8; i++) {
+        full[i*8]   = (unsigned char)(ctx->state[i] >> 56);
+        full[i*8+1] = (unsigned char)(ctx->state[i] >> 48);
+        full[i*8+2] = (unsigned char)(ctx->state[i] >> 40);
+        full[i*8+3] = (unsigned char)(ctx->state[i] >> 32);
+        full[i*8+4] = (unsigned char)(ctx->state[i] >> 24);
+        full[i*8+5] = (unsigned char)(ctx->state[i] >> 16);
+        full[i*8+6] = (unsigned char)(ctx->state[i] >> 8);
+        full[i*8+7] = (unsigned char)(ctx->state[i]);
+    }
+    memcpy(out, full, out_len);
+}
+
+static taida_val taida_crypto_hex_str(const unsigned char *digest, size_t n) {
+    static const char hex[] = "0123456789abcdef";
+    char *out = taida_str_alloc(n * 2);
+    for (size_t i = 0; i < n; i++) {
+        out[i*2] = hex[(digest[i] >> 4) & 0x0f];
+        out[i*2+1] = hex[digest[i] & 0x0f];
+    }
+    return (taida_val)out;
+}
+
+static taida_val taida_sha512_family(taida_val value, const uint64_t iv[8], size_t out_len) {
+    unsigned char *raw = (unsigned char*)0;
+    size_t len = 0;
+    if (!taida_crypto_materialize(value, &raw, &len)) {
+        unsigned char zero = 0;
+        taida_crypto_materialize((taida_val)"", &raw, &len);
+        (void)zero;
+    }
+    taida_sha512_ctx ctx;
+    for (int i = 0; i < 8; i++) ctx.state[i] = iv[i];
+    ctx.total_lo = 0;
+    ctx.block_len = 0;
+    taida_sha512_update(&ctx, raw, len);
+    unsigned char digest[64];
+    taida_sha512_final(&ctx, digest, out_len);
+    if (raw) free(raw);
+    return taida_crypto_hex_str(digest, out_len);
+}
+
+taida_val taida_crypto_sha512(taida_val value) {
+    static const uint64_t iv[8] = {
+        0x6a09e667f3bcc908ULL, 0xbb67ae8584caa73bULL, 0x3c6ef372fe94f82bULL, 0xa54ff53a5f1d36f1ULL,
+        0x510e527fade682d1ULL, 0x9b05688c2b3e6c1fULL, 0x1f83d9abfb41bd6bULL, 0x5be0cd19137e2179ULL
+    };
+    return taida_sha512_family(value, iv, 64);
+}
+
+taida_val taida_crypto_sha384(taida_val value) {
+    static const uint64_t iv[8] = {
+        0xcbbb9d5dc1059ed8ULL, 0x629a292a367cd507ULL, 0x9159015a3070dd17ULL, 0x152fecd8f70e5939ULL,
+        0x67332667ffc00b31ULL, 0x8eb44a8768581511ULL, 0xdb0c2e0d64f98fa7ULL, 0x47b5481dbefa4fa4ULL
+    };
+    return taida_sha512_family(value, iv, 48);
+}
+
+// SHA-224 reuses the SHA-256 32-bit core with its own IV, truncated to 28 bytes.
+taida_val taida_crypto_sha224(taida_val value) {
+    unsigned char *raw = (unsigned char*)0;
+    size_t len = 0;
+    if (!taida_crypto_materialize(value, &raw, &len)) {
+        taida_crypto_materialize((taida_val)"", &raw, &len);
+    }
+    taida_sha256_ctx ctx;
+    ctx.state[0] = 0xc1059ed8U; ctx.state[1] = 0x367cd507U;
+    ctx.state[2] = 0x3070dd17U; ctx.state[3] = 0xf70e5939U;
+    ctx.state[4] = 0xffc00b31U; ctx.state[5] = 0x68581511U;
+    ctx.state[6] = 0x64f98fa7U; ctx.state[7] = 0xbefa4fa4U;
+    ctx.total_len = 0;
+    ctx.block_len = 0;
+    taida_sha256_update(&ctx, raw, len);
+    unsigned char digest[32];
+    taida_sha256_final(&ctx, digest);
+    if (raw) free(raw);
+    return taida_crypto_hex_str(digest, 28);
+}
+
+// HMAC-SHA256 (RFC 2104), block size 64.
+taida_val taida_crypto_hmac_sha256(taida_val key_val, taida_val data_val) {
+    unsigned char *key = (unsigned char*)0; size_t key_len = 0;
+    unsigned char *data = (unsigned char*)0; size_t data_len = 0;
+    if (!taida_crypto_materialize(key_val, &key, &key_len)) {
+        taida_crypto_materialize((taida_val)"", &key, &key_len);
+    }
+    if (!taida_crypto_materialize(data_val, &data, &data_len)) {
+        taida_crypto_materialize((taida_val)"", &data, &data_len);
+    }
+    unsigned char key_block[64];
+    memset(key_block, 0, 64);
+    if (key_len > 64) {
+        unsigned char kd[32];
+        taida_sha256_ctx kc; taida_sha256_init(&kc);
+        taida_sha256_update(&kc, key, key_len);
+        taida_sha256_final(&kc, kd);
+        memcpy(key_block, kd, 32);
+    } else {
+        memcpy(key_block, key, key_len);
+    }
+    unsigned char ipad[64], opad[64];
+    for (int i = 0; i < 64; i++) { ipad[i] = key_block[i] ^ 0x36; opad[i] = key_block[i] ^ 0x5c; }
+    unsigned char inner[32];
+    taida_sha256_ctx ic; taida_sha256_init(&ic);
+    taida_sha256_update(&ic, ipad, 64);
+    taida_sha256_update(&ic, data, data_len);
+    taida_sha256_final(&ic, inner);
+    unsigned char outer[32];
+    taida_sha256_ctx oc; taida_sha256_init(&oc);
+    taida_sha256_update(&oc, opad, 64);
+    taida_sha256_update(&oc, inner, 32);
+    taida_sha256_final(&oc, outer);
+    if (key) free(key);
+    if (data) free(data);
+    return taida_crypto_hex_str(outer, 32);
+}
+
+// Constant-time equality. Length mismatch -> false, but the loop walks the
+// full length of `a` so timing does not depend on mismatch position.
+taida_val taida_crypto_constant_time_equals(taida_val a_val, taida_val b_val) {
+    unsigned char *a = (unsigned char*)0; size_t a_len = 0;
+    unsigned char *b = (unsigned char*)0; size_t b_len = 0;
+    if (!taida_crypto_materialize(a_val, &a, &a_len)) {
+        taida_crypto_materialize((taida_val)"", &a, &a_len);
+    }
+    if (!taida_crypto_materialize(b_val, &b, &b_len)) {
+        taida_crypto_materialize((taida_val)"", &b, &b_len);
+    }
+    unsigned char diff = (a_len != b_len) ? 1 : 0;
+    for (size_t i = 0; i < a_len; i++) {
+        unsigned char bb = (b_len == 0) ? 0 : b[i % b_len];
+        diff |= a[i] ^ bb;
+    }
+    int eq = (diff == 0);
+    if (a) free(a);
+    if (b) free(b);
+    return (taida_val)(eq ? 1 : 0);
+}
+
+// hexEncode: Str|Bytes -> lower-hex Str.
+taida_val taida_crypto_hex_encode(taida_val value) {
+    unsigned char *raw = (unsigned char*)0; size_t len = 0;
+    if (!taida_crypto_materialize(value, &raw, &len)) {
+        taida_crypto_materialize((taida_val)"", &raw, &len);
+    }
+    taida_val out = taida_crypto_hex_str(raw, len);
+    if (raw) free(raw);
+    return out;
+}
+
+static int taida_hex_val(unsigned char c, unsigned char *out) {
+    if (c >= '0' && c <= '9') { *out = c - '0'; return 1; }
+    if (c >= 'a' && c <= 'f') { *out = c - 'a' + 10; return 1; }
+    if (c >= 'A' && c <= 'F') { *out = c - 'A' + 10; return 1; }
+    return 0;
+}
+
+// hexDecode: Str -> Lax[Bytes]. Invalid hex -> empty Lax[Bytes].
+taida_val taida_crypto_hex_decode(taida_val value) {
+    const char *s = (const char*)value;
+    size_t slen = 0;
+    if (!taida_str_byte_len(s, &slen) || (slen % 2 != 0)) {
+        return taida_lax_empty(taida_bytes_default_value());
+    }
+    size_t out_len = slen / 2;
+    unsigned char *buf = (unsigned char*)TAIDA_MALLOC(out_len > 0 ? out_len : 1, "hex_decode");
+    for (size_t i = 0; i < out_len; i++) {
+        unsigned char hi, lo;
+        if (!taida_hex_val((unsigned char)s[i*2], &hi) ||
+            !taida_hex_val((unsigned char)s[i*2+1], &lo)) {
+            free(buf);
+            return taida_lax_empty(taida_bytes_default_value());
+        }
+        buf[i] = (unsigned char)((hi << 4) | lo);
+    }
+    taida_val bytes = taida_bytes_contig_new(buf, (taida_val)out_len);
+    free(buf);
+    return taida_lax_new(bytes, taida_bytes_default_value());
+}
+
+static const char TAIDA_B64_ALPHABET[64] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+// base64Encode: Str|Bytes -> Str (RFC 4648, padded).
+taida_val taida_crypto_base64_encode(taida_val value) {
+    unsigned char *raw = (unsigned char*)0; size_t len = 0;
+    if (!taida_crypto_materialize(value, &raw, &len)) {
+        taida_crypto_materialize((taida_val)"", &raw, &len);
+    }
+    size_t out_len = ((len + 2) / 3) * 4;
+    char *out = taida_str_alloc(out_len);
+    size_t oi = 0, i = 0;
+    while (i + 3 <= len) {
+        uint32_t n = ((uint32_t)raw[i] << 16) | ((uint32_t)raw[i+1] << 8) | (uint32_t)raw[i+2];
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 18) & 0x3f];
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 12) & 0x3f];
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 6) & 0x3f];
+        out[oi++] = TAIDA_B64_ALPHABET[n & 0x3f];
+        i += 3;
+    }
+    size_t rem = len - i;
+    if (rem == 1) {
+        uint32_t n = (uint32_t)raw[i] << 16;
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 18) & 0x3f];
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 12) & 0x3f];
+        out[oi++] = '=';
+        out[oi++] = '=';
+    } else if (rem == 2) {
+        uint32_t n = ((uint32_t)raw[i] << 16) | ((uint32_t)raw[i+1] << 8);
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 18) & 0x3f];
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 12) & 0x3f];
+        out[oi++] = TAIDA_B64_ALPHABET[(n >> 6) & 0x3f];
+        out[oi++] = '=';
+    }
+    if (raw) free(raw);
+    return (taida_val)out;
+}
+
+static int taida_b64_val(unsigned char c, unsigned char *out) {
+    if (c >= 'A' && c <= 'Z') { *out = c - 'A'; return 1; }
+    if (c >= 'a' && c <= 'z') { *out = c - 'a' + 26; return 1; }
+    if (c >= '0' && c <= '9') { *out = c - '0' + 52; return 1; }
+    if (c == '+') { *out = 62; return 1; }
+    if (c == '/') { *out = 63; return 1; }
+    return 0;
+}
+
+// base64Decode: Str -> Lax[Bytes]. Invalid base64 -> empty Lax[Bytes].
+taida_val taida_crypto_base64_decode(taida_val value) {
+    const char *s = (const char*)value;
+    size_t slen = 0;
+    if (!taida_str_byte_len(s, &slen) || (slen % 4 != 0)) {
+        return taida_lax_empty(taida_bytes_default_value());
+    }
+    if (slen == 0) {
+        return taida_lax_new(taida_bytes_contig_new((const unsigned char*)"", 0),
+                             taida_bytes_default_value());
+    }
+    size_t n_chunks = slen / 4;
+    size_t cap = n_chunks * 3;
+    unsigned char *buf = (unsigned char*)TAIDA_MALLOC(cap > 0 ? cap : 1, "b64_decode");
+    size_t oi = 0;
+    for (size_t c = 0; c < n_chunks; c++) {
+        const unsigned char *q = (const unsigned char*)(s + c * 4);
+        int is_last = (c == n_chunks - 1);
+        int pad = (q[0]=='=') + (q[1]=='=') + (q[2]=='=') + (q[3]=='=');
+        if ((pad > 0 && !is_last) || pad > 2) { free(buf); return taida_lax_empty(taida_bytes_default_value()); }
+        if ((pad == 1 && q[3] != '=') || (pad == 2 && (q[2] != '=' || q[3] != '='))) {
+            free(buf); return taida_lax_empty(taida_bytes_default_value());
+        }
+        unsigned char v0, v1, v2 = 0, v3 = 0;
+        int n_data = 4 - pad;
+        if (!taida_b64_val(q[0], &v0) || !taida_b64_val(q[1], &v1)) { free(buf); return taida_lax_empty(taida_bytes_default_value()); }
+        if (n_data > 2 && !taida_b64_val(q[2], &v2)) { free(buf); return taida_lax_empty(taida_bytes_default_value()); }
+        if (n_data > 3 && !taida_b64_val(q[3], &v3)) { free(buf); return taida_lax_empty(taida_bytes_default_value()); }
+        uint32_t triple = ((uint32_t)v0 << 18) | ((uint32_t)v1 << 12) | ((uint32_t)v2 << 6) | (uint32_t)v3;
+        buf[oi++] = (unsigned char)((triple >> 16) & 0xff);
+        if (n_data >= 3) buf[oi++] = (unsigned char)((triple >> 8) & 0xff);
+        if (n_data >= 4) buf[oi++] = (unsigned char)(triple & 0xff);
+    }
+    taida_val bytes = taida_bytes_contig_new(buf, (taida_val)oi);
+    free(buf);
+    return taida_lax_new(bytes, taida_bytes_default_value());
+}
+
+// randomBytes(n) -> Bytes. Uses getentropy(2) when available, else
+// /dev/urandom. Throws on entropy failure (PHILOSOPHY I: no silent Unit).
+// (<sys/random.h> is included with the other system headers at the top.)
+taida_val taida_crypto_random_bytes(taida_val n_val) {
+    taida_val n = n_val;
+    if (n < 0) {
+        taida_val err = taida_make_error("CryptoError", "randomBytes: count must be non-negative");
+        return taida_throw(err);
+    }
+    if (n == 0) {
+        return taida_bytes_contig_new((const unsigned char*)"", 0);
+    }
+    if (n > TAIDA_CRYPTO_MAX_INPUT) {
+        taida_val err = taida_make_error("CryptoError", "randomBytes: count exceeds 256 MiB limit");
+        return taida_throw(err);
+    }
+    unsigned char *buf = (unsigned char*)TAIDA_MALLOC((size_t)n, "random_bytes");
+    size_t got = 0;
+    int ok = 0;
+#if defined(__linux__) || defined(__APPLE__)
+    // getentropy is capped at 256 bytes per call.
+    ok = 1;
+    while (got < (size_t)n) {
+        size_t want = (size_t)n - got;
+        if (want > 256) want = 256;
+        if (getentropy(buf + got, want) != 0) { ok = 0; break; }
+        got += want;
+    }
+#endif
+    if (!ok) {
+        // Fallback: read from /dev/urandom.
+        FILE *f = fopen("/dev/urandom", "rb");
+        if (!f) {
+            free(buf);
+            taida_val err = taida_make_error("CryptoError", "randomBytes: failed to open OS entropy source");
+            return taida_throw(err);
+        }
+        got = fread(buf, 1, (size_t)n, f);
+        fclose(f);
+        if (got != (size_t)n) {
+            free(buf);
+            taida_val err = taida_make_error("CryptoError", "randomBytes: failed to read OS entropy source");
+            return taida_throw(err);
+        }
+    }
+    taida_val out = taida_bytes_contig_new(buf, n);
+    free(buf);
     return out;
 }
 

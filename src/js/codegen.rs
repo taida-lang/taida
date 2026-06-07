@@ -2133,7 +2133,7 @@ impl JsCodegen {
         }
     }
 
-    /// RCB-201: Validate that all imported symbols are exported by the target module.
+    /// Validate that all imported symbols are exported by the target module.
     /// Reads and parses the target `.td` file, checks for explicit `<<<` declarations,
     /// and returns an error if any imported symbol is not in the export list.
     fn validate_import_symbols(&self, import: &ImportStmt) -> Result<(), JsError> {
@@ -2441,9 +2441,9 @@ impl JsCodegen {
     /// This handles the case where `../shared` from `src/main.td` is flattened to
     /// `out_root/shared.mjs` alongside `out_root/main.mjs` (correct: `./shared.mjs`).
     ///
-    /// Also performs RCB-303 / path traversal rejection for
-    /// `..` AND absolute `/` imports (3-backend parity with Interpreter
-    /// SEC-003 land and Native `driver.rs::resolve_module_path`).
+    /// Also performs path traversal rejection for
+    /// `..` AND absolute `/` imports (3-backend parity with the Interpreter
+    /// and Native `driver.rs::resolve_module_path`).
     fn resolve_local_import_js_path(&self, import_path: &str) -> Result<String, JsError> {
         use std::path::{Path, PathBuf};
 

@@ -127,7 +127,7 @@ fn run_interp(path: &std::path::Path) -> (String, i32) {
     )
 }
 
-/// The minimal bug repro from C25B-032: `| _ |> throwBoom("boom")` must
+/// The minimal bug repro: `| _ |> throwBoom("boom")` must
 /// propagate `.throw()` inside `throwBoom` to the `|==` handler in the same
 /// function, just as a direct `throwBoom("boom")` (no arm) already does.
 #[test]

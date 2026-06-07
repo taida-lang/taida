@@ -329,6 +329,41 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Val],
             returns: &[],
         },
+        // Value-tag track: EKIND-form stamp (kind | enum-type-id<<8) used
+        // by list-literal lowering, plus the tagged Set membership /
+        // insertion entry points that carry the probe argument's kind.
+        "taida_list_note_push_ekind" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[],
+        },
+        "taida_set_has_tagged" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Val],
+        },
+        "taida_set_add_tagged" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_collection_has_tagged" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Val],
+        },
+        "taida_collection_remove_tagged" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_lax_value_ekind" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_poly_eq_tagged" => RuntimeAbi {
+            params: &[Val, Val, Val, Val],
+            returns: &[Val],
+        },
+        "taida_poly_neq_tagged" => RuntimeAbi {
+            params: &[Val, Val, Val, Val],
+            returns: &[Val],
+        },
         "taida_list_push" => RuntimeAbi {
             params: &[Ptr, Val],
             returns: &[Ptr],
@@ -367,6 +402,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         },
         "taida_list_map" => RuntimeAbi {
             params: &[Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_list_map_k" => RuntimeAbi {
+            params: &[Ptr, FnPtr, Val],
             returns: &[Ptr],
         },
         "taida_list_filter" => RuntimeAbi {
@@ -1549,6 +1588,53 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             returns: &[Ptr],
         },
         "taida_sha256" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        // F55 S4: extended crypto surface.
+        // Hash family: 1 arg (Str|Bytes) -> Str (Ptr).
+        "taida_crypto_sha512" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_crypto_sha384" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_crypto_sha224" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        // hmacSha256: 2 args (key, data) -> Str (Ptr).
+        "taida_crypto_hmac_sha256" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
+        // constantTimeEquals: 2 args -> Bool (Val).
+        "taida_crypto_constant_time_equals" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        // hexEncode / base64Encode: 1 arg (Str|Bytes) -> Str (Ptr).
+        "taida_crypto_hex_encode" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_crypto_base64_encode" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        // hexDecode / base64Decode: 1 arg (Str) -> Lax[Bytes] pack (Ptr).
+        "taida_crypto_hex_decode" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_crypto_base64_decode" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        // randomBytes: 1 arg (Int) -> Bytes (Ptr).
+        "taida_crypto_random_bytes" => RuntimeAbi {
             params: &[Val],
             returns: &[Ptr],
         },

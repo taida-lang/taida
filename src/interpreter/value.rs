@@ -720,7 +720,7 @@ pub struct FuncValue {
     /// Captured environment (lexical scope closure).
     /// Shared to avoid recursive deep-clone blow-up when many functions capture prior functions.
     pub closure: Arc<HashMap<String, Value>>,
-    /// RCB-242: Declared return type from function definition (if any).
+    /// Declared return type from function definition (if any).
     /// Used for introspection. Runtime type enforcement is handled by the checker.
     pub return_type: Option<crate::parser::TypeExpr>,
     /// TypeDef registry from the function's defining module.

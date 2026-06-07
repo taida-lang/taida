@@ -1126,9 +1126,13 @@ static taida_val h3_dispatch_request(H3ServeCtx *ctx, taida_val request_pack) {
     return taida_invoke_callback1(ctx->handler, request_pack);
 }
 
+// F55 S2: `streaming` / `body_token` select the 2-arg handler shape (empty
+// body span + __body_stream / __body_token sentinels) so readBody* accepts the
+// pack, mirroring h2_build_request_pack. See net_h1_h2.c for the rationale.
 static taida_val h3_build_request_pack(H3RequestFields *fields,
                                         const unsigned char *body, size_t body_len,
-                                        const char *peer_host, int peer_port) {
+                                        const char *peer_host, int peer_port,
+                                        int streaming, uint64_t body_token) {
     // D29B-011 (Track-ζ Lock-H, 2026-04-27): mirror h2_build_request_pack.
     // QPACK has the same dynamic-table reallocation problem as HPACK, so
     // we copy decoded pseudo / regular header bytes into a per-request
@@ -1290,7 +1294,8 @@ static taida_val h3_build_request_pack(H3RequestFields *fields,
     taida_pack_set_tag(version_pack, 1, TAIDA_TAG_INT);
 
     // 14-field request pack (matches h2 structure for handler contract compatibility)
-    taida_val req = taida_pack_new(14);
+    // F55 S2: the streaming (2-arg) shape carries two extra sentinel fields.
+    taida_val req = taida_pack_new(streaming ? 16 : 14);
     int f = 0;
     #define SET_FIELD_H3(nm, val, tag) do { \
         taida_pack_set_hash(req, f, taida_str_hash((taida_val)(nm))); \
@@ -1312,8 +1317,11 @@ static taida_val h3_build_request_pack(H3RequestFields *fields,
     }
     SET_FIELD_H3("version",     version_pack,                                 TAIDA_TAG_PACK);
     SET_FIELD_H3("headers",     hdr_list,                                     TAIDA_TAG_LIST);
-    // body span references the leading body_len bytes of the arena (offset 0)
-    SET_FIELD_H3("body",        taida_net_make_span(0, (taida_val)body_len),  TAIDA_TAG_PACK);
+    // F55 S2: 2-arg (streaming) handlers see an empty body span; 1-arg handlers
+    // keep the eager span over the leading body_len bytes of the arena.
+    SET_FIELD_H3("body",
+                 taida_net_make_span(0, streaming ? (taida_val)0 : (taida_val)body_len),
+                 TAIDA_TAG_PACK);
     SET_FIELD_H3("bodyOffset",  (taida_val)0,                                 TAIDA_TAG_INT);
     SET_FIELD_H3("contentLength",(taida_val)(int64_t)body_len,                TAIDA_TAG_INT);
     // D29B-011: post-arena, body field is now a span pack (not a Bytes
@@ -1327,6 +1335,11 @@ static taida_val h3_build_request_pack(H3RequestFields *fields,
     // HTTP/3 never uses chunked TE (binary framing like H2)
     SET_FIELD_H3("chunked",     (taida_val)0,                                 TAIDA_TAG_BOOL);
     SET_FIELD_H3("protocol",    (taida_val)taida_str_new_copy("h3"),            TAIDA_TAG_STR);
+    // F55 S2: v4 sentinel + token for 2-arg streaming handlers (see net_h1_h2.c).
+    if (streaming) {
+        SET_FIELD_H3("__body_stream", (taida_val)"__v4_body_stream",          TAIDA_TAG_STR);
+        SET_FIELD_H3("__body_token",  (taida_val)body_token,                  TAIDA_TAG_INT);
+    }
     #undef SET_FIELD_H3
     return req;
 }
@@ -2664,25 +2677,100 @@ static int h3_process_stream(QuicConnSlot *slot, QuicConnPool *pool,
     inet_ntop(AF_INET, &slot->peer_addr.sin_addr, peer_host, sizeof(peer_host));
     int peer_port = ntohs(slot->peer_addr.sin_port);
 
-    taida_val request_pack = h3_build_request_pack(
-        &req_fields,
-        request_body ? request_body : (const unsigned char*)"",
-        request_body_len,
-        peer_host, peer_port
-    );
-    free(req_fields.regular_headers);
-    req_fields.regular_headers = NULL;
+    // Branch on handler arity. The 1-arg path keeps the eager request
+    // pack (body completed value). The 2-arg path activates the streaming-body
+    // observation contract shared with H1/H2 (eager fill, streaming
+    // observation): the H3 DATA frames have already
+    // been collected (request_body, bounded by the 64 KiB stream buffer), so
+    // we pre-load a copy into a Content-Length-style Net4BodyState whose
+    // `leftover` holds the whole body. readBody* drains `leftover`
+    // (taida_net4_read_body_bytes pulls leftover before any socket) and —
+    // because content_length == leftover_len exactly — never touches the QUIC
+    // transport (which is owned by this serve loop and unreachable from the
+    // synchronous read APIs anyway). req.body is an empty span; the handler
+    // reads via readBody / readBodyChunk / readBodyAll, identical to H1/H2.
+    int h3_streaming = (pool->handler_arity >= 2) ? 1 : 0;
 
-    // Dispatch to the Taida handler (same contract as h1/h2).
-    H3ServeCtx ctx;
-    ctx.handler = pool->handler;
-    ctx.handler_arity = pool->handler_arity;
-    ctx.request_count = &pool->request_count;
-    ctx.max_requests = pool->max_requests;
-    snprintf(ctx.peer_host, sizeof(ctx.peer_host), "%s", peer_host);
-    ctx.peer_port = peer_port;
+    taida_val request_pack;
+    taida_val response;
+    if (h3_streaming) {
+        const unsigned char *body_src =
+            request_body ? request_body : (const unsigned char*)"";
+        size_t supply_len = request_body_len;
+        unsigned char *supply = NULL;
+        if (supply_len > 0) {
+            supply = (unsigned char*)TAIDA_MALLOC(supply_len, "net_h3_v4_body_supply");
+            if (supply) {
+                memcpy(supply, body_src, supply_len);
+            } else {
+                supply_len = 0; // transient OOM: empty supply, still dispatch
+            }
+        }
 
-    taida_val response = h3_dispatch_request(&ctx, request_pack);
+        Net4BodyState body_state;
+        memset(&body_state, 0, sizeof(body_state));
+        body_state.is_chunked = 0;            // H3 has no chunked TE
+        body_state.content_length = (int64_t)supply_len;
+        body_state.bytes_consumed = 0;
+        body_state.fully_read = (supply_len == 0) ? 1 : 0;
+        body_state.any_read_started = 0;
+        body_state.leftover = supply;
+        body_state.leftover_len = supply_len;
+        body_state.leftover_pos = 0;
+        body_state.chunked_state = NET4_CHUNKED_WAIT_SIZE;
+        body_state.chunked_remaining = 0;
+        body_state.request_token = taida_net4_alloc_token();
+        body_state.ws_closed = 0;
+        body_state.ws_token = 0;
+        body_state.ws_close_code = 0;
+        body_state.aborted = 0;
+
+        request_pack = h3_build_request_pack(
+            &req_fields, body_src, request_body_len,
+            peer_host, peer_port,
+            1 /*streaming*/, body_state.request_token
+        );
+        free(req_fields.regular_headers);
+        req_fields.regular_headers = NULL;
+
+        // Install per-request body state for readBody*. tl_net3_client_fd is
+        // set to -1: H3 has no readable socket fd here (the transport is QUIC),
+        // and the leftover supply means the socket fallback is never reached.
+        // tl_net3_writer stays NULL so any accidental writeChunk aborts cleanly
+        // rather than writing H1 framing into the QUIC stream; readBody*
+        // tolerates a NULL writer. H3 2-arg handlers return a one-shot pack.
+        tl_net3_client_fd = -1;
+        tl_net4_body = &body_state;
+
+        taida_val writer_token = taida_net3_create_writer_token();
+        response = taida_invoke_callback2(pool->handler, request_pack, writer_token);
+
+        tl_net4_body = NULL;
+
+        taida_release(writer_token);
+        if (supply) free(supply);
+    } else {
+        request_pack = h3_build_request_pack(
+            &req_fields,
+            request_body ? request_body : (const unsigned char*)"",
+            request_body_len,
+            peer_host, peer_port,
+            0 /*streaming*/, 0 /*body_token*/
+        );
+        free(req_fields.regular_headers);
+        req_fields.regular_headers = NULL;
+
+        // Dispatch to the Taida handler (same contract as h1/h2).
+        H3ServeCtx ctx;
+        ctx.handler = pool->handler;
+        ctx.handler_arity = pool->handler_arity;
+        ctx.request_count = &pool->request_count;
+        ctx.max_requests = pool->max_requests;
+        snprintf(ctx.peer_host, sizeof(ctx.peer_host), "%s", peer_host);
+        ctx.peer_port = peer_port;
+
+        response = h3_dispatch_request(&ctx, request_pack);
+    }
 
     // ── Extract response and encode H3 frames ──
     // Reuse H2ResponseFields — same handler response contract.
@@ -4288,7 +4376,8 @@ static void taida_addon_val_from_raw(
     TaidaAddonValueV1 *out,
     TaidaAddonIntPayloadV1 *int_scratch,
     TaidaAddonBytesPayloadV1 *str_scratch,
-    TaidaAddonBoolPayloadV1 *bool_scratch)
+    TaidaAddonBoolPayloadV1 *bool_scratch,
+    TaidaAddonFloatPayloadV1 *float_scratch)
 {
     out->_reserved = 0;
     switch (internal_tag) {
@@ -4302,6 +4391,19 @@ static void taida_addon_val_from_raw(
             out->tag = TAIDA_ADDON_TAG_BOOL;
             out->payload = bool_scratch;
             return;
+        case TAIDA_TAG_FLOAT: {
+            /* The runtime stores Float as f64 bits inside a taida_val;
+             * undo the bitcast so the addon sees a genuine double.
+             * Previously the lowering never tagged Float arguments (they
+             * fell through as TAIDA_TAG_INT) and the raw bit pattern
+             * leaked across the ABI as a bogus Int. */
+            union { taida_val l; double d; } u;
+            u.l = raw;
+            float_scratch->value = u.d;
+            out->tag = TAIDA_ADDON_TAG_FLOAT;
+            out->payload = float_scratch;
+            return;
+        }
         case TAIDA_TAG_STR: {
             const char *s = (const char *)(taida_ptr)raw;
             str_scratch->ptr = (const uint8_t *)(s ? s : "");
@@ -4334,6 +4436,14 @@ static taida_val taida_addon_val_to_raw(const TaidaAddonValueV1 *v) {
         case TAIDA_ADDON_TAG_BOOL: {
             const TaidaAddonBoolPayloadV1 *p = (const TaidaAddonBoolPayloadV1 *)v->payload;
             return (taida_val)(p && p->value ? 1 : 0);
+        }
+        case TAIDA_ADDON_TAG_FLOAT: {
+            /* Mirror of the argv direction: re-bitcast the double into the
+             * runtime's f64-bits-in-taida_val representation. */
+            const TaidaAddonFloatPayloadV1 *p = (const TaidaAddonFloatPayloadV1 *)v->payload;
+            union { taida_val l; double d; } u;
+            u.d = p ? p->value : 0.0;
+            return u.l;
         }
         case TAIDA_ADDON_TAG_STR: {
             const TaidaAddonBytesPayloadV1 *p = (const TaidaAddonBytesPayloadV1 *)v->payload;
@@ -4372,6 +4482,14 @@ static taida_val taida_addon_val_to_raw(const TaidaAddonValueV1 *v) {
                         const TaidaAddonBoolPayloadV1 *bp = (const TaidaAddonBoolPayloadV1 *)child->payload;
                         taida_pack_set((taida_ptr)pack, (taida_val)i, (taida_val)(bp && bp->value ? 1 : 0));
                         taida_pack_set_tag((taida_ptr)pack, (taida_val)i, TAIDA_TAG_BOOL);
+                        break;
+                    }
+                    case TAIDA_ADDON_TAG_FLOAT: {
+                        const TaidaAddonFloatPayloadV1 *fp = (const TaidaAddonFloatPayloadV1 *)child->payload;
+                        union { taida_val l; double d; } u;
+                        u.d = fp ? fp->value : 0.0;
+                        taida_pack_set((taida_ptr)pack, (taida_val)i, u.l);
+                        taida_pack_set_tag((taida_ptr)pack, (taida_val)i, TAIDA_TAG_FLOAT);
                         break;
                     }
                     case TAIDA_ADDON_TAG_STR: {
@@ -4453,10 +4571,12 @@ int64_t taida_addon_call(
     TaidaAddonIntPayloadV1 inline_ints[16];
     TaidaAddonBytesPayloadV1 inline_strs[16];
     TaidaAddonBoolPayloadV1 inline_bools[16];
+    TaidaAddonFloatPayloadV1 inline_floats[16];
     TaidaAddonValueV1 *values_ptr = inline_values;
     TaidaAddonIntPayloadV1 *ints_ptr = inline_ints;
     TaidaAddonBytesPayloadV1 *strs_ptr = inline_strs;
     TaidaAddonBoolPayloadV1 *bools_ptr = inline_bools;
+    TaidaAddonFloatPayloadV1 *floats_ptr = inline_floats;
     int heap_allocated = 0;
     if (argc > 16) {
         values_ptr = (TaidaAddonValueV1 *)TAIDA_MALLOC(
@@ -4471,6 +4591,9 @@ int64_t taida_addon_call(
         bools_ptr = (TaidaAddonBoolPayloadV1 *)TAIDA_MALLOC(
             taida_safe_mul((size_t)argc, sizeof(TaidaAddonBoolPayloadV1), "addon_argv_bool"),
             "addon_argv_bool");
+        floats_ptr = (TaidaAddonFloatPayloadV1 *)TAIDA_MALLOC(
+            taida_safe_mul((size_t)argc, sizeof(TaidaAddonFloatPayloadV1), "addon_argv_float"),
+            "addon_argv_float");
         heap_allocated = 1;
     }
 
@@ -4479,6 +4602,7 @@ int64_t taida_addon_call(
         if (pack == NULL) {
             if (heap_allocated) {
                 free(values_ptr); free(ints_ptr); free(strs_ptr); free(bools_ptr);
+                free(floats_ptr);
             }
             taida_addon_fail(package_id, "argv pack is null");
         }
@@ -4487,7 +4611,8 @@ int64_t taida_addon_call(
             taida_val tag = pack[2 + i * 3 + 1];
             taida_val raw = pack[2 + i * 3 + 2];
             taida_addon_val_from_raw(raw, tag, &values_ptr[i],
-                                     &ints_ptr[i], &strs_ptr[i], &bools_ptr[i]);
+                                     &ints_ptr[i], &strs_ptr[i], &bools_ptr[i],
+                                     &floats_ptr[i]);
         }
     }
 
@@ -4502,6 +4627,7 @@ int64_t taida_addon_call(
      * take below. */
     if (heap_allocated) {
         free(values_ptr); free(ints_ptr); free(strs_ptr); free(bools_ptr);
+        free(floats_ptr);
         heap_allocated = 0;
     }
 

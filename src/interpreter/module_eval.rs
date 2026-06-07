@@ -392,10 +392,13 @@ impl Interpreter {
                             .define_force(sym, Value::str(format!("__os_builtin_{}", sym)));
                     }
                 } else if in_bundled("crypto") {
-                    {
-                        let sym = "sha256";
-                        self.env
-                            .define_force(sym, Value::str(format!("__crypto_builtin_{}", sym)));
+                    // F55 S4: sentinel list derived from the catalog so the
+                    // injected surface cannot drift from the export list.
+                    if let Some(spec) = crate::pkg::catalog::find("crypto") {
+                        for sym in spec.exports {
+                            self.env
+                                .define_force(sym, Value::str(format!("__crypto_builtin_{}", sym)));
+                        }
                     }
                 } else if in_bundled("net") {
                     for sym in super::net_eval::NET_SYMBOLS {

@@ -173,9 +173,9 @@ fn c27b_021_div_basic_4backend() {
     check_4backend_parity("examples/quality/c27_wasm_arith/div_basic.td", "true");
 }
 
-/// Float Div by zero: Lax empty (has_value = false) -- C26B-011 semantics
-/// (formerly success-with-default in W-5; corrected for parity with the
-/// native runtime in C26).
+/// Float Div by zero: Lax empty (has_value = false) -- matching the
+/// native runtime's semantics (formerly success-with-default; corrected
+/// for parity with the native runtime).
 #[test]
 fn c27b_021_div_zero_lax_empty_4backend() {
     check_4backend_parity("examples/quality/c27_wasm_arith/div_zero.td", "false");
@@ -208,7 +208,7 @@ fn c27b_021_bitwise_basic_4backend() {
     );
 }
 
-/// wasm-wasi was the breakage point before C27B-021: any Float Div
+/// wasm-wasi was the breakage point before this fix: any Float Div
 /// failed at compile time. This explicit test asserts the compile path
 /// does NOT regress to the historic reject.
 #[test]

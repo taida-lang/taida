@@ -128,6 +128,28 @@ impl Lowering {
         }
     }
 
+    /// Value-tag track: assign a stable 1-based type id to an enum the
+    /// first time it is defined (0 in the aux bits means "no aux", so ids
+    /// start at 1). Idempotent for re-registrations of the same name.
+    pub(crate) fn register_enum_type_id(&mut self, name: &str) {
+        let next = self.enum_type_ids.len() as i64 + 1;
+        self.enum_type_ids.entry(name.to_string()).or_insert(next);
+    }
+
+    /// Value-tag track: the per-element kind entry (EKIND) for a single
+    /// expression — kind in the low 8 bits, enum type id in the upper
+    /// bits, mirroring the runtime's kind-array encoding. UNKNOWN is the
+    /// 0xFF kind byte (NOT -1: the runtime packs entries as u32).
+    pub(crate) fn expr_ekind(&self, expr: &Expr) -> i64 {
+        if let Some(enum_name) = self.expr_enum_type_name(expr)
+            && let Some(id) = self.enum_type_ids.get(&enum_name)
+        {
+            return 9 | (id << 8); // TAIDA_TAG_ENUM | type_id << 8
+        }
+        let tag = self.expr_type_tag(expr);
+        if tag < 0 { 0xFF } else { tag }
+    }
+
     /// A-4c: TypeDef のフィールド型注釈から型タグを決定する
     pub(super) fn type_field_type_tag(&self, type_name: &str, field_name: &str) -> i64 {
         if let Some(field_types) = self.type_field_types.get(type_name) {
@@ -200,6 +222,18 @@ impl Lowering {
                     5
                 } else if self.closure_vars.contains(name) {
                     6
+                } else if self.int_vars.contains(name)
+                    && !self.return_type_inferred_params.contains(name)
+                {
+                    // Value-tag track: explicitly Int-annotated names report
+                    // INT instead of falling through to UNKNOWN. This was
+                    // the missing arm that made `@[1, ..., n]` (n: Int)
+                    // materialise a per-element kind array on every literal
+                    // and ride the linear mixed-dedup path. Return-type
+                    // INFERRED params stay UNKNOWN — that inference is not
+                    // trustworthy for tagging (the param might be a closure)
+                    // and the runtime caller-tag mechanism covers them.
+                    0
                 } else {
                     -1 // TAIDA_TAG_UNKNOWN: type cannot be determined at compile time
                 }
@@ -327,6 +361,60 @@ impl Lowering {
                 }
             }
             Expr::Unmold(_, _) => -1, // TAIDA_TAG_UNKNOWN: could be anything
+            // Binary / unary operator results. Mirrors the dispatch order of
+            // `lower_binary_op` exactly so the tag seen by stdout/_with_tag
+            // (and list-literal element tags) cannot drift from the runtime
+            // function the operator actually lowers to. Before this arm a
+            // direct expression like `stdout(3.0 * 2)` fell through to
+            // UNKNOWN(-1) and the polymorphic printer rendered the f64 bit
+            // pattern as a raw Int.
+            Expr::BinaryOp(lhs, op, rhs, _) => match op {
+                BinOp::Eq
+                | BinOp::NotEq
+                | BinOp::Lt
+                | BinOp::Gt
+                | BinOp::GtEq
+                | BinOp::And
+                | BinOp::Or => 2, // TAIDA_TAG_BOOL
+                BinOp::Concat => 3, // TAIDA_TAG_STR
+                BinOp::Add => {
+                    if self.expr_is_string_full(lhs) || self.expr_is_string_full(rhs) {
+                        3 // string concatenation via `+`
+                    } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                        1 // TAIDA_TAG_FLOAT
+                    } else if self.expr_type_is_unknown(lhs) || self.expr_type_is_unknown(rhs) {
+                        -1 // poly_add: result type resolved at runtime
+                    } else {
+                        0 // TAIDA_TAG_INT
+                    }
+                }
+                BinOp::Sub | BinOp::Mul => {
+                    // Unlike Add (which falls back to the runtime poly
+                    // helper), Sub/Mul lower onto the int helper whenever
+                    // no Float is statically visible — the produced VALUE
+                    // is an Int result regardless of how vague the operand
+                    // types were, so reporting INT here matches the actual
+                    // dispatch (reporting UNKNOWN made downstream pair
+                    // comparisons treat a genuine Int as kindless).
+                    if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                        1
+                    } else {
+                        0
+                    }
+                }
+            },
+            Expr::UnaryOp(op, inner, _) => match op {
+                UnaryOp::Not => 2,
+                UnaryOp::Neg => {
+                    if self.expr_returns_float(inner) {
+                        1
+                    } else if self.expr_type_is_unknown(inner) {
+                        -1
+                    } else {
+                        0
+                    }
+                }
+            },
             _ if self.expr_is_likely_bool(expr) => 2,
             _ => -1, // TAIDA_TAG_UNKNOWN
         }
@@ -386,7 +474,7 @@ impl Lowering {
         body.iter().any(|s| stmt_hits(s, param_names))
     }
 
-    /// NB-14: Get the runtime param tag IrVar for an expression, if it's a function
+    /// Get the runtime param tag IrVar for an expression, if it's a function
     /// parameter with a caller-propagated type tag.
     /// Returns Some(tag_var) if the expression is an Ident whose name is in param_tag_vars.
     pub(crate) fn get_param_tag_var(&self, expr: &Expr) -> Option<IrVar> {
@@ -405,7 +493,7 @@ impl Lowering {
         matches!(arg, Expr::Ident(n, _) if self.param_tag_vars.contains_key(n))
     }
 
-    /// NB-14: Check whether any argument requires call-site tag propagation.
+    /// Check whether any argument requires call-site tag propagation.
     /// Returns true if at least one arg has a non-INT compile-time tag, a transitive
     /// param_tag_var, or is a FuncCall to a user function (which may carry a return tag).
     pub(super) fn needs_call_arg_tags(&self, args: &[Expr]) -> bool {
@@ -432,7 +520,7 @@ impl Lowering {
         false
     }
 
-    /// NB-14: Emit taida_set_call_arg_tag() for each argument with a known non-default
+    /// Emit taida_set_call_arg_tag() for each argument with a known non-default
     /// type tag before a CallUser. This propagates Bool/Float/Str/etc. type info from
     /// the caller to the callee so that pack field tags can be set correctly.
     /// Note: TAG_FRAME_SIZE (256) is the maximum number of tagged arguments per call.
@@ -513,7 +601,7 @@ impl Lowering {
         }
     }
 
-    /// NB-14: Emit taida_set_call_arg_tag() for arguments whose type was determined
+    /// Emit taida_set_call_arg_tag() for arguments whose type was determined
     /// AFTER lowering (via return type tag from a nested CallUser). This complements
     /// emit_call_arg_tags which handles compile-time known types before lowering.
     pub(super) fn emit_post_lower_arg_tags(

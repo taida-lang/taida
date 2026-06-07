@@ -117,7 +117,7 @@ fn scaffold_addon(root: &Path, name: &str) -> String {
 /// workflow is a breaking change to the release pipeline.
 const SHARED_CORE_CONTRACT: &[&str] = &["prepare", "gate", "build", "publish"];
 
-/// SEC-011 (C26B-007 Sub-phase 7.4) invariant: the core workflow
+/// Invariant: the core workflow
 /// declares these two jobs between `build` and `publish`. They are
 /// pinned here so that a future release.yml edit that silently drops
 /// Sigstore signing or SLSA provenance fails this test instead of

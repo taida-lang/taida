@@ -74,8 +74,8 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
 ///
 /// 1. The sibling repo layout used by `rc2_terminal_surface.rs` —
 ///    `../terminal/native/addon.toml` relative to this crate.
-/// 2. The git submodule that ships with this repo under
-///    `.dev/official-package-repos/terminal/`.
+/// 2. The git submodule that ships with this repo (the bundled
+///    official-package repos).
 ///
 /// Returns `Some((addon_toml_path, cdylib_path))` when both a
 /// manifest and a pre-built cdylib are present, `None` otherwise.
@@ -528,7 +528,7 @@ stdout(Greet("parity"))
 /// `addon.toml` (i.e. a plain source package, not an addon) must
 /// still compile natively via the normal
 /// `resolve_package_module` path. This exercises the fact that
-/// C25B-030's facade-loader changes did not accidentally leak
+/// the facade-loader changes did not accidentally leak
 /// into the non-addon import path.
 ///
 /// We assert build-success only (not output parity), because
@@ -537,8 +537,8 @@ stdout(Greet("parity"))
 /// `F x = expr` without an explicit `=> :Type` return tag parses
 /// as an assignment rather than a FuncDef, so the imported symbol
 /// reaches the consumer as a Unit pack. That behaviour is
-/// unrelated to C25B-030 (it affects the resolver path, not the
-/// facade loader) and is tracked separately in FUTURE_BLOCKERS /
+/// unrelated to the facade loader (it affects the resolver path, not the
+/// facade loader) and is tracked separately in the internal notes /
 /// docs clarifications. For Phase 1F scope we only want the
 /// **build-side** assurance that the facade-loader changes did
 /// not regress package build coverage.

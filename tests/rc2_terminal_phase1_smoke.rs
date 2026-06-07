@@ -46,7 +46,7 @@ fn taida_bin() -> PathBuf {
 /// Locate the external `taida-lang/terminal` repository on disk.
 ///
 /// We look for it as a sibling of the main `taida` repo, matching the
-/// layout `.dev/RC2_DESIGN.md` E pins (`/home/<user>/Workspace/taida/{taida,terminal}`).
+/// expected sibling-repo layout (`/home/<user>/Workspace/taida/{taida,terminal}`).
 /// Returns `None` if the sibling repo is not present so the tests
 /// degrade to a soft skip on machines that haven't checked it out.
 fn locate_terminal_repo() -> Option<PathBuf> {

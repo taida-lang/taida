@@ -22,14 +22,14 @@ impl std::error::Error for ParseError {}
 
 /// Recursive descent parser for Taida Lang.
 /// Maximum nesting depth for recursive expression parsing.
-/// Prevents stack overflow from deeply nested inputs (RCB-301 / SEC-002).
+/// Prevents stack overflow from deeply nested inputs.
 const MAX_PARSE_DEPTH: usize = 256;
 
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     errors: Vec<ParseError>,
-    /// Current recursion depth for expression parsing (RCB-301).
+    /// Current recursion depth for expression parsing.
     depth: usize,
     /// Context while reading a `| cond |> body` branch.
     /// Switched to `LetRhs` while parsing the right-hand side of a `<=`

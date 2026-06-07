@@ -154,6 +154,7 @@
 | `E1529` | 型検査完了後の内部表現に未解決型が残っている。未解決型を含むプログラムはバックエンドのコード生成段階に渡されない | TypeChecker |
 | `E1530` | 未定義のモールド名を `Name[args]()` として呼び出した。既知のモールド / 型 / 関数名を定義してから使うか、通常の関数呼び出し `name(args)` を使う必要がある。 | TypeChecker |
 | `E1531` | `.throw()` の対象が `Error` 系の値ではない。`Error` を継承した型の値を構築してから throw する必要がある。 | TypeChecker |
+| `E1532` | ビルドドライバ専用ディスクリプタ (`BuildUnit` / `BuildPlan` / `AssetBundle` / `RouteAsset` / `BuildHook`) をランタイム値として使用した。許可される位置はトップレベル export 値・別ディスクリプタのフィールド・export へ到達させるためのトップレベル変数束縛の右辺のみ。それ以外 (builtin / ユーザー関数引数、変換 / モールド引数、演算オペランド、フィールド / メソッドアクセス等) は reject する。 | TypeChecker |
 
 `E1512`〜`E1519` は **`Cage` / `CageRilla` 診断範囲**。`Cage[subject, runner]()` の型規則、および `CageRilla[Branch, Out]` の子系統 (`JSRilla` / `JSONRilla` / `BuildRilla` / `FileRilla`) が守る境界規約を扱う。`E1513` は将来の実行時検証用に予約している。
 
@@ -166,6 +167,14 @@
 - `E1529`: 型検査完了後の内部表現に `Unknown` が残った場合。バックエンドは型情報を信頼してコード生成するため、この診断が出たプログラムはコード生成段階に進まない。
 - `E1530`: `Name[args]()` の `Name` がモールド / 型 / 関数のいずれとしても解決できない場合。
 - `E1531`: `.throw()` に渡した値が `Error` 系ではない場合。
+
+`E1532` は **ビルドドライバ専用ディスクリプタのランタイム使用拒否** 診断。`taida-lang/build` のディスクリプタ (`BuildUnit` / `BuildPlan` / `AssetBundle` / `RouteAsset` / `BuildHook`) はビルドドライバ (`taida build --unit` / `--plan` / `--all-units`) が取り込む値であり、通常のランタイム値ではない。型チェッカーは deny-by-default で、以下の 3 つの位置のみ許可する。
+
+- トップレベル export 値 (`<<< serverX`)
+- 別ディスクリプタのフィールド値 (`BuildUnit.assets` の中の `RouteAsset(...)`、`BuildPlan.units` の中の `BuildUnit` 参照など)
+- export へ到達させるためのトップレベル変数束縛の右辺 (`serverX <= BuildUnit(...)`)
+
+これら以外の位置 — builtin 関数引数 (`stdout(serverX)`)、ユーザー関数引数、変換 / モールド引数 (`Str[serverX]()`)、演算オペランド、フィールド / メソッドアクセスなど — でディスクリプタ値を使うと `[E1532]` で reject する。ディスクリプタビルド経路はディスクリプタモジュールを直接解析・取り込みするため型チェッカーを経由せず、`[E1532]` の対象外。詳細は `docs/api/build_descriptors.md` の 6 節 / 9 節を参照。
 
 `E1520` は **「値の不在を表す型」の完全排除** 診断。PHILOSOPHY.md I の系「値の不在は値の不在」と II の系「ふくろの中身が変わったら、別のふくろにしまいなおす」を整合的に実装する。
 

@@ -719,7 +719,86 @@ mod tests {
         //   in core.c F2 (taida_async_join is handle-based: it also reclaims
         //   resolved-but-unjoined worker pthreads in unmold/map/get_or_default).
         //   F1 342,227 -> 342,811. Total -> 1,208,693.
-        const EXPECTED_TOTAL_LEN: usize = 1_208_693;
+        // 2026-06-06 addon-call Float marshalling: +1,945 bytes in
+        //   net_h3_quic.c — taida_addon_val_from_raw gains a
+        //   TAIDA_TAG_FLOAT case + float scratch plumbing (the lowering now
+        //   tags Float args instead of letting them fall through as raw-bit
+        //   Ints), and taida_addon_val_to_raw mirrors it for Float returns
+        //   (top-level + pack fields). core.c fragments untouched, so F1/F2
+        //   stay at 342,811 / 201,685. Total -> 1,210,638.
+        // 2026-06-06 value-tag track: +5,841 bytes in core.c F1 for the
+        //   per-element kind array infrastructure (three-state elem-tag
+        //   slot + helper API; see the F1_LEN history below for details).
+        //   F1 342,811 -> 348,652. Total -> 1,216,479.
+        // 2026-06-06 value-tag track step 2: +3,567 bytes in core.c F1 —
+        //   slot reads rewritten onto the helper API, set_elem_tag
+        //   materialises/appends the kind array, release walks per-element
+        //   kinds and frees the array (List/Set), elem retain/release gain
+        //   BYTES. F1 348,652 -> 352,219. Total -> 1,220,046.
+        // 2026-06-06 value-tag track step 3: +12,430 bytes in core.c F1 for
+        //   the kind-aware equality engine (pair equality / fingerprints /
+        //   seen-set + array-carrier unique & set_from_list; see F1_LEN
+        //   history). F1 352,219 -> 364,649. Total -> 1,232,476.
+        // 2026-06-06 value-tag track step 4: +6,637 bytes in core.c F1 for
+        //   kind-aware Set operations + tagged membership/insertion entry
+        //   points + the EKIND stamp bridge (see F1_LEN history).
+        //   F1 364,649 -> 371,286. Total -> 1,239,113.
+        // 2026-06-06 value-tag track step 5: +2,382 bytes in core.c F1 for
+        //   the runtime shadow-kind plumbing — kind-stamped Lax payloads
+        //   (list get/first/last record the element's kind on __value),
+        //   taida_lax_value_ekind read-back, and the tagged poly
+        //   comparisons used when an unmolded payload's kind is only
+        //   known at runtime. F1 371,286 -> 373,668. Total -> 1,241,495.
+        // 2026-06-06 value-tag track step 6: +1,325 bytes in core.c F1 —
+        //   kind-aware hashability gate for nested lists (see F1_LEN
+        //   history). F1 373,668 -> 374,993. Total -> 1,242,820.
+        // 2026-06-06 value-tag track step 7 (review fix): +646 bytes in
+        //   core.c F1 — Lax kind stamping widened to all known kinds
+        //   except ENUM so heuristic INT tags on string payloads can no
+        //   longer poison the shadow reader (see F1_LEN history).
+        //   F1 374,993 -> 375,639. Total -> 1,243,466.
+        // 2026-06-06 value-tag track step 8 (review Must Fix): +8,306
+        //   bytes in core.c F1 — derived list operations project
+        //   per-element kinds end to end (see F1_LEN history).
+        //   F1 375,639 -> 383,945. Total -> 1,251,772.
+        // 2026-06-06 value-tag track step 9 (/so review Must Fix): +1,015
+        //   bytes in core.c F1 — cross-tagged composition projection +
+        //   pre-push union latch + flatten full projection + map_k (see
+        //   F1_LEN history). F1 383,539 -> 384,554. Total -> 1,252,787.
+        // 2026-06-06 F55 S2 (H2/H3 request-body streaming for 2-arg handlers):
+        //   +11,582 bytes total across the two net fragments for the option (b)
+        //   streaming branch (arity dispatch in taida_net_h2_serve_connection /
+        //   the H3 serve path, the Net4BodyState leftover supply that pre-loads
+        //   the already-accumulated body, the streaming/body_token params on
+        //   h{2,3}_build_request_pack, and the empty-body-span +
+        //   __body_stream / __body_token sentinel fields). Split as
+        //   net_h1_h2.c +7,229 (F6, after the HTTP/2 divider) and
+        //   net_h3_quic.c +4,353. core.c is untouched, so F1_LEN / F2_LEN are
+        //   unchanged. Total 1,252,787 -> 1,264,369.
+        // 2026-06-06 F55 S4 (crypto surface expansion): +20,357 bytes in
+        //   core.c for the extended crypto runtime (SHA-512 / 384 / 224
+        //   cores, HMAC-SHA256, constant-time equality, hex/base64
+        //   encode/decode, randomBytes). Split as F1 +169 (the
+        //   `#include <sys/random.h>` guard for getentropy, before the
+        //   "Error ceiling" marker) and F2 +20,188 (all crypto helpers and
+        //   the public ABI functions, defined next to taida_sha256 which
+        //   already sits in F2; the public functions carry the
+        //   `taida_crypto_` prefix so they cannot collide with the static
+        //   WebSocket base64 helpers in net_h1_h2.c). Other fragments
+        //   untouched. Total 1,264,369 -> 1,284,726.
+        // 2026-06-06 F55 S4 review follow-up: the constant-time-equality
+        //   length fold dropped bits 24-31 / 40-63 of the length XOR, so
+        //   two inputs whose length difference sat only in those bits
+        //   (e.g. 0 vs 2^24) compared equal. Replaced the shift-fold with
+        //   a direct `(a_len != b_len)` seed in core.c (lengths are
+        //   public; only the byte walk must be constant-time): -86 bytes
+        //   in F2. Total 1,284,726 -> 1,284,640.
+        // 2026-06-07 comment neutralisation: -45 bytes total (-21 in
+        //   net_h1_h2.c F6, -24 in net_h3_quic.c) from rewriting the
+        //   2-arg streaming-handler comments to self-contained wording
+        //   (no internal design-document paths). Comment-only; code bytes
+        //   untouched. Total 1,284,640 -> 1,284,595.
+        const EXPECTED_TOTAL_LEN: usize = 1_284_595;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1326,7 +1405,81 @@ mod tests {
         // actually-added b element and join leftover worker handles in the
         // Async release path (+584) before the marker: F1_LEN 342,227 ->
         // 342,811.
-        const F1_LEN: usize = 342_811;
+        // Value-tag track (2026-06-06): +5,841 before the marker for the
+        // per-element kind array infrastructure — TAIDA_TAG_ENUM/BYTES kind
+        // constants, the three-state elem-tag slot contract (homogeneous /
+        // UNKNOWN/HETEROGENEOUS / kind-array pointer) and its helper API
+        // (taida_elem_tag_kind / _for_propagation / _kind_at / _tags_free /
+        // _tags_append / _tags_materialise). F1_LEN 342,811 -> 348,652.
+        // Value-tag track step 2 (2026-06-06): +3,567 before the marker —
+        // every legacy elem-tag slot read goes through the helper API
+        // (propagation reads degrade an array carrier to HETEROGENEOUS
+        // instead of leaking the pointer into a derived container),
+        // taida_list_set_elem_tag materialises/appends the kind array at
+        // its pre-push call sites, release walks per-element kinds for
+        // array carriers (List + Set) and frees the array, and the elem
+        // retain/release helpers gained BYTES. F1_LEN 348,652 -> 352,219.
+        // Value-tag track step 3 (2026-06-06): +12,430 before the marker
+        // for the kind-aware equality engine — taida_ekind_value_eq
+        // (interp-parity pair semantics: Bool≠Int, Int↔Float f64 crossing,
+        // enum type-id equality with the deliberate Int(n) crossing),
+        // kind-aware fingerprints (Bool gets its own tag byte; Int/Enum
+        // share tag 0 + ordinal like ValueKey), the taida_seen_k pair
+        // seen-set, note_push_ek projection, and the array-carrier paths
+        // of taida_list_unique / taida_set_from_list. struct_eq's LIST
+        // walk is now kind-aware end-to-end (nested containers included).
+        // F1_LEN 352,219 -> 364,649.
+        // Value-tag track step 4 (2026-06-06): +6,637 before the marker —
+        // kind-aware Set operations (union/intersect/diff/remove/to_list
+        // gain array-carrier paths that project per-element kinds and a
+        // contains_k membership core; add/has gain tagged entry points
+        // taking the probe argument's EKIND from codegen) plus the
+        // taida_list_note_push_ekind / taida_collection_has_tagged
+        // bridges. F1_LEN 364,649 -> 371,286.
+        // Value-tag track step 5 (2026-06-06): +2,382 before the marker —
+        // kind-stamped Lax constructor wired into list get/first/last,
+        // taida_lax_value_ekind, and taida_poly_eq/neq_tagged (unknown
+        // sides fall back to the legacy poly comparison).
+        // F1_LEN 371,286 -> 373,668.
+        // Value-tag track step 6 (2026-06-06): +1,325 before the marker —
+        // the legacy hashability gate consults each element's recorded
+        // kind, so a nested list containing a known Float takes the
+        // linear (kind-aware) dedup path like the interpreter instead of
+        // riding an order-sensitive fingerprint. Kind-less elements keep
+        // the structural classification. F1_LEN 373,668 -> 374,993.
+        // Value-tag track step 7 (2026-06-06, review fix): +646 before the
+        // marker — the kind-stamped Lax constructor stamps every known
+        // kind except ENUM (the plain constructor's heuristic could leave
+        // a bare INT tag on a string payload, which the shadow reader then
+        // trusted and compared a Str under INT semantics), and the shadow
+        // reader trusts the full stamped range. F1_LEN 374,993 -> 375,639.
+        // Value-tag track step 8 (2026-06-06, review Must Fix): +8,306
+        // before the marker — every derived list operation (reverse /
+        // filter / slice / concat / take / take_while / drop / drop_while /
+        // sort / sort_desc / sort_by / append / prepend / unique_by /
+        // flatten) projects per-element kinds through the new
+        // taida_list_project_push instead of collapsing an array carrier
+        // to the bare mixed sentinel; sorts ride the kinds through the
+        // permutation; zip/enumerate stamp per-element pack field tags
+        // (and zip's raw second-operand slot read is gone); set removal
+        // takes the probe's kind (taida_set_remove_k +
+        // taida_collection_remove_tagged). +7,900 lands before the marker
+        // and +406 after it (taida_collection_remove_tagged sits in the
+        // F2 collection-dispatch region): F1_LEN 375,639 -> 383,539.
+        // Value-tag track step 9 (2026-06-06, /so review Must Fix): +1,015
+        // before the marker — cross-tagged homogeneous compositions
+        // (union/intersect/diff/concat of two single-tag containers with
+        // different tags) take the kind-aware projection, the union latch
+        // stamps tags before the push (the materialise path indexes the
+        // about-to-be-pushed element), flatten projects every inner
+        // element instead of an i==0 stamp, and taida_list_map_k records
+        // a statically-known callback return kind. F1_LEN 383,539 ->
+        // 384,554.
+        // F55 S4 (2026-06-06): +169 bytes in F1 for the
+        // `#include <sys/random.h>` guard (getentropy for randomBytes),
+        // inserted in the top-of-file include block before the "Error
+        // ceiling" marker. F1_LEN 384,554 -> 384,723.
+        const F1_LEN: usize = 384_723;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1335,11 +1488,19 @@ mod tests {
         // F54B-029 (Codex review round 2) makes taida_async_join handle-based
         // (reclaims resolved-but-unjoined worker pthreads) after the marker:
         // F2 201,685 -> 202,180.
+        // Value-tag track step 8 adds taida_collection_remove_tagged in the
+        // collection-dispatch region after the marker: F2 202,180 -> 202,586.
+        // F55 S4 (2026-06-06) adds the extended crypto helpers + public ABI
+        // functions next to taida_sha256 (which sits after the marker):
+        // F2 202,586 -> 222,774.
+        // F55 S4 review follow-up (2026-06-06): the constant-time-equality
+        // length fold is replaced by a direct `(a_len != b_len)` seed (the
+        // shift-fold dropped bits 24-31 / 40-63): F2 222,774 -> 222,688.
         // Express it as F1_LEN + F2 so the F1 side stays in lockstep with the
         // const above.
         assert_eq!(
             CORE_SECTION.len(),
-            F1_LEN + 202_180,
+            F1_LEN + 222_688, // F2 shrank by -86 in the F55 S4 review follow-up
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
@@ -1522,14 +1683,19 @@ mod tests {
         //   server, after the divider): the H2_MAX_REQUEST_BODY_SIZE guard +
         //   ENHANCE_YOUR_CALM reset + the two new #defines net to +1,113 bytes.
         //   F6 grows: 106,128 + 1,113 = 107,241.
+        // F55 S2 (2026-06-06): the H2 server's 2-arg streaming body branch
+        //   (option (b): arity branch in taida_net_h2_serve_connection, the
+        //   Net4BodyState leftover supply, the streaming/body_token params on
+        //   h2_build_request_pack, and the empty-body-span + __body_stream /
+        //   __body_token fields) adds +7,229 bytes after the HTTP/2 divider.
+        //   All edits sit in F6; F5_LEN and the F6_PREFIX anchor are unaffected.
+        //   F6: 107,388 + 7,229 = 114,617.
+        // 2026-06-07 comment neutralisation: the two streaming-handler
+        //   comment blocks after the divider are rewritten to self-contained
+        //   wording. F6: 114,617 - 21 = 114,596. F5 untouched.
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            // F6 = 107,388. The previous 107_241 was stale on HEAD: a net_h2
-            // change added 147 bytes after the divider without refreshing this
-            // sub-assert (EXPECTED_TOTAL_LEN already tracked the true total, so
-            // c13_4 had been failing on net_h1_h2.c independently of G4). F5_LEN
-            // and the F6_PREFIX anchor are unaffected.
-            224_556 + 107_388,
+            224_556 + 114_596,
             "net_h1_h2.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";

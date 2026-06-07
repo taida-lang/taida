@@ -319,6 +319,21 @@ static int _wf_is_whitespace(char c) {
 #define WASM_TAG_STR     3
 #define WASM_TAG_PACK    4
 #endif
+/* Value-tag track (mirror of native core.c): the remaining heap kinds plus
+   the two new kinds. Enum gets its own kind (it was lowered as bare INT
+   ordinals, making same-ordinal variants of different enums and Int(n)
+   indistinguishable inside containers) and Bytes is split out of the PACK
+   umbrella so kind-aware equality can short-circuit on it. These names are
+   deliberately in the WASM_TAG_* namespace; the pack field enum descriptor
+   registry uses its own unrelated numeric scheme. */
+#ifndef WASM_TAG_LIST
+#define WASM_TAG_LIST    5
+#define WASM_TAG_CLOSURE 6
+#define WASM_TAG_HMAP    7
+#define WASM_TAG_SET     8
+#define WASM_TAG_ENUM    9
+#define WASM_TAG_BYTES   10
+#endif
 /* C23B-007 (2026-04-22): HETEROGENEOUS sentinel, distinct from UNKNOWN(-1).
    Used by `taida_list_set_elem_tag` / `taida_hashmap_set_value_tag` after a
    type-conflict downgrade so subsequent `.set()` / `.push()` calls cannot
@@ -330,6 +345,175 @@ static int _wf_is_whitespace(char c) {
 #define WASM_TAG_UNKNOWN       -1
 #define WASM_TAG_HETEROGENEOUS -2
 #endif
+
+/* ── Per-element kind array (value-tag track, mirror of native core.c) ──────
+ * The elem-tag slot of a WASM container (list[2] / set[2] / hmap[2] — note
+ * the WASM layout puts elem_tag at index 2, length at index 1, unlike the
+ * native [rc|magic, cap, len, elem_tag]) is three-state:
+ *   v >= 0                    homogeneous WASM_TAG_* (legacy behaviour)
+ *   v == -1 / -2              UNKNOWN / HETEROGENEOUS with NO per-element
+ *                             info (legacy degraded state; also the
+ *                             conservative result of derived containers
+ *                             whose source had a kind array)
+ *   v >= 4096 (pointer)       per-element kind array, implicitly
+ *                             HETEROGENEOUS. Layout: u32[0] = capacity,
+ *                             u32[1 + i] = kind|aux for element i (kept in
+ *                             lockstep with the container length at [1]).
+ * Each u32 entry packs the kind in the low 8 bits and an auxiliary payload
+ * (the enum type id for WASM_TAG_ENUM) in the upper 24 bits. 0xFF in the
+ * kind byte means "unknown" (e.g. a dynamically-typed push). The array is
+ * plain POD owned by the container. WASM uses a bump allocator with no
+ * free, so there is no per-element release path and no free helper: the
+ * array is reclaimed wholesale on arena reset. Growth re-bumps a larger
+ * block and memcpys (copy-on-grow, like taida_list_push).
+ *
+ * Raw reads/writes of slot [2] outside the helpers below are forbidden —
+ * every legacy direct access has been rewritten onto this API so a slot
+ * holding an array pointer can never be misread as a plain tag. */
+#define WASM_EKIND_UNKNOWN 0xFFu
+#define WASM_EKIND(kind, aux) ((uint32_t)((uint32_t)((kind) & 0xFF) | ((uint32_t)(aux) << 8)))
+#define WASM_EKIND_KIND(ek)  ((uint32_t)((ek) & 0xFFu))
+#define WASM_EKIND_AUX(ek)   ((uint32_t)((ek) >> 8))
+
+static int _wasm_elem_slot_is_array(int64_t v) { return v >= 4096; }
+
+/* Classify the slot for kind-level decisions: returns the homogeneous tag,
+   WASM_TAG_UNKNOWN, or WASM_TAG_HETEROGENEOUS (for both the array-less
+   degraded state and the array-carrying state). */
+static int64_t _wasm_elem_tag_kind(const int64_t *c) {
+    int64_t v = c[2];
+    if (_wasm_elem_slot_is_array(v)) return WASM_TAG_HETEROGENEOUS;
+    return v;
+}
+
+/* Read the slot for propagation into a DERIVED container. Never returns the
+   array pointer: a derived container must build its own array (via the
+   append helper inside its own loop) or conservatively degrade to
+   HETEROGENEOUS-without-array, which downstream consumers treat exactly
+   like the legacy mixed state. */
+static int64_t _wasm_elem_tag_for_propagation(const int64_t *c) {
+    int64_t v = c[2];
+    if (_wasm_elem_slot_is_array(v)) return WASM_TAG_HETEROGENEOUS;
+    return v;
+}
+
+/* Per-element kind|aux for element i. Homogeneous containers report the
+   single tag (aux 0), array carriers report the recorded entry, and the
+   array-less UNKNOWN/HETEROGENEOUS states report EKIND unknown. */
+static uint32_t _wasm_elem_kind_at(const int64_t *c, int64_t i) {
+    int64_t v = c[2];
+    if (_wasm_elem_slot_is_array(v)) {
+        const uint32_t *arr = (const uint32_t *)(intptr_t)v;
+        if (i >= 0 && i < c[1]) return arr[1 + i];
+        return WASM_EKIND_UNKNOWN;
+    }
+    if (v >= 0) return WASM_EKIND((uint32_t)v, 0);
+    return WASM_EKIND_UNKNOWN;
+}
+
+/* Append one kind entry to a container that already carries an array,
+   growing it (copy-on-grow via the bump allocator) when the recorded
+   capacity is exhausted. `idx` is the element index the entry belongs to
+   (== container length at the matching pre-push call site). */
+static void _wasm_elem_tags_append(int64_t *c, int64_t idx, uint32_t ekind) {
+    uint32_t *arr = (uint32_t *)(intptr_t)c[2];
+    uint32_t cap = arr[0];
+    if ((uint64_t)idx + 1 > cap) {
+        uint32_t new_cap = cap ? cap * 2 : 16;
+        while (new_cap < (uint64_t)idx + 1) new_cap *= 2;
+        uint32_t *bigger = (uint32_t *)wasm_alloc(
+            (unsigned int)(((uint64_t)new_cap + 1) * sizeof(uint32_t)));
+        for (uint32_t k = 0; k <= cap; k++) bigger[k] = arr[k];
+        bigger[0] = new_cap;
+        arr = bigger;
+        c[2] = (int64_t)(intptr_t)arr;
+    }
+    arr[1 + idx] = ekind;
+}
+
+/* Materialise the per-element array for a container whose first `len`
+   elements all carry `old_tag` (guaranteed by the homogeneous latch at the
+   downgrade point), then record `new_ekind` for the element about to be
+   appended at index `len`. */
+static void _wasm_elem_tags_materialise(int64_t *c, int64_t old_tag,
+                                        int64_t len, uint32_t new_ekind) {
+    uint32_t cap = 16;
+    while (cap < (uint64_t)len + 1) cap *= 2;
+    uint32_t *arr = (uint32_t *)wasm_alloc(
+        (unsigned int)(((uint64_t)cap + 1) * sizeof(uint32_t)));
+    arr[0] = cap;
+    uint32_t old_ekind = old_tag >= 0 ? WASM_EKIND((uint32_t)old_tag, 0)
+                                      : WASM_EKIND_UNKNOWN;
+    for (int64_t i = 0; i < len; i++) arr[1 + i] = old_ekind;
+    arr[1 + len] = new_ekind;
+    c[2] = (int64_t)(intptr_t)arr;
+}
+
+/* Map a per-element kind entry back onto the WASM_TAG_* domain
+   (EKIND unknown → WASM_TAG_UNKNOWN). */
+static int64_t _wasm_ekind_to_tag(uint32_t ek) {
+    uint32_t k = WASM_EKIND_KIND(ek);
+    return k == WASM_EKIND_UNKNOWN ? WASM_TAG_UNKNOWN : (int64_t)k;
+}
+
+/* Record the kind entry for the element about to be pushed (pre-push
+   contract: the append index is the container length at [1]). Mirrors
+   taida_list_set_elem_tag but takes a full kind|aux entry so enum type ids
+   survive container projection. A fresh container stays homogeneous as long
+   as entries are plain same-kind tags; an aux-carrying entry (enum) or a
+   kind conflict materialises the array. Used by the runtime-internal
+   builders (unique / set_from_list / Set ops) when projecting from an
+   array-carrying source. */
+int64_t taida_list_push(int64_t list_ptr, int64_t item); /* fwd */
+static void _wasm_elem_tags_note_push_ek(int64_t *c, uint32_t ek); /* fwd */
+
+/* Project one element (with its source-recorded kind) into a derived
+   container, then push (native taida_list_project_push mirror — no
+   retain on WASM's bump runtime). */
+static int64_t _wasm_list_project_push(int64_t dst, int64_t item,
+                                       const int64_t *src, int64_t src_idx) {
+    _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)dst, _wasm_elem_kind_at(src, src_idx));
+    return taida_list_push(dst, item);
+}
+
+/* True when two single-tag containers pin DIFFERENT concrete tags
+   (native taida_elem_tags_cross mirror). */
+static int _wasm_elem_tags_cross(const int64_t *a, const int64_t *b) {
+    int64_t ta = a[2], tb = b[2];
+    return ta >= 0 && tb >= 0 && ta != tb;
+}
+
+/* Kind entry → pack field tag domain (native mirror): known kinds map
+   directly except ENUM, which falls back to the caller's legacy tag. */
+static int64_t _wasm_ekind_to_pack_tag(uint32_t ek, int64_t fallback) {
+    uint32_t k = ek & 0xFFu;
+    if (k == WASM_EKIND_UNKNOWN || k == (uint32_t)WASM_TAG_ENUM) return fallback;
+    return (int64_t)k;
+}
+
+static void _wasm_elem_tags_note_push_ek(int64_t *c, uint32_t ek) {
+    int64_t existing = c[2];
+    if (_wasm_elem_slot_is_array(existing)) {
+        _wasm_elem_tags_append(c, c[1], ek);
+        return;
+    }
+    if (existing == WASM_TAG_HETEROGENEOUS) return; /* degraded: stay degraded */
+    uint32_t k = WASM_EKIND_KIND(ek);
+    int64_t tag = (k == WASM_EKIND_UNKNOWN) ? WASM_TAG_UNKNOWN : (int64_t)k;
+    if (WASM_EKIND_AUX(ek) == 0) {
+        if (existing == WASM_TAG_UNKNOWN || existing == tag) {
+            c[2] = tag;
+            return;
+        }
+        _wasm_elem_tags_materialise(c, existing, c[1], ek);
+        return;
+    }
+    /* Aux-carrying (enum) entry: the single slot cannot hold the type id,
+       so go straight to the array form (existing elements keep their
+       homogeneous tag, or UNKNOWN on a fresh container). */
+    _wasm_elem_tags_materialise(c, existing, c[1], ek);
+}
+
 /* B11-2: Forward declaration for polymorphic display */
 int64_t taida_polymorphic_to_string(int64_t obj);
 /* C21-4: Forward declaration for FLOAT tag fast path in stdout_with_tag */
@@ -2724,12 +2908,26 @@ void taida_list_set_elem_tag(int64_t list_ptr, int64_t tag) {
          existing == HETEROGENEOUS  → keep (never re-promote)
          existing == new_tag        → no-op
          otherwise                  → downgrade to HETEROGENEOUS(-2) */
+    /* Value-tag track: instead of throwing the per-element information away
+       at the downgrade point, the first conflict materialises the kind
+       array (every element already in the list is guaranteed to carry the
+       old homogeneous tag by the latch invariant) and subsequent calls
+       append to it. Contract: at codegen pre-push call sites list[1] is the
+       index of the element about to be pushed. Runtime-internal bulk
+       callers only ever (re)assert a single tag on a fresh or same-tag
+       container, so they can never reach the materialise/append branches. */
     int64_t existing = list[2];
+    if (_wasm_elem_slot_is_array(existing)) {
+        uint32_t ek = tag >= 0 ? WASM_EKIND((uint32_t)tag, 0) : WASM_EKIND_UNKNOWN;
+        _wasm_elem_tags_append(list, list[1], ek);
+        return;
+    }
     if (existing == WASM_TAG_HETEROGENEOUS) return;
     if (existing == WASM_TAG_UNKNOWN || existing == tag) {
         list[2] = tag;
     } else {
-        list[2] = WASM_TAG_HETEROGENEOUS;
+        uint32_t ek = tag >= 0 ? WASM_EKIND((uint32_t)tag, 0) : WASM_EKIND_UNKNOWN;
+        _wasm_elem_tags_materialise(list, existing, list[1], ek);
     }
 }
 
@@ -2765,12 +2963,31 @@ int64_t taida_list_length(int64_t list_ptr) {
     return list[1];
 }
 
+/* Kind-stamped Lax constructor (mirror of native taida_lax_new_k):
+   identical to taida_lax_new but records the payload's known scalar kind on
+   the __value field tag, so an unmolding call site can read it back
+   (taida_lax_value_ekind) and run exact pair comparisons on the payload.
+   Heap kinds keep whatever the renderer's tag heuristic classified; ENUM
+   stays on the heuristic path too for now (the pack field tag's existing
+   consumers only understand the legacy scalar tags). */
+static int64_t _wasm_lax_new_k(int64_t value, int64_t default_value, uint32_t ekind) {
+    int64_t pack = taida_lax_new(value, default_value);
+    uint32_t k = ekind & 0xFFu;
+    /* Stamp every known kind except ENUM (native mirror): in particular
+       STR, so the constructor heuristic's bare INT on a string payload
+       can never be mistaken for a trusted kind by the shadow reader. */
+    if (k != WASM_EKIND_UNKNOWN && k != (uint32_t)WASM_TAG_ENUM) {
+        taida_pack_set_tag(pack, 1, (int64_t)k);
+    }
+    return pack;
+}
+
 /* taida_list_get: returns Lax[T]. OOB returns empty Lax. */
 int64_t taida_list_get(int64_t list_ptr, int64_t index) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     if (index < 0 || index >= len) return taida_lax_empty(0);
-    return taida_lax_new(list[WASM_LIST_ELEMS + index], 0);
+    return _wasm_lax_new_k(list[WASM_LIST_ELEMS + index], 0, _wasm_elem_kind_at(list, index));
 }
 
 int64_t taida_list_is_empty(int64_t list_ptr) {
@@ -3320,6 +3537,7 @@ void taida_set_set_elem_tag(int64_t set_ptr, int64_t tag) {
    Enum-ordinal) compare by raw value -- Enum is lowered to its Int ordinal, so
    Int<->Enum equivalence is automatic (enum-name distinction is out of scope,
    F54B-018). HashMap / Set elements fall back to identity. */
+static int _wasm_list_struct_eq_k(int64_t *la, int64_t *lb); /* kind-aware list walk (below) */
 static int _wasm_value_eq(int64_t a, int64_t b) {
     if (a == b) return 1;
     int a_str = _looks_like_string(a), b_str = _looks_like_string(b);
@@ -3339,11 +3557,12 @@ static int _wasm_value_eq(int64_t a, int64_t b) {
     int a_list = _looks_like_list(a), b_list = _looks_like_list(b);
     if (a_list || b_list) {
         if (!a_list || !b_list) return 0;
+        /* Value-tag track: element pairs compare under their recorded kinds
+           (single-tag containers report it via _wasm_elem_kind_at), so
+           nested Bool↔Int stops colliding and nested Int↔Float crosses over
+           like the interpreter's Value::eq. */
         int64_t *la = (int64_t *)(intptr_t)a, *lb = (int64_t *)(intptr_t)b;
-        if (la[1] != lb[1]) return 0;
-        for (int64_t i = 0; i < la[1]; i++)
-            if (!_wasm_value_eq(la[WASM_LIST_ELEMS + i], lb[WASM_LIST_ELEMS + i])) return 0;
-        return 1;
+        return _wasm_list_struct_eq_k(la, lb);
     }
     if (_is_wasm_hashmap(a) || _is_wasm_hashmap(b) || _is_wasm_set(a) || _is_wasm_set(b))
         return 0;
@@ -3377,6 +3596,10 @@ static void _wasm_fnv_bytes(uint64_t *h, const void *p, int n) {
     const unsigned char *b = (const unsigned char*)p;
     for (int i = 0; i < n; i++) { *h ^= b[i]; *h *= 0x100000001b3ULL; }
 }
+/* Forward declaration: the structural accumulator and the kind-aware one
+   are mutually recursive (lists hash their elements under recorded kinds;
+   non-scalar kinds delegate back to the structural walk). */
+static void _wasm_fp_accum_k(int64_t v, uint32_t ekind, uint64_t *h);
 static void _wasm_fp_accum(int64_t v, uint64_t *h) {
     if (_looks_like_string(v)) {
         unsigned char tag = 2; _wasm_fnv_bytes(h, &tag, 1);
@@ -3396,7 +3619,12 @@ static void _wasm_fp_accum(int64_t v, uint64_t *h) {
         unsigned char tag = 7; _wasm_fnv_bytes(h, &tag, 1);
         int64_t *l = (int64_t*)(intptr_t)v; int64_t n = l[1];
         uint64_t nn = (uint64_t)n; _wasm_fnv_bytes(h, &nn, sizeof(nn));
-        for (int64_t i = 0; i < n; i++) _wasm_fp_accum(l[WASM_LIST_ELEMS + i], h);
+        /* Value-tag track: elements hash under their recorded kind so a
+           nested Bool no longer collides with Int (homogeneous lists report
+           their single tag through _wasm_elem_kind_at, which keeps the
+           legacy fingerprints for Int/Str/... lists stable). */
+        for (int64_t i = 0; i < n; i++)
+            _wasm_fp_accum_k(l[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(l, i), h);
         return;
     }
     if (_looks_like_empty_pack(v)) {
@@ -3424,13 +3652,22 @@ static void _wasm_fp_accum(int64_t v, uint64_t *h) {
 static uint64_t _wasm_value_fingerprint(int64_t v) {
     uint64_t h = 0xcbf29ce484222325ULL; _wasm_fp_accum(v, &h); return h;
 }
+static int _wasm_elem_hashable_for_gate(int64_t v, uint32_t ekind); /* below */
+
 static int _wasm_value_hashable(int64_t v) {
     if (_is_wasm_hashmap(v) || _is_wasm_set(v) || _wasm_is_async_obj(v)) return 0;
     if (_looks_like_bytes(v)) return 1;
     if (_looks_like_string(v)) return 1;
     if (_looks_like_list(v)) {
+        /* Value-tag track (native mirror): gate on each element's
+           recorded kind — a nested list containing a known Float must
+           take the linear path (its bit pattern classifies as a plain
+           scalar otherwise). Kind-less elements keep the legacy
+           structural classification. */
         int64_t *l = (int64_t*)(intptr_t)v; int64_t n = l[1];
-        for (int64_t i = 0; i < n; i++) if (!_wasm_value_hashable(l[WASM_LIST_ELEMS + i])) return 0;
+        for (int64_t i = 0; i < n; i++)
+            if (!_wasm_elem_hashable_for_gate(l[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(l, i)))
+                return 0;
         return 1;
     }
     if (_looks_like_empty_pack(v)) return 1;
@@ -3441,6 +3678,145 @@ static int _wasm_value_hashable(int64_t v) {
     }
     return 1; /* scalar */
 }
+
+/* Hashability of one element under its recorded kind, for the legacy
+   whole-container gate (mirror of native taida_elem_hashable_for_gate): a
+   known Float forces the linear path, a known scalar kind is hashable, a
+   kind-less element falls back to the structural classifier (so untagged
+   containers keep their historical behaviour bit-for-bit), and heap kinds
+   recurse structurally. */
+static int _wasm_elem_hashable_for_gate(int64_t v, uint32_t ekind) {
+    uint32_t k = WASM_EKIND_KIND(ekind);
+    switch (k) {
+        case WASM_TAG_INT:
+        case WASM_TAG_BOOL:
+        case WASM_TAG_ENUM:
+            return 1;
+        case WASM_TAG_FLOAT:
+            return 0;
+        case WASM_EKIND_UNKNOWN:
+            return _wasm_value_hashable(v);
+        default:
+            return _wasm_value_hashable(v);
+    }
+}
+
+/* -- Value-tag track: kind-aware equality / fingerprint / membership -------
+ * Mirror of native core.c. When a container carries a per-element kind
+ * array, dedup and membership run on (value, ekind) pairs: Bool stops
+ * colliding with Int, the Int↔Float crossing follows f64 semantics
+ * regardless of magnitude, and same-ordinal variants of different enums
+ * stay distinct (type id in the aux bits) while still crossing over to
+ * Int(n)/Float(n) the way the interpreter's equality does. A side without
+ * kind information (EKIND unknown) degrades to the legacy structural
+ * comparison so old containers stay bit-compatible. (`_l2d` is the f64
+ * bitcast helper defined with the float ops above.) */
+static int _wasm_ekind_value_eq(int64_t a, uint32_t eka, int64_t b, uint32_t ekb);
+
+/* Kind-aware list equality: element pairs compare under their recorded
+   kinds. _wasm_elem_kind_at reports the single tag for homogeneous
+   containers, so this is also the engine for plain nested lists. */
+static int _wasm_list_struct_eq_k(int64_t *la, int64_t *lb) {
+    int64_t n = la[1];
+    if (n != lb[1]) return 0;
+    for (int64_t i = 0; i < n; i++) {
+        if (!_wasm_ekind_value_eq(la[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(la, i),
+                                  lb[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(lb, i)))
+            return 0;
+    }
+    return 1;
+}
+
+static int _wasm_ekind_value_eq(int64_t a, uint32_t eka, int64_t b, uint32_t ekb) {
+    uint32_t ka = WASM_EKIND_KIND(eka), kb = WASM_EKIND_KIND(ekb);
+    if (ka == WASM_EKIND_UNKNOWN || kb == WASM_EKIND_UNKNOWN)
+        return _wasm_value_eq(a, b);
+    switch (ka) {
+        case WASM_TAG_INT:
+            switch (kb) {
+                case WASM_TAG_INT:
+                case WASM_TAG_ENUM:  return a == b; /* Int(n) == ordinal n (interp crossing) */
+                case WASM_TAG_FLOAT: return (double)a == _l2d(b);
+                default: return 0; /* BOOL and every heap kind: unequal */
+            }
+        case WASM_TAG_BOOL:
+            return kb == WASM_TAG_BOOL ? (a == b) : 0;
+        case WASM_TAG_FLOAT:
+            switch (kb) {
+                case WASM_TAG_FLOAT: return _l2d(a) == _l2d(b); /* IEEE: NaN!=NaN, +0==-0 */
+                case WASM_TAG_INT:
+                case WASM_TAG_ENUM:  return _l2d(a) == (double)b;
+                default: return 0;
+            }
+        case WASM_TAG_ENUM:
+            switch (kb) {
+                case WASM_TAG_ENUM:
+                    /* Type id (aux) AND ordinal must match. Note the
+                       deliberate non-transitivity inherited from the
+                       interpreter: two same-ordinal enums of different
+                       types are unequal to each other yet each equal to
+                       the bare Int(ordinal). */
+                    return eka == ekb && a == b;
+                case WASM_TAG_INT:   return a == b;
+                case WASM_TAG_FLOAT: return (double)a == _l2d(b);
+                default: return 0;
+            }
+        case WASM_TAG_LIST:
+            if (kb != WASM_TAG_LIST) return 0;
+            if (a == b) return 1;
+            if (!_looks_like_list(a) || !_looks_like_list(b)) return _wasm_value_eq(a, b);
+            return _wasm_list_struct_eq_k((int64_t *)(intptr_t)a, (int64_t *)(intptr_t)b);
+        default:
+            /* Remaining heap kinds (STR / BYTES / PACK / SET / HMAP /
+               CLOSURE): same-kind structural equality, cross-kind unequal. */
+            if (ka != kb) return 0;
+            return _wasm_value_eq(a, b);
+    }
+}
+
+/* Kind-aware fingerprint. Int and Enum share tag 0 + ordinal — mirroring
+   the interpreter's ValueKey, which deliberately leaves the enum type id
+   out of the hash and lets equality confirmation distinguish same-ordinal
+   enums — while Bool gets its own tag byte so it stops colliding with
+   Int(0/1). Everything else reuses the structural accumulator. */
+static void _wasm_fp_accum_k(int64_t v, uint32_t ekind, uint64_t *h) {
+    switch (WASM_EKIND_KIND(ekind)) {
+        case WASM_TAG_INT:
+        case WASM_TAG_ENUM: {
+            unsigned char tag = 0; _wasm_fnv_bytes(h, &tag, 1);
+            int64_t s = (int64_t)v; _wasm_fnv_bytes(h, &s, sizeof(s));
+            break;
+        }
+        case WASM_TAG_BOOL: {
+            unsigned char tag = 1; _wasm_fnv_bytes(h, &tag, 1);
+            int64_t s = (int64_t)v; _wasm_fnv_bytes(h, &s, sizeof(s));
+            break;
+        }
+        default:
+            _wasm_fp_accum(v, h);
+            break;
+    }
+}
+
+/* Kind-aware hashability gate. Float is never hashable (interp parity:
+   NaN / ±0.0 / Int↔Float crossing force the linear path), and an unknown
+   kind also forces the linear path so legacy-fingerprint values and
+   kind-fingerprint values can never share one seen-set inconsistently. */
+static int _wasm_ekind_hashable(int64_t v, uint32_t ekind) {
+    switch (WASM_EKIND_KIND(ekind)) {
+        case WASM_TAG_INT:
+        case WASM_TAG_BOOL:
+        case WASM_TAG_ENUM:
+            return 1;
+        case WASM_TAG_FLOAT:
+            return 0;
+        case WASM_EKIND_UNKNOWN:
+            return 0;
+        default:
+            return _wasm_value_hashable(v);
+    }
+}
+
 typedef struct { uint64_t *fps; int64_t *vals; unsigned char *used; int mask; } _wasm_seen;
 static int _wasm_seen_init(_wasm_seen *s, int64_t hint) {
     int cap = 16; int64_t want = (hint > 0 ? hint : 1) * 2 + 1;
@@ -3471,6 +3847,42 @@ static int _wasm_seen_contains(_wasm_seen *s, int64_t v) {
         i = (i + 1) & s->mask;
     }
 }
+
+/* Kind-aware seen-set (mirror of native taida_seen_k): entries carry
+   (value, ekind) pairs so collision confirmation runs under
+   _wasm_ekind_value_eq. Engaged only when every element kind passes
+   _wasm_ekind_hashable — Float or unknown kinds fall back to the linear
+   pair-equality scan, matching the interpreter's all-or-nothing ValueKey
+   gating (and its complexity profile). Bump-allocated, no free needed. */
+typedef struct {
+    uint64_t *fps; int64_t *vals; uint32_t *eks; unsigned char *used; int mask;
+} _wasm_seen_k;
+static int _wasm_seen_k_init(_wasm_seen_k *s, int64_t hint) {
+    int cap = 16; int64_t want = (hint > 0 ? hint : 1) * 2 + 1;
+    while ((int64_t)cap < want) cap <<= 1;
+    s->mask = cap - 1;
+    s->fps  = (uint64_t*)wasm_alloc((unsigned int)((int)cap * (int)sizeof(uint64_t)));
+    s->vals = (int64_t*)wasm_alloc((unsigned int)((int)cap * (int)sizeof(int64_t)));
+    s->eks  = (uint32_t*)wasm_alloc((unsigned int)((int)cap * (int)sizeof(uint32_t)));
+    s->used = (unsigned char*)wasm_alloc((unsigned int)cap);
+    if (!s->fps || !s->vals || !s->eks || !s->used) return 0;
+    for (int i = 0; i < cap; i++) s->used[i] = 0;
+    return 1;
+}
+static int _wasm_seen_k_add(_wasm_seen_k *s, int64_t v, uint32_t ek) {
+    uint64_t fp = 0xcbf29ce484222325ULL;
+    _wasm_fp_accum_k(v, ek, &fp);
+    int i = (int)(fp & (uint64_t)s->mask);
+    for (;;) {
+        if (!s->used[i]) {
+            s->used[i] = 1; s->fps[i] = fp; s->vals[i] = v; s->eks[i] = ek;
+            return 1;
+        }
+        if (s->fps[i] == fp && _wasm_ekind_value_eq(s->vals[i], s->eks[i], v, ek)) return 0;
+        i = (i + 1) & s->mask;
+    }
+}
+
 static int _wasm_list_all_hashable(int64_t *list) {
     int64_t n = list[1];
     for (int64_t i = 0; i < n; i++) if (!_wasm_value_hashable(list[WASM_LIST_ELEMS + i])) return 0;
@@ -3484,6 +3896,64 @@ int64_t taida_set_has(int64_t set_ptr, int64_t item) {
         if (_wasm_value_eq(set[WASM_LIST_ELEMS + i], item)) return 1;
     }
     return 0;
+}
+
+/* Value-tag entry points (mirror of native core.c): the shared lowering
+ * emits the EKIND-form entry points (kind in the low byte, enum type id
+ * above, 0xFF = unknown). These now drive the per-element kind machinery
+ * instead of collapsing onto the legacy tag latch. */
+void taida_list_note_push_ekind(int64_t list_ptr, int64_t ekind) {
+    _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)list_ptr, (uint32_t)ekind);
+}
+
+/* Kind-aware membership core: the set side reports each element's recorded
+   kind, the probe item's kind comes from the caller (EKIND unknown degrades
+   pairs to the legacy structural comparison, so a 0xFF probe is identical
+   to the historical taida_set_has scan). */
+static int64_t _wasm_set_contains_k(int64_t set_ptr, int64_t item, uint32_t ek) {
+    int64_t *list = (int64_t *)(intptr_t)set_ptr;
+    int64_t len = list[1];
+    for (int64_t i = 0; i < len; i++) {
+        if (_wasm_ekind_value_eq(list[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(list, i), item, ek))
+            return 1;
+    }
+    return 0;
+}
+
+/* Tagged entry point: codegen passes the probe argument's static kind so
+   single-value membership follows the same pair semantics as
+   construction-time dedup. An UNKNOWN entry degrades to the legacy
+   structural behaviour. */
+int64_t taida_set_has_tagged(int64_t set_ptr, int64_t item, int64_t ekind) {
+    return _wasm_set_contains_k(set_ptr, item, (uint32_t)ekind);
+}
+
+/* Read back the kind recorded on a Lax pack's __value field (EKIND form;
+   EKIND unknown when the input is not pack-shaped or the recorded tag is
+   not a scalar kind). Unmolding call sites use this to carry a runtime
+   "shadow kind" alongside the payload value. */
+int64_t taida_lax_value_ekind(int64_t maybe_lax) {
+    if (!_looks_like_pack(maybe_lax)) return (int64_t)WASM_EKIND_UNKNOWN;
+    int64_t tag = taida_pack_get_field_tag(maybe_lax, WASM_HASH___VALUE);
+    /* Only kind-stamped Lax packs reach this reader (shadow whitelist),
+       so the recorded tag is trustworthy across the known range. */
+    if (tag >= WASM_TAG_INT && tag <= WASM_TAG_BYTES && tag != WASM_TAG_ENUM)
+        return tag;
+    return (int64_t)WASM_EKIND_UNKNOWN;
+}
+
+/* Tagged polymorphic equality: when both operands carry a known kind the
+   pair semantics engine decides (Bool≠Int, Int↔Float f64 crossing at any
+   magnitude, ...); any unknown side falls back to the legacy poly
+   comparison so untagged call sites keep their historical behaviour. */
+int64_t taida_poly_eq_tagged(int64_t a, int64_t eka, int64_t b, int64_t ekb) {
+    uint32_t ka = (uint32_t)eka & 0xFFu, kb = (uint32_t)ekb & 0xFFu;
+    if (ka == WASM_EKIND_UNKNOWN || kb == WASM_EKIND_UNKNOWN) return taida_poly_eq(a, b);
+    return _wasm_ekind_value_eq(a, (uint32_t)eka, b, (uint32_t)ekb) ? 1 : 0;
+}
+
+int64_t taida_poly_neq_tagged(int64_t a, int64_t eka, int64_t b, int64_t ekb) {
+    return taida_poly_eq_tagged(a, eka, b, ekb) ? 0 : 1;
 }
 
 int64_t taida_set_add(int64_t set_ptr, int64_t item) {
@@ -3505,9 +3975,69 @@ int64_t taida_set_add(int64_t set_ptr, int64_t item) {
     return new_set;
 }
 
+/* Tagged entry point (mirror of native taida_set_add_tagged): codegen
+   passes the insert argument's static kind so insertion follows the same
+   pair semantics as construction-time dedup. An UNKNOWN entry degrades to
+   the legacy structural behaviour. */
+int64_t taida_set_add_tagged(int64_t set_ptr, int64_t item, int64_t ekind) {
+    uint32_t ek = (uint32_t)ekind;
+    if (_wasm_set_contains_k(set_ptr, item, ek)) {
+        return set_ptr;  /* already present under pair semantics */
+    }
+    /* Clone the set, projecting each element's recorded kind into the
+       result, then append the new item under the caller's kind. */
+    int64_t *list = (int64_t *)(intptr_t)set_ptr;
+    int64_t len = list[1];
+    int64_t new_set = taida_set_new();
+    for (int64_t i = 0; i < len; i++) {
+        uint32_t eki = _wasm_elem_kind_at(list, i);
+        _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_set, eki);
+        new_set = taida_list_push(new_set, list[WASM_LIST_ELEMS + i]);
+    }
+    _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_set, ek);
+    new_set = taida_list_push(new_set, item);
+    return new_set;
+}
+
 int64_t taida_set_from_list(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
+    if (_wasm_elem_slot_is_array(list[2])) {
+        /* Kind-aware dedup over (value, recorded kind) pairs (mirror of
+           native taida_set_from_list). The resulting Set keeps per-element
+           kinds so later membership tests stay exact. The hash path engages
+           only when every element kind is hashable — Float or unknown kinds
+           fall back to the linear pair scan. */
+        int64_t new_set = taida_set_new();
+        _wasm_seen_k seen;
+        int all_h = 1;
+        for (int64_t i = 0; i < len && all_h; i++)
+            all_h = _wasm_ekind_hashable(list[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(list, i));
+        int use_hash = all_h && _wasm_seen_k_init(&seen, len);
+        for (int64_t i = 0; i < len; i++) {
+            int64_t item = list[WASM_LIST_ELEMS + i];
+            uint32_t ek = _wasm_elem_kind_at(list, i);
+            int dup;
+            if (use_hash) {
+                dup = !_wasm_seen_k_add(&seen, item, ek);
+            } else {
+                int64_t *ns = (int64_t *)(intptr_t)new_set;
+                int64_t nlen = ns[1];
+                dup = 0;
+                for (int64_t j = 0; j < nlen; j++) {
+                    if (_wasm_ekind_value_eq(ns[WASM_LIST_ELEMS + j], _wasm_elem_kind_at(ns, j), item, ek)) {
+                        dup = 1;
+                        break;
+                    }
+                }
+            }
+            if (!dup) {
+                _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_set, ek);
+                new_set = taida_list_push(new_set, item);
+            }
+        }
+        return new_set;
+    }
     int64_t set = taida_set_new();
     /* C23B-005: propagate the source list's elem_type_tag so the
        resulting Set's `list[2]` slot carries the primitive tag
@@ -3515,7 +4045,7 @@ int64_t taida_set_from_list(int64_t list_ptr) {
        would leave the Set with `elem_tag = -1` (UNKNOWN) and the
        structural dispatcher would false-match the large Int against a
        collection sentinel. */
-    taida_list_set_elem_tag(set, list[2]);
+    taida_list_set_elem_tag(set, _wasm_elem_tag_for_propagation(list));
     _wasm_seen seen;
     int use_hash = _wasm_list_all_hashable(list) && _wasm_seen_init(&seen, len);
     for (int64_t i = 0; i < len; i++) {
@@ -3527,19 +4057,36 @@ int64_t taida_set_from_list(int64_t list_ptr) {
 }
 
 /* W-4f: Set.remove(item) -> new Set without the item */
-int64_t taida_set_remove(int64_t set_ptr, int64_t item) {
+static int64_t taida_set_remove_k(int64_t set_ptr, int64_t item, uint32_t probe_ek) {
     int64_t *list = (int64_t *)(intptr_t)set_ptr;
     int64_t len = list[1];
+    if (_wasm_elem_slot_is_array(list[2])) {
+        /* Kind-aware removal (mirror of native): survivors keep their
+           recorded kinds; the probe's kind comes from the caller. */
+        int64_t new_set = taida_set_new();
+        for (int64_t i = 0; i < len; i++) {
+            uint32_t ek = _wasm_elem_kind_at(list, i);
+            if (!_wasm_ekind_value_eq(list[WASM_LIST_ELEMS + i], ek, item, probe_ek)) {
+                _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_set, ek);
+                new_set = taida_list_push(new_set, list[WASM_LIST_ELEMS + i]);
+            }
+        }
+        return new_set;
+    }
     int64_t result = taida_set_new();
     /* F54 tier 2: the result holds source elements only, so the source
        elem tag stays honest (mirrors native taida_set_remove). */
-    taida_list_set_elem_tag(result, list[2]);
+    taida_list_set_elem_tag(result, _wasm_elem_tag_for_propagation(list));
     for (int64_t i = 0; i < len; i++) {
-        if (!_wasm_value_eq(list[WASM_LIST_ELEMS + i], item)) {
+        if (!_wasm_ekind_value_eq(list[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(list, i), item, probe_ek)) {
             result = taida_list_push(result, list[WASM_LIST_ELEMS + i]);
         }
     }
     return result;
+}
+
+int64_t taida_set_remove(int64_t set_ptr, int64_t item) {
+    return taida_set_remove_k(set_ptr, item, WASM_EKIND_UNKNOWN);
 }
 
 /* ── F54 tier 2: numeric-domain aware Set×Set comparison ──────────
@@ -3584,8 +4131,29 @@ int64_t taida_set_union(int64_t set_a, int64_t set_b) {
     int64_t *b = (int64_t *)(intptr_t)set_b;
     int64_t a_len = a[1];
     int64_t b_len = b[1];
-    int64_t tag_a = a[2];
-    int64_t tag_b = b[2];
+    if (_wasm_elem_slot_is_array(a[2]) || _wasm_elem_slot_is_array(b[2])
+        || _wasm_elem_tags_cross(a, b)) {
+        /* Kind-aware linear union (mirror of native). Array-carrying sets
+           are literal-sized, so the O(|a|·|b|) pair scan keeps exact
+           (value, kind) semantics without a hash path; the result rebuilds
+           its own kind entries. */
+        int64_t result = taida_set_new();
+        for (int64_t i = 0; i < a_len; i++) {
+            uint32_t ek = _wasm_elem_kind_at(a, i);
+            _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)result, ek);
+            result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
+        }
+        for (int64_t i = 0; i < b_len; i++) {
+            uint32_t ek = _wasm_elem_kind_at(b, i);
+            if (!_wasm_set_contains_k(result, b[WASM_LIST_ELEMS + i], ek)) {
+                _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)result, ek);
+                result = taida_list_push(result, b[WASM_LIST_ELEMS + i]);
+            }
+        }
+        return result;
+    }
+    int64_t tag_a = _wasm_elem_tag_for_propagation(a);
+    int64_t tag_b = _wasm_elem_tag_for_propagation(b);
     /* F54 tier 2: b is a Set (already unique), so under a numeric-domain
      * cross the dup test only needs "is b[i] in a", compared in the
      * numeric domain. The result starts with the a-side tag; only a b
@@ -3611,13 +4179,15 @@ int64_t taida_set_union(int64_t set_a, int64_t set_b) {
             dup = taida_set_has(result, b[WASM_LIST_ELEMS + i]);
         }
         if (!dup) {
-            result = taida_list_push(result, b[WASM_LIST_ELEMS + i]);
             /* F54 tier 2: every actually-added b element stamps its tag
-               through the shared latch — an UNKNOWN-tagged result (empty-a
-               union) promotes to tag_b, a matching tag is a no-op, and a
-               genuine cross-domain add downgrades to HETEROGENEOUS
-               (mirrors native taida_set_union). */
+               through the shared latch — BEFORE the push (the latch's
+               materialise path indexes the element about to be pushed,
+               so a post-push call would mis-index the kind array). An
+               UNKNOWN-tagged result (empty-a union) promotes to tag_b;
+               genuine cross-tag unions are owned by the kind-aware
+               branch above (mirrors native taida_set_union). */
             taida_list_set_elem_tag(result, tag_b);
+            result = taida_list_push(result, b[WASM_LIST_ELEMS + i]);
         }
     }
     return result;
@@ -3628,8 +4198,23 @@ int64_t taida_set_intersect(int64_t set_a, int64_t set_b) {
     int64_t *a = (int64_t *)(intptr_t)set_a;
     int64_t a_len = a[1];
     int64_t *b = (int64_t *)(intptr_t)set_b;
-    int64_t tag_a = a[2];
-    int64_t tag_b = b[2];
+    if (_wasm_elem_slot_is_array(a[2]) || _wasm_elem_slot_is_array(b[2])
+        || _wasm_elem_tags_cross(a, b)) {
+        /* Kind-aware linear intersection (mirror of native; see union for
+           rationale). The result holds a-side elements only, projected with
+           their recorded kinds. */
+        int64_t result = taida_set_new();
+        for (int64_t i = 0; i < a_len; i++) {
+            uint32_t ek = _wasm_elem_kind_at(a, i);
+            if (_wasm_set_contains_k(set_b, a[WASM_LIST_ELEMS + i], ek)) {
+                _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)result, ek);
+                result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
+            }
+        }
+        return result;
+    }
+    int64_t tag_a = _wasm_elem_tag_for_propagation(a);
+    int64_t tag_b = _wasm_elem_tag_for_propagation(b);
     int numeric_cross = _wasm_set_numeric_cross(tag_a, tag_b);
     int64_t result = taida_set_new();
     /* F54 tier 2: the result holds a-side elements only, so the a tag
@@ -3658,8 +4243,22 @@ int64_t taida_set_diff(int64_t set_a, int64_t set_b) {
     int64_t *a = (int64_t *)(intptr_t)set_a;
     int64_t a_len = a[1];
     int64_t *b = (int64_t *)(intptr_t)set_b;
-    int64_t tag_a = a[2];
-    int64_t tag_b = b[2];
+    if (_wasm_elem_slot_is_array(a[2]) || _wasm_elem_slot_is_array(b[2])
+        || _wasm_elem_tags_cross(a, b)) {
+        /* Kind-aware linear difference (mirror of native; see union for
+           rationale). */
+        int64_t result = taida_set_new();
+        for (int64_t i = 0; i < a_len; i++) {
+            uint32_t ek = _wasm_elem_kind_at(a, i);
+            if (!_wasm_set_contains_k(set_b, a[WASM_LIST_ELEMS + i], ek)) {
+                _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)result, ek);
+                result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
+            }
+        }
+        return result;
+    }
+    int64_t tag_a = _wasm_elem_tag_for_propagation(a);
+    int64_t tag_b = _wasm_elem_tag_for_propagation(b);
     int numeric_cross = _wasm_set_numeric_cross(tag_a, tag_b);
     int64_t result = taida_set_new();
     /* F54 tier 2: the result holds a-side elements only, so the a tag
@@ -3687,7 +4286,20 @@ int64_t taida_set_diff(int64_t set_a, int64_t set_b) {
 int64_t taida_set_to_list(int64_t set_ptr) {
     int64_t *list = (int64_t *)(intptr_t)set_ptr;
     int64_t len = list[1];
+    if (_wasm_elem_slot_is_array(list[2])) {
+        /* Kind-aware clone: the list keeps the set's per-element kinds. */
+        int64_t result = taida_list_new();
+        for (int64_t i = 0; i < len; i++) {
+            uint32_t ek = _wasm_elem_kind_at(list, i);
+            _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)result, ek);
+            result = taida_list_push(result, list[WASM_LIST_ELEMS + i]);
+        }
+        return result;
+    }
     int64_t result = taida_list_new();
+    /* Propagate the source's single elem tag so primitive rendering of the
+       resulting list stays correct (mirrors the array-less native path). */
+    taida_list_set_elem_tag(result, _wasm_elem_tag_for_propagation(list));
     for (int64_t i = 0; i < len; i++) {
         result = taida_list_push(result, list[WASM_LIST_ELEMS + i]);
     }
@@ -3715,6 +4327,29 @@ int64_t taida_collection_has(int64_t ptr, int64_t item) {
     }
     /* Set/List: linear scan */
     return taida_set_has(ptr, item);
+}
+
+/* Tagged sibling (mirror of native): codegen supplies the probe argument's
+ * static kind so Set membership follows pair semantics; HashMaps keep their
+ * key-hash path (key kinds are a separate system). */
+int64_t taida_collection_has_tagged(int64_t ptr, int64_t item, int64_t ekind) {
+    if (_is_wasm_hashmap(ptr)) {
+        int64_t key_hash = taida_value_hash(item);
+        return taida_hashmap_has(ptr, key_hash, item);
+    }
+    return _wasm_set_contains_k(ptr, item, (uint32_t)ekind);
+}
+
+/* Tagged removal: the probe's static kind drives pair-semantics removal
+   on Sets (native mirror); HashMaps keep their key-hash path. */
+static int64_t taida_set_remove_k(int64_t set_ptr, int64_t item, uint32_t probe_ek); /* fwd */
+int64_t taida_collection_remove_tagged(int64_t ptr, int64_t item, int64_t ekind) {
+    if (_is_wasm_hashmap(ptr)) {
+        int64_t clone = _wasm_hashmap_clone(ptr);
+        int64_t key_hash = taida_value_hash(item);
+        return taida_hashmap_remove(clone, key_hash, item);
+    }
+    return taida_set_remove_k(ptr, item, (uint32_t)ekind);
 }
 
 /* .remove(key_or_item) — HashMap: clone + hash-based removal, Set: linear scan */

@@ -509,7 +509,7 @@ serverX <= BuildUnit(
     );
 }
 
-/// E32B-049: dead-pid staging cleanup must work on every Unix host. Linux
+/// Dead-pid staging cleanup must work on every Unix host. Linux
 /// uses `/proc/<pid>`; macOS / *BSD fall back to `kill(pid, 0)` + ESRCH.
 /// Both paths are exercised by picking an obviously unallocated pid and
 /// confirming the staging dir is removed before commit.
@@ -553,7 +553,7 @@ serverX <= BuildUnit(
     assert!(cleanup_log.contains("dead-pid"), "log={cleanup_log}");
 }
 
-/// E32B-049: a live foreign pid (the test process itself) must NOT be
+/// A live foreign pid (the test process itself) must NOT be
 /// classified as dead just because the descriptor staging belongs to
 /// another transaction. This pins the same `kill(pid, 0)` ESRCH-vs-OK
 /// distinction the macOS / *BSD path relies on.

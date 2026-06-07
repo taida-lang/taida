@@ -237,7 +237,7 @@ fn d28b_015_strof_oob_span_4backend_parity() {
 }
 
 /// Equivalence: strOf(span, raw) function-form == StrOf[span, raw]() mold-form
-/// for the same span and raw. Co-existence justified by D28B-001 naming Lock.
+/// for the same span and raw. Co-existence justified by the naming-convention lint.
 #[test]
 fn d28b_015_strof_mold_function_equivalence_4backend() {
     check_4backend("mold_function_equivalence");

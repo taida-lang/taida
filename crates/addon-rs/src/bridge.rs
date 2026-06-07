@@ -11,8 +11,8 @@
 //!
 //! Nothing in this module allocates bridge values directly — every
 //! construction goes through the host callback table, which keeps the
-//! "allocator unification" guarantee from `.dev/RC1_DESIGN.md` Phase 3
-//! Lock (single allocator = single free-er = no double-free).
+//! frozen ABI v1 "allocator unification" guarantee (single allocator =
+//! single free-er = no double-free).
 //!
 //! # Ownership model (quick reference)
 //!
@@ -100,9 +100,9 @@ impl<'a> BorrowedValue<'a> {
     ///
     /// Per the frozen ABI v1 contract the payload byte is strictly
     /// `0` (false) or `1` (true). Any other value is a malformed
-    /// input and yields `None` so the addon can treat it as a failure
-    /// (RC1B-109). The previous `!= 0` coercion silently mapped
-    /// `2..=255` to `true`, hiding bugs on the producer side.
+    /// input and yields `None` so the addon can treat it as a failure.
+    /// The previous `!= 0` coercion silently mapped `2..=255` to
+    /// `true`, hiding bugs on the producer side.
     pub fn as_bool(&self) -> Option<bool> {
         if self.raw.tag != TaidaAddonValueTag::Bool as u32 {
             return None;
@@ -537,9 +537,8 @@ mod tests {
         );
     }
 
-    // RC1B-109 regression: invalid bool payload (anything outside
-    // the 0/1 whitelist) must be rejected, not silently coerced to
-    // `true`.
+    // Regression: invalid bool payload (anything outside the 0/1
+    // whitelist) must be rejected, not silently coerced to `true`.
     #[test]
     fn borrowed_value_rejects_invalid_bool_payload_2() {
         let p = TaidaAddonBoolPayload { value: 2 };

@@ -97,6 +97,16 @@ pub struct Lowering {
     pub(crate) mold_defs: std::collections::HashMap<String, crate::parser::ClassLikeDef>,
     /// Enum definitions: enum_name -> variants in ordinal order
     pub(crate) enum_defs: std::collections::HashMap<String, Vec<String>>,
+    /// Value-tag track: enum_name -> stable type id (1-based; 0 means
+    /// "no aux"). Carried in the upper bits of per-element kind entries so
+    /// same-ordinal variants of different enums stay distinct at runtime.
+    pub(crate) enum_type_ids: std::collections::HashMap<String, i64>,
+    /// Value-tag track: variables bound by unmolding a Lax whose payload
+    /// kind is only known at runtime (mixed-list get / first / last ...).
+    /// Each carries a companion `__ekind__<name>` IR variable holding the
+    /// payload's recorded kind, which tagged poly comparisons consume.
+    /// Cleared per function body; a plain rebind of the name drops it.
+    pub(crate) shadow_kind_vars: std::collections::HashSet<String>,
     /// B11-6d: Inheritance parent map (child_name -> parent_name) for TypeExtends resolution.
     pub(crate) type_parents: std::collections::HashMap<String, String>,
     /// Mold 名 → solidify ヘルパー関数シンボル（mangled）
@@ -109,7 +119,7 @@ pub struct Lowering {
     param_type_check_funcs: std::collections::HashSet<String>,
     /// 戻り値が Float のユーザー定義関数名セット
     float_returning_funcs: std::collections::HashSet<String>,
-    /// NB-31: 戻り値が Int/Num のユーザー定義関数名セット
+    /// 戻り値が Int/Num のユーザー定義関数名セット
     int_returning_funcs: std::collections::HashSet<String>,
     /// BuchiPack/TypeInst を保持する変数名のセット（F-58 メソッド名衝突回避用）
     pack_vars: std::collections::HashSet<String>,
@@ -164,15 +174,15 @@ pub struct Lowering {
     /// When a name is here, stdlib_runtime_funcs dispatch for that name is skipped
     /// and the call is treated as a parameter/variable call instead.
     shadowed_net_builtins: std::collections::HashSet<String>,
-    /// NB-14: Parameter name -> IrVar holding the runtime type tag from the caller.
+    /// Parameter name -> IrVar holding the runtime type tag from the caller.
     /// Used to propagate Bool/Int distinction through function boundaries.
     /// Populated at function entry via taida_get_call_arg_tag().
     param_tag_vars: std::collections::HashMap<String, IrVar>,
-    /// NB-14: IrVar (CallUser result) -> IrVar (return type tag from that call).
+    /// IrVar (CallUser result) -> IrVar (return type tag from that call).
     /// Populated after CallUser by calling taida_get_return_tag().
     /// Used to propagate type tags through function return values.
     return_tag_vars: std::collections::HashMap<IrVar, IrVar>,
-    /// NB-14: When true, the current CallUser is in tail position (return value).
+    /// When true, the current CallUser is in tail position (return value).
     /// Skip get_return_tag to preserve C compiler tail call optimization (WASM/mutual recursion).
     in_tail_call_return: bool,
     /// Variable alias tracking for identity assignments (e.g., `h <= handler`).

@@ -1,8 +1,7 @@
 //! Taida Addon ABI v1 — frozen C ABI surface.
 //!
-//! This module defines the **frozen** ABI v1 contract referenced by
-//! `.dev/RC1_DESIGN.md` (Section C — ABI v1 freeze) and
-//! `.dev/RC1_IMPL_SPEC.md` (Phase 0 Frozen Contracts).
+//! This module is the canonical definition of the **frozen** ABI v1
+//! contract shared by the host loader and every Rust addon.
 //!
 //! Non-negotiable invariants (do not change without bumping the ABI version):
 //!
@@ -15,7 +14,7 @@
 //! 5. The descriptor pointer must remain valid for the lifetime of the loaded
 //!    addon library.
 //!
-//! Ownership freeze (RC1_DESIGN.md, Section D — Ownership freeze):
+//! Ownership freeze (ABI v1 contract):
 //!
 //! - Host -> addon: borrowed read-only views.
 //! - Addon -> host: addon-constructed owned values.
@@ -92,7 +91,7 @@ unsafe impl Sync for TaidaAddonFunctionV1 {}
 
 /// The descriptor returned by `taida_addon_get_v1`.
 ///
-/// Layout is frozen by RC1 design lock. New fields would require bumping
+/// Layout is frozen by the ABI v1 freeze. New fields would require bumping
 /// `TAIDA_ADDON_ABI_VERSION` and the entry symbol.
 #[repr(C)]
 pub struct TaidaAddonDescriptorV1 {
@@ -121,10 +120,10 @@ unsafe impl Sync for TaidaAddonDescriptorV1 {}
 
 /// Discriminant for [`TaidaAddonValueV1::tag`].
 ///
-/// Wire format is `u32` and is **frozen in Phase 3** (`.dev/RC1_DESIGN.md`,
-/// Phase 3 Lock — Value Bridge Concrete Layout). Do not renumber or
-/// reorder these variants without bumping [`TAIDA_ADDON_ABI_VERSION`] and
-/// the entry symbol name.
+/// Wire format is `u32` and is **frozen** as part of the ABI v1
+/// value-bridge layout. Do not renumber or reorder these variants
+/// without bumping [`TAIDA_ADDON_ABI_VERSION`] and the entry symbol
+/// name.
 ///
 /// Tag values 8 and above are reserved for future value kinds. Anything
 /// outside this set must be rejected at the boundary with
@@ -256,20 +255,19 @@ unsafe impl Sync for TaidaAddonPackPayload {}
 
 /// Host capability table v1.
 ///
-/// Per `.dev/RC1_DESIGN.md` Section G and Phase 3 Lock, this is the
-/// minimal surface an addon needs to build output values and errors that
-/// cross the bridge. **All bridge values are allocated by the host** —
-/// addons must not `malloc` / `Box::leak` values directly. This is how
-/// RC1B-103 is resolved: allocator unification means one free-er (the
-/// host) regardless of which side constructed the value.
+/// This is the minimal surface an addon needs to build output values
+/// and errors that cross the bridge. **All bridge values are allocated
+/// by the host** — addons must not `malloc` / `Box::leak` values
+/// directly. Allocator unification means one free-er (the host)
+/// regardless of which side constructed the value, which is what rules
+/// out cross-allocator double-frees.
 ///
-/// Phase 1 reserved 5 `*const c_void` slots here and documented them as
-/// "signature TBD in Phase 3". Phase 3 (this file) fills them with the
-/// concrete signatures listed below. The ABI version stays at `1`
-/// because the `taida-addon` crate and the host loader are updated in
-/// lockstep inside the same workspace.
+/// The initial ABI reservation used opaque `*const c_void` slots whose
+/// signatures were filled in later during the same v1 freeze; the ABI
+/// version remains `1` throughout because the `taida-addon` crate and the
+/// host loader were updated in lockstep inside the same workspace.
 ///
-/// Intentionally omitted (not in RC1 scope):
+/// Intentionally omitted from the v1 surface:
 ///
 /// - no logging hook
 /// - no async scheduler hook
@@ -346,15 +344,15 @@ unsafe impl Sync for TaidaHostV1 {}
 
 /// A value crossing the addon boundary.
 ///
-/// Layout is **frozen in Phase 3**. The header is `(tag: u32, _reserved:
-/// u32, payload: *mut c_void)` — identical byte shape to the Phase 1
-/// reservation, so Phase 1 addons that treated this as an opaque header
-/// keep working.
+/// Layout is **frozen as part of the ABI v1 value-bridge contract**. The
+/// header is `(tag: u32, _reserved: u32, payload: *mut c_void)`. Addons
+/// that treated this as an opaque header under the initial ABI reservation
+/// continue to work without change.
 ///
 /// Ownership: every `TaidaAddonValueV1` that crosses the bridge is
 /// host-allocated and host-freed. Addons obtain them via
 /// `TaidaHostV1::value_new_*` callbacks and never call `free` on them
-/// directly. See `.dev/RC1_DESIGN.md` Phase 3 Lock — Ownership contract.
+/// directly. This is the frozen ABI v1 ownership contract.
 #[repr(C)]
 pub struct TaidaAddonValueV1 {
     /// Tag identifying the value kind. See [`TaidaAddonValueTag`] for
@@ -368,9 +366,9 @@ pub struct TaidaAddonValueV1 {
 
 /// An error value crossing the addon boundary.
 ///
-/// Phase 3 locks the shape to `(code: u32, _reserved: u32, message:
-/// *const c_char)`. `message` is a nul-terminated UTF-8 C string owned
-/// by the host allocator.
+/// Shape is locked by the ABI v1 freeze: `(code: u32, _reserved: u32,
+/// message: *const c_char)`. `message` is a nul-terminated UTF-8 C string
+/// owned by the host allocator.
 #[repr(C)]
 pub struct TaidaAddonErrorV1 {
     pub code: u32,

@@ -185,16 +185,39 @@ pub const BUNDLED_PACKAGES: &[BundledPackageSpec] = &[
         name: "crypto",
         version: "a.1",
         class: BundledPackageClass::Runtime,
-        exports: &["sha256"],
+        exports: &[
+            "sha256",
+            "sha512",
+            "sha384",
+            "sha224",
+            "hmacSha256",
+            "constantTimeEquals",
+            "hexEncode",
+            "hexDecode",
+            "base64Encode",
+            "base64Decode",
+            "randomBytes",
+        ],
         stub_source: r#"// taida-lang/crypto — Core bundled crypto package
-// Current surface:
-//   sha256(value) -- SHA-256 lower-hex digest
+// Surface:
+//   sha256(value: Str|Bytes) -> Str          -- SHA-256 lower-hex digest (64)
+//   sha512(value: Str|Bytes) -> Str          -- SHA-512 lower-hex digest (128)
+//   sha384(value: Str|Bytes) -> Str          -- SHA-384 lower-hex digest (96)
+//   sha224(value: Str|Bytes) -> Str          -- SHA-224 lower-hex digest (56)
+//   hmacSha256(key: Str|Bytes, data: Str|Bytes) -> Str   -- RFC 2104 (64 hex)
+//   constantTimeEquals(a: Str|Bytes, b: Str|Bytes) -> Bool
+//   hexEncode(data: Str|Bytes) -> Str        -- lower-hex
+//   hexDecode(hex: Str) -> Lax[Bytes]        -- failure on invalid hex
+//   base64Encode(data: Str|Bytes) -> Str     -- RFC 4648 std alphabet + pad
+//   base64Decode(b64: Str) -> Lax[Bytes]     -- failure on invalid base64
+//   randomBytes(n: Int) -> Bytes             -- OS CSPRNG (profile-gated on WASM)
 //
 // Note:
-//   `sha256` is exposed via taida-lang/crypto import path only.
+//   These symbols are exposed via the taida-lang/crypto import path only.
 //   Prelude compatibility is intentionally not provided.
+//   `randomBytes` is unsupported on wasm-min / wasm-edge (compile-time reject).
 
-<<< @(sha256)
+<<< @(sha256, sha512, sha384, sha224, hmacSha256, constantTimeEquals, hexEncode, hexDecode, base64Encode, base64Decode, randomBytes)
 "#,
     },
     BundledPackageSpec {
@@ -420,7 +443,7 @@ mod tests {
         assert!(!is_core_bundled("someone-else", "os"));
     }
 
-    /// F54B-005 regression: removed symbols must not be resurrected by
+    /// Regression: removed symbols must not be resurrected by
     /// comment text. `dnsResolve` survives only inside a net stub comment
     /// describing its removal; the parsed export line must not list it.
     #[test]

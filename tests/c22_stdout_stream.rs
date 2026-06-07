@@ -85,7 +85,7 @@ fn stdout_debug_interleave_parity() {
 }
 
 /// `stdout(s)` must return the payload byte count (excluding the implicit
-/// `\n`). This is a long-standing C12-5 / FB-18 contract — C22 must not
+/// `\n`). This is a long-standing contract — the stream path must not
 /// silently drop it. We verify via a script that prints the returned count.
 #[test]
 fn stdout_returns_byte_count() {

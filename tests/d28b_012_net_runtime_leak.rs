@@ -106,14 +106,14 @@ fn read_fd_count(pid: u32) -> Option<u64> {
     Some(entries.count() as u64)
 }
 
-/// D28B-026: Read the kernel-assigned port from the server's stdout
+/// Read the kernel-assigned port from the server's stdout
 /// announce line. The fixture binds on port 0 with
 /// `TAIDA_NET_ANNOUNCE_PORT=1`, which causes
 /// `taida_net_h1_serve_connection` to emit
 /// `listening on 127.0.0.1:<port>\n` once bind+listen succeed.
 ///
 /// Polls the child's stdout for up to 20 s, returning the parsed port
-/// on success. Hardcoded ports are no longer used here -- D28B-026
+/// on success. Hardcoded ports are no longer used here -- this fixture
 /// switched to ephemeral-port + announce-line parsing to remove the
 /// flaky-collision risk under parallel `cargo test` and stale process
 /// scenarios.

@@ -58,7 +58,7 @@ fn assert_check_clean(source: &str, label: &str) {
     );
 }
 
-/// E30B-002 acceptance #1: a class-like (TypeDef) with a declare-only
+/// Acceptance #1: a class-like (TypeDef) with a declare-only
 /// function field accepts instantiation that omits the function field.
 /// (Pre-existing behaviour, regression guard.)
 #[test]
@@ -70,7 +70,7 @@ stdout(p.name)
     assert_check_clean(source, "typedef_declare_only");
 }
 
-/// E30B-002 acceptance #2: a Mold variant with a declare-only function
+/// Acceptance #2: a Mold variant with a declare-only function
 /// field accepts instantiation when only the regular fields are passed
 /// positionally. The declare-only fn field `transform: T => :T` must NOT
 /// be counted as a required positional `[]` argument.
@@ -86,7 +86,7 @@ stdout(f.name)
     assert_check_clean(source, "mold_declare_only");
 }
 
-/// E30B-002 acceptance #3: an Error variant with a declare-only function
+/// Acceptance #3: an Error variant with a declare-only function
 /// field (recovery hook) accepts instantiation when only the regular
 /// fields are passed.
 ///
@@ -107,7 +107,7 @@ stdout(err.msg)
     assert_check_clean(source, "error_declare_only");
 }
 
-/// E30B-002 acceptance #4: a Mold-derived inheritance variant with a
+/// Acceptance #4: a Mold-derived inheritance variant with a
 /// declare-only function field accepts instantiation when only the
 /// inherited regular fields are passed (the declare-only fn field on
 /// the child header is excluded from the required positional count).
@@ -124,7 +124,7 @@ stdout(g.item.toString())
     assert_check_clean(source, "inheritance_declare_only");
 }
 
-/// E30B-002 regression guard: a Mold definition that has **only** a
+/// Regression guard: a Mold definition that has **only** a
 /// declare-only function field still surfaces `[E1401]` "unbound type
 /// parameter" when an extra type-arg has no non-fn-field binding target.
 /// Phase 4 must not silently consume the extra type-arg with the

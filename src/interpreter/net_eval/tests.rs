@@ -2061,7 +2061,7 @@ fn test_http_serve_close_after_partial_head() {
     }
 }
 
-/// NB-3: Content-Length under 1 MiB but head + body exceeds 1 MiB → 413
+/// Content-Length under 1 MiB but head + body exceeds 1 MiB → 413
 /// The early reject condition must be `head_consumed + content_length > MAX_REQUEST_BUF`,
 /// not just `content_length > MAX_REQUEST_BUF`.
 #[test]
@@ -2138,7 +2138,7 @@ fn test_nb3_head_plus_body_exceeds_limit_returns_413() {
     }
 }
 
-/// NB-3: Content-Length that exactly fits (head + body == MAX_REQUEST_BUF) → 200 OK, not 413
+/// Content-Length that exactly fits (head + body == MAX_REQUEST_BUF) → 200 OK, not 413
 #[test]
 fn test_nb3_head_plus_body_exactly_fits_returns_200() {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -2235,7 +2235,7 @@ fn test_nb3_head_plus_body_exactly_fits_returns_200() {
     }
 }
 
-/// NB-28: Verify that timeoutMs causes the server to close an idle connection
+/// Verify that timeoutMs causes the server to close an idle connection
 /// (connects but sends no data). With the "idle = no budget" rule, this idle
 /// connection should be cleanly closed without a 400 and without consuming
 /// the request budget.

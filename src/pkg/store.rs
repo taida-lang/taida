@@ -252,7 +252,7 @@ impl GlobalStore {
     }
 
     /// Validate that a path component does not contain traversal sequences.
-    /// Rejects `..`, `/`, `\`, and empty strings (RCB-307 / SEC-009).
+    /// Rejects `..`, `/`, `\`, and empty strings (path-traversal hardening).
     fn validate_path_component(component: &str, label: &str) -> Result<(), String> {
         if component.is_empty() {
             return Err(format!("{} must not be empty", label));
@@ -304,7 +304,7 @@ impl GlobalStore {
     /// (`stage_invalidation` + `commit_invalidation` + `rollback_invalidation`)
     /// so a failed fetch can restore the previous install.
     ///
-    /// Path traversal is rejected up front (RCB-307 / SEC-009). Returns `Ok(())`
+    /// Path traversal is rejected up front. Returns `Ok(())`
     /// when the directory does not exist -- invalidation is idempotent.
     pub fn invalidate_package(&self, org: &str, name: &str, version: &str) -> Result<(), String> {
         Self::validate_path_component(org, "org")?;

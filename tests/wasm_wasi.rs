@@ -1649,7 +1649,7 @@ fn test_c12b_023_wasm_wasi_rejects_concat_tag() {
 // C25B-026 / Phase 5-G: wasm-wasi linear-memory growth strategy tests
 // ---------------------------------------------------------------------------
 
-/// C25B-026 Phase 5-G: compile a minimal wasm-wasi program and invoke an
+/// Compile a minimal wasm-wasi program and invoke an
 /// exported runtime helper, returning its decimal i32 result parsed from
 /// wasmtime stdout. Returns `None` if wasmtime is unavailable or the build /
 /// invoke step fails — the caller then skips the assertion rather than
@@ -1687,7 +1687,7 @@ fn invoke_wasm_i32(
         .ok()
 }
 
-/// C25B-026 Phase 5-G regression: `wasm_arena_enter` + `wasm_arena_leave`
+/// Regression: `wasm_arena_enter` + `wasm_arena_leave`
 /// must release every allocation made inside the scope.
 ///
 /// The hand-written `wasm_arena_roundtrip_test(iters, inner)` helper in
@@ -1772,7 +1772,7 @@ fn wasm_wasi_arena_release_is_bounded() {
     let _ = std::fs::remove_file(&wasm_path);
 }
 
-/// C25B-026 Phase 5-G: `TAIDA_WASM_INITIAL_PAGES` / `TAIDA_WASM_MAX_PAGES`
+/// `TAIDA_WASM_INITIAL_PAGES` / `TAIDA_WASM_MAX_PAGES`
 /// env vars must propagate into the emitted wasm memory section so that a
 /// caller who knows their workload's linear-memory footprint can pre-allocate
 /// pages (avoiding per-alloc `memory.grow` calls) and cap maximum growth
@@ -1854,7 +1854,7 @@ fn wasm_wasi_memory_config_env_vars_propagate() {
     let _ = std::fs::remove_file(&wasm_path);
 }
 
-/// C25B-026 Phase 5-G: guard against silent regressions in the runtime
+/// Guard against silent regressions in the runtime
 /// linker that would strip the arena helpers under `--gc-sections`. The
 /// program never calls them; only the `--export=` flags emitted by
 /// `wasm_arena_export_flags()` keep them alive. A failure here points at

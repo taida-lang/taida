@@ -53,6 +53,29 @@ use std::collections::{HashMap, HashSet};
 const RESERVED_INTERNAL_FIELD_PREFIX: &str = "__";
 const MAX_CALL_ARGUMENTS: usize = 256;
 
+/// Build-driver descriptor constructor names (`taida-lang/build`).
+///
+/// These five names denote build-driver descriptors consumed by
+/// `taida build --unit / --plan / --all-units`, **not** ordinary runtime
+/// values. The descriptor build path parses the entry module and matches
+/// these `Expr::TypeInst` names directly (see `run_descriptor_build_driver`
+/// in `src/main.rs`), bypassing the type checker entirely. When a program
+/// is instead run / checked / single-target-built, the checker must reject
+/// any attempt to use a descriptor value in a runtime position (`[E1532]`).
+///
+/// The names are reserved by the build driver regardless of whether
+/// `taida-lang/build` is imported, so an importless `BuildUnit(...)` and an
+/// imported one are detected identically. A user-declared type that shadows
+/// one of these names (a class-like / mold definition in the same program)
+/// is *not* treated as a descriptor — see `is_descriptor_type_name`.
+const BUILD_DESCRIPTOR_NAMES: [&str; 5] = [
+    "BuildUnit",
+    "BuildPlan",
+    "AssetBundle",
+    "RouteAsset",
+    "BuildHook",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CageBranch {
     Js,
@@ -174,6 +197,73 @@ impl FunctionHintDiagnostic {
     }
 }
 
+/// Argument-shape category of a `taida-lang/crypto` export. Drives the
+/// per-symbol `[E1506]` argument-type checks and the registered function
+/// signature (return type + arity).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CryptoSym {
+    /// 1 arg `Str | Bytes` -> `Str` (lowercase hex digest).
+    /// sha256 / sha512 / sha384 / sha224.
+    Hash,
+    /// 2 args `Str | Bytes` (key, data) -> `Str` (hex). hmacSha256.
+    Hmac,
+    /// 2 args `Str | Bytes` -> `Bool`. constantTimeEquals.
+    Equals,
+    /// 1 arg `Str | Bytes` -> `Str`. hexEncode / base64Encode.
+    Encode,
+    /// 1 arg `Str` -> `Lax[Bytes]`. hexDecode / base64Decode.
+    Decode,
+    /// 1 arg `Int` -> `Bytes`. randomBytes.
+    Random,
+}
+
+impl CryptoSym {
+    /// Map an export name to its argument-shape category. Returns `None`
+    /// for names that are not part of the crypto surface (so a typo'd
+    /// import still routes through the uniform unknown-symbol diagnostic).
+    fn from_export(name: &str) -> Option<Self> {
+        Some(match name {
+            "sha256" | "sha512" | "sha384" | "sha224" => CryptoSym::Hash,
+            "hmacSha256" => CryptoSym::Hmac,
+            "constantTimeEquals" => CryptoSym::Equals,
+            "hexEncode" | "base64Encode" => CryptoSym::Encode,
+            "hexDecode" | "base64Decode" => CryptoSym::Decode,
+            "randomBytes" => CryptoSym::Random,
+            _ => return None,
+        })
+    }
+
+    /// Registered return type of the symbol.
+    fn return_type(self) -> Type {
+        match self {
+            CryptoSym::Hash | CryptoSym::Hmac | CryptoSym::Encode => Type::Str,
+            CryptoSym::Equals => Type::Bool,
+            CryptoSym::Decode => Type::Generic("Lax".to_string(), vec![Type::Bytes]),
+            CryptoSym::Random => Type::Bytes,
+        }
+    }
+
+    /// Maximum arity (parameter count upper bound).
+    fn max_arity(self) -> usize {
+        match self {
+            CryptoSym::Hmac | CryptoSym::Equals => 2,
+            _ => 1,
+        }
+    }
+}
+
+/// Position context for the build-descriptor runtime-use pass ([E1532]).
+///
+/// `Allowed` marks the three positions where a build descriptor may appear
+/// (a top-level export value, a descriptor field, a top-level binding RHS);
+/// `Runtime` marks every other position, where a descriptor value is a
+/// misuse and is rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DescriptorUseCtx {
+    Allowed,
+    Runtime,
+}
+
 /// Type checker state.
 pub struct TypeChecker {
     pub registry: TypeRegistry,
@@ -189,6 +279,10 @@ pub struct TypeChecker {
     func_param_types: HashMap<String, Vec<Type>>,
     /// Imported local names for `taida-lang/crypto::sha256`.
     crypto_sha256_funcs: HashSet<String>,
+    /// Imported local names for every `taida-lang/crypto` symbol, mapped to
+    /// the per-symbol argument-shape validator (hash / hmac / encode / decode
+    /// / random / equals). Drives the generalized `[E1506]` argument checks.
+    crypto_funcs: HashMap<String, CryptoSym>,
     /// Function definitions retained for expected-type body inference.
     func_defs: HashMap<String, FuncDef>,
     /// Scope depth where a function name was bound as the function value.
@@ -248,6 +342,36 @@ pub struct TypeChecker {
     current_func_type_params: Vec<Vec<TypeParam>>,
     /// Re-entrancy guard for expected-type named function body inference.
     hinted_func_stack: Vec<String>,
+    /// Top-level variable names whose bound value is a build-driver
+    /// descriptor (`BuildUnit` / `BuildPlan` / `AssetBundle` / `RouteAsset`
+    /// / `BuildHook`). Populated during the descriptor-usage pass so that a
+    /// descriptor reached through a `name <= BuildUnit(...)` binding is still
+    /// recognised when `name` is later used in a runtime position. Bindings
+    /// are the only allow-listed indirection (they let a descriptor reach a
+    /// top-level export); any *other* use of such a name is rejected with
+    /// `[E1532]`.
+    descriptor_binding_names: HashSet<String>,
+    /// Names user-declared as class-like / mold types in the current program
+    /// that collide with a reserved descriptor name. Such a name resolves to
+    /// the user's own type, not a build descriptor, so it is excluded from
+    /// `[E1532]` detection.
+    descriptor_shadow_names: HashSet<String>,
+    /// Names currently shadowed by a function parameter / lambda parameter /
+    /// local binding while the `[E1532]` descriptor-use pass walks a nested
+    /// scope. A local `unit: Str` argument must not be mistaken for a
+    /// same-named top-level `unit <= BuildUnit(...)` binding. Saved and
+    /// restored at every scope boundary (function body, lambda, error
+    /// ceiling, branch arm).
+    descriptor_scope_shadows: HashSet<String>,
+    /// While `infer_expr_type` descends into a `FuncCall` that is itself
+    /// a pipeline stage (`data => f(...)`), this holds the *previous
+    /// stage's* result type — the value the runtime injects as the
+    /// implicit first argument when the stage call carries no
+    /// placeholder. Consumed (taken) by the FuncCall arm so calls nested
+    /// inside the stage's arguments do not inherit it; arity *and* type
+    /// validation must count / check that injected argument. `None`
+    /// outside pipeline stages.
+    pipeline_stage_injected_type: Option<Type>,
     /// Typed HIR / expression type table. `infer_expr_type` records
     /// every observed `Expr` here so codegen lowering can answer
     /// "is this expression Bool?" by looking up the recorded type.
@@ -324,6 +448,7 @@ impl TypeChecker {
             func_param_counts: HashMap::new(),
             func_param_types: HashMap::new(),
             crypto_sha256_funcs: HashSet::new(),
+            crypto_funcs: HashMap::new(),
             func_defs: HashMap::new(),
             func_def_scope_depths: HashMap::new(),
             generic_func_defs: HashMap::new(),
@@ -347,6 +472,10 @@ impl TypeChecker {
             host_capability_manifest: None,
             current_func_type_params: Vec::new(),
             hinted_func_stack: Vec::new(),
+            descriptor_binding_names: HashSet::new(),
+            descriptor_shadow_names: HashSet::new(),
+            descriptor_scope_shadows: HashSet::new(),
+            pipeline_stage_injected_type: None,
             typed_expr_table: super::typed_hir::TypedExprTable::new(),
         };
         // C19B-002 (import-less): the C19 interactive variants are core-bundled
@@ -1451,8 +1580,172 @@ impl TypeChecker {
         matches!(ty, Type::Str | Type::Bytes)
     }
 
-    fn validate_crypto_sha256_call(&mut self, name: &str, args: &[Expr], span: &Span) {
-        for (i, arg) in args.iter().take(1).enumerate() {
+    /// Per-symbol argument-shape validator for the generalized
+    /// `taida-lang/crypto` surface. Mirrors `validate_crypto_sha256_call`'s
+    /// `[E1506]` diagnostics but is parameterized over the symbol kind so
+    /// each function (hash / hmac / encode / decode / random / equals)
+    /// enforces its own arity and per-argument type rule.
+    fn validate_crypto_call(
+        &mut self,
+        name: &str,
+        kind: CryptoSym,
+        args: &[Expr],
+        span: &Span,
+        injected_first_arg: Option<&Type>,
+    ) {
+        let pipeline_injects_first_arg = injected_first_arg.is_some();
+        let (arity, expected_label): (usize, &str) = match kind {
+            // 1 arg: Str | Bytes
+            CryptoSym::Hash | CryptoSym::Encode => (1, "Str or Bytes"),
+            // 1 arg: Str
+            CryptoSym::Decode => (1, "Str"),
+            // 1 arg: Int
+            CryptoSym::Random => (1, "Int"),
+            // 2 args: Str | Bytes each
+            CryptoSym::Hmac | CryptoSym::Equals => (2, "Str or Bytes"),
+        };
+
+        // Reject an arity shortfall outright: crypto builtins have a fixed
+        // ABI on every backend, so a missing argument must never reach
+        // lowering (the interpreter guards at runtime; native / WASM expect
+        // the full argument list). A placeholder-free pipeline stage call
+        // receives the piped value as an implicit first argument, so count
+        // it as supplied. Hole-bearing calls are partial application and
+        // are slot-checked by the [E1505] pass instead.
+        let effective_args = args.len() + usize::from(pipeline_injects_first_arg);
+        let has_hole = args.iter().any(|a| matches!(a, Expr::Hole(_)));
+        if effective_args < arity && !has_hole {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1301] Function '{}' expects exactly {} argument(s), got {}. Hint: Pass the missing argument(s); crypto functions have a fixed arity.",
+                    name, arity, effective_args
+                ),
+                span: span.clone(),
+            });
+        }
+        // The excess side: a non-pipeline call with too many arguments is
+        // already rejected by the general per-function arity check, but that
+        // check counts only the written arguments — a pipeline stage call
+        // that looks complete on paper still overflows the fixed ABI once
+        // the injected pipe value is counted (the lowered call would carry
+        // arity+1 values). Reject it here so no backend sees it.
+        if pipeline_injects_first_arg && effective_args > arity && !has_hole {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1301] Function '{}' expects exactly {} argument(s), got {} (the piped value counts as the first argument). Hint: Remove the extra argument(s); crypto functions have a fixed arity.",
+                    name, arity, effective_args
+                ),
+                span: span.clone(),
+            });
+        }
+
+        // The injected pipe value *is* the first argument — apply the same
+        // per-symbol type rule to it that the written arguments get below.
+        // Unknown stays permissive, matching the written-argument loop.
+        let type_ok = |actual_ty: &Type| match kind {
+            CryptoSym::Hash | CryptoSym::Encode | CryptoSym::Hmac | CryptoSym::Equals => {
+                Self::is_crypto_hash_input_type(actual_ty)
+            }
+            CryptoSym::Decode => matches!(actual_ty, Type::Str),
+            CryptoSym::Random => matches!(actual_ty, Type::Int),
+        };
+        if let Some(injected_ty) = injected_first_arg
+            && *injected_ty != Type::Unknown
+            && !type_ok(injected_ty)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1506] Argument 1 of '{}' has type {}, expected {} (the piped value is the first argument).",
+                    name, injected_ty, expected_label
+                ),
+                span: span.clone(),
+            });
+        }
+
+        // Written arguments fill the slots after the injected one, so cap
+        // the walk at the remaining arity and report 1-based positions
+        // shifted by the injection.
+        let written_slots = arity.saturating_sub(usize::from(pipeline_injects_first_arg));
+        let position_base = 1 + usize::from(pipeline_injects_first_arg);
+        for (i, arg) in args.iter().take(written_slots).enumerate() {
+            if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                continue;
+            }
+            let actual_ty = self.infer_expr_type(arg);
+            if actual_ty == Type::Unknown {
+                continue;
+            }
+            if !type_ok(&actual_ty) {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1506] Argument {} of '{}' has type {}, expected {}.",
+                        i + position_base,
+                        name,
+                        actual_ty,
+                        expected_label
+                    ),
+                    span: span.clone(),
+                });
+            }
+        }
+    }
+
+    fn validate_crypto_sha256_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        span: &Span,
+        injected_first_arg: Option<&Type>,
+    ) {
+        let pipeline_injects_first_arg = injected_first_arg.is_some();
+        // Same fixed-arity rule as `validate_crypto_call`: a missing
+        // argument must never reach lowering. A placeholder-free pipeline
+        // stage call (`data => sha256()`) receives the piped value as its
+        // implicit first argument and is therefore complete — and for the
+        // same reason a stage call with a written argument is one over.
+        if args.is_empty() && !pipeline_injects_first_arg {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1301] Function '{}' expects exactly 1 argument(s), got 0. Hint: Pass the missing argument(s); crypto functions have a fixed arity.",
+                    name
+                ),
+                span: span.clone(),
+            });
+        }
+        if pipeline_injects_first_arg
+            && !args.is_empty()
+            && !args.iter().any(|a| matches!(a, Expr::Hole(_)))
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1301] Function '{}' expects exactly 1 argument(s), got {} (the piped value counts as the first argument). Hint: Remove the extra argument(s); crypto functions have a fixed arity.",
+                    name,
+                    args.len() + 1
+                ),
+                span: span.clone(),
+            });
+        }
+        // The injected pipe value is the single argument — apply the same
+        // Str | Bytes rule the written argument gets. Unknown stays
+        // permissive, matching the written-argument loop.
+        if let Some(injected_ty) = injected_first_arg
+            && *injected_ty != Type::Unknown
+            && !Self::is_crypto_hash_input_type(injected_ty)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1506] Argument 1 of '{}' has type {}, expected Str or Bytes \
+                     (the piped value is the first argument). \
+                     Hint: use `Bytes[...]()` and unmold the Lax value with `>=>` before hashing raw bytes.",
+                    name, injected_ty
+                ),
+                span: span.clone(),
+            });
+        }
+        // With the injection in place the single slot is taken; without it
+        // the written argument fills slot 1.
+        let written_slots = usize::from(!pipeline_injects_first_arg);
+        for (i, arg) in args.iter().take(written_slots).enumerate() {
             if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
                 continue;
             }
@@ -1667,7 +1960,7 @@ impl TypeChecker {
         matches!(ty, Type::Generic(name, _) if name == "Async")
     }
 
-    /// RCB-50: Check whether a type contains an unresolved type variable.
+    /// Check whether a type contains an unresolved type variable.
     ///
     /// A `Named` type that is not registered in the type registry is
     /// an unresolved generic type parameter (e.g. `T`, `U`). When
@@ -1730,7 +2023,7 @@ impl TypeChecker {
         }
     }
 
-    /// RCB-50: Check whether a type is a mold-defined Named type.
+    /// Check whether a type is a mold-defined Named type.
     ///
     /// Custom mold instantiations (e.g. `AlwaysFail[x]()`) return
     /// `Type::Named("AlwaysFail")` from `infer_expr_type`, but the
@@ -2396,7 +2689,7 @@ impl TypeChecker {
     /// If `span` is provided and the name already exists in the current scope,
     /// a compile error is reported (same-scope redefinition is forbidden).
     /// Shadowing across scopes (inner scope redefines outer) is allowed.
-    /// RCB-201: Validate that all imported symbols are actually exported by the target module.
+    /// Validate that all imported symbols are actually exported by the target module.
     fn validate_import_symbols(&mut self, imp: &crate::parser::ImportStmt) {
         use crate::parser::Statement as S;
 
@@ -3328,6 +3621,18 @@ impl TypeChecker {
             self.check_mold_errors_in_stmt(stmt);
         }
 
+        // Build-descriptor runtime-use pass ([E1532]): reject build-driver
+        // descriptors (`BuildUnit` / `BuildPlan` / `AssetBundle` /
+        // `RouteAsset` / `BuildHook`) used as ordinary runtime values. The
+        // descriptor build path (`taida build --unit / --plan / --all-units`)
+        // parses + matches the AST directly without invoking the checker, so
+        // this pass only ever runs when a descriptor module is `run` /
+        // `way check`'d / single-target built — i.e. exactly the cases where a
+        // descriptor is being treated as a runtime value. Allow-listed
+        // positions (top-level export value, descriptor field, binding RHS)
+        // are threaded through `DescriptorUseCtx`.
+        self.check_descriptor_runtime_use(program);
+
         // C12-3 / FB-8: promote non-tail mutual recursion to a
         // compile-time error so programs that would overflow the stack at
         // runtime (`Maximum call depth exceeded`) are rejected up front.
@@ -3807,11 +4112,18 @@ impl TypeChecker {
                 // Core bundled package signatures (imported symbol path).
                 if imp.path == "taida-lang/crypto" {
                     for sym in &imp.symbols {
-                        if sym.name == "sha256" {
+                        if let Some(kind) = CryptoSym::from_export(&sym.name) {
                             let local_name = sym.alias.as_ref().unwrap_or(&sym.name).clone();
-                            self.func_types.insert(local_name.clone(), Type::Str);
-                            self.func_param_counts.insert(local_name.clone(), 1);
-                            self.crypto_sha256_funcs.insert(local_name);
+                            self.func_types
+                                .insert(local_name.clone(), kind.return_type());
+                            self.func_param_counts
+                                .insert(local_name.clone(), kind.max_arity());
+                            self.crypto_funcs.insert(local_name.clone(), kind);
+                            // sha256 keeps its dedicated set for the unchanged
+                            // legacy [E1506] message wording.
+                            if sym.name == "sha256" {
+                                self.crypto_sha256_funcs.insert(local_name);
+                            }
                         }
                     }
                 } else if imp.path == "taida-lang/net" {
@@ -5091,6 +5403,284 @@ defaulted fields must be provided via `()`",
             Expr::FieldAccess(obj, _, _) => self.check_mold_errors_in_expr_ctx(obj, false),
             Expr::Lambda(_, body, _) => self.check_mold_errors_in_expr_ctx(body, false),
             // Leaf expressions — no recursion needed
+            _ => {}
+        }
+    }
+
+    // ── Build-descriptor runtime-use pass ([E1532]) ──────────────────
+    //
+    // `BuildUnit` / `BuildPlan` / `AssetBundle` / `RouteAsset` / `BuildHook`
+    // are build-driver descriptors, not runtime values. They are valid only
+    // in a handful of positions; everywhere else they are rejected so a
+    // descriptor cannot leak into a runtime computation (where the backends
+    // would treat its `__type`-tagged pack as an ordinary pack — the
+    // behaviour the docs previously only discouraged in prose).
+    //
+    // Allow-listed positions (`DescriptorUseCtx::Allowed`):
+    //   - a top-level `<<<` export value (a descriptor *is* the artefact the
+    //     build driver consumes),
+    //   - a field value of an enclosing descriptor (`BuildUnit.assets` holding
+    //     `RouteAsset(...)`, `BuildPlan.units` holding `BuildUnit` references,
+    //     etc. — the nested-descriptor shape the driver walks),
+    //   - the right-hand side of a top-level binding (`name <= BuildUnit(...)`),
+    //     which exists purely so the value can reach an export.
+    // Every other position (`DescriptorUseCtx::Runtime`) is rejected:
+    //   builtin args (`stdout(unit)`), user-function args, conversion / mold
+    //   args, operator operands, field / method access, list elements outside
+    //   a descriptor field, etc.
+
+    fn is_descriptor_type_name(&self, name: &str) -> bool {
+        BUILD_DESCRIPTOR_NAMES.contains(&name) && !self.descriptor_shadow_names.contains(name)
+    }
+
+    /// If `expr` evaluates to a build descriptor, return its descriptor type
+    /// name. Recognises a direct `Name(...)` constructor and a top-level
+    /// binding name previously bound to a descriptor (the only allow-listed
+    /// indirection). Anything wrapped further (in a pack, list, call, ...)
+    /// is intentionally *not* unwrapped here — that wrapping is itself the
+    /// runtime use we want to flag at the wrapper.
+    fn descriptor_value_name(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::TypeInst(name, _, _) if self.is_descriptor_type_name(name) => Some(name.clone()),
+            Expr::Ident(name, _)
+                if self.descriptor_binding_names.contains(name)
+                    && !self.descriptor_scope_shadows.contains(name) =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn push_descriptor_use_error(&mut self, descriptor_name: &str, span: &Span) {
+        self.errors.push(TypeError {
+            message: format!(
+                "[E1532] '{}' is a build-driver descriptor, not a runtime value, and cannot be \
+                 used in this position. Build descriptors (BuildUnit / BuildPlan / AssetBundle / \
+                 RouteAsset / BuildHook) are consumed only by `taida build --unit` / `--plan` / \
+                 `--all-units`. Hint: bind a descriptor to a name and export it with `<<<`, or nest \
+                 it inside another descriptor's field (e.g. a `RouteAsset` inside `BuildUnit.assets`). \
+                 See docs/api/build_descriptors.md and docs/reference/diagnostic_codes.md [E1532].",
+                descriptor_name
+            ),
+            span: span.clone(),
+        });
+    }
+
+    fn check_descriptor_runtime_use(&mut self, program: &Program) {
+        // Pre-pass 1: a user-declared class-like / mold type that shadows a
+        // reserved descriptor name resolves to the user's type, so exclude it.
+        self.descriptor_shadow_names.clear();
+        for stmt in &program.statements {
+            if let Statement::ClassLikeDef(cl) = stmt
+                && BUILD_DESCRIPTOR_NAMES.contains(&cl.name.as_str())
+            {
+                self.descriptor_shadow_names.insert(cl.name.clone());
+            }
+        }
+
+        // Pre-pass 2: collect top-level bindings whose RHS is a descriptor so
+        // `name <= BuildUnit(...)` then `<<< name` is recognised. Only the
+        // outermost descriptor binding form is tracked (the allow-listed
+        // indirection); the RHS itself is still validated as a binding context.
+        self.descriptor_binding_names.clear();
+        self.descriptor_scope_shadows.clear();
+        for stmt in &program.statements {
+            if let Statement::Assignment(assign) = stmt
+                && self.descriptor_value_name(&assign.value).is_some()
+            {
+                self.descriptor_binding_names.insert(assign.target.clone());
+            }
+        }
+
+        for stmt in &program.statements {
+            self.check_descriptor_use_in_stmt(stmt, true);
+        }
+    }
+
+    fn check_descriptor_use_in_stmt(&mut self, stmt: &Statement, top_level: bool) {
+        match stmt {
+            // A *top-level* binding RHS is allow-listed when it is directly a
+            // descriptor value (`name <= BuildUnit(...)`) — that is the form
+            // that carries the descriptor toward an export. The descriptor's
+            // own fields are then checked in `Allowed` context (nested
+            // descriptors). Any other RHS (`name <= stdout(unit)`,
+            // `name <= @(u <= BuildUnit(...))`) is a runtime computation, so it
+            // is walked in `Runtime` and a descriptor wrapped inside is flagged.
+            // Inside a function body / handler / branch a binding cannot reach
+            // a top-level export, so its RHS is always `Runtime`.
+            Statement::Assignment(assign) => {
+                let rhs_ctx = if top_level && self.descriptor_value_name(&assign.value).is_some() {
+                    DescriptorUseCtx::Allowed
+                } else {
+                    DescriptorUseCtx::Runtime
+                };
+                self.check_descriptor_use_in_expr(&assign.value, rhs_ctx);
+                if !top_level {
+                    // A nested-scope binding shadows a same-named top-level
+                    // descriptor binding for the rest of the enclosing scope
+                    // (the RHS above still sees the outer name).
+                    self.descriptor_scope_shadows.insert(assign.target.clone());
+                }
+            }
+            Statement::Expr(e) => {
+                self.check_descriptor_use_in_expr(e, DescriptorUseCtx::Runtime);
+            }
+            Statement::FuncDef(fd) => {
+                // A descriptor returned / used inside a function body is a
+                // runtime use (functions are not the descriptor build path).
+                // Parameters (and the nested function's own name) shadow
+                // same-named top-level descriptor bindings within the body.
+                if !top_level {
+                    self.descriptor_scope_shadows.insert(fd.name.clone());
+                }
+                let saved = self.descriptor_scope_shadows.clone();
+                for p in &fd.params {
+                    self.descriptor_scope_shadows.insert(p.name.clone());
+                }
+                for s in &fd.body {
+                    self.check_descriptor_use_in_stmt(s, false);
+                }
+                self.descriptor_scope_shadows = saved;
+            }
+            Statement::ErrorCeiling(ec) => {
+                let saved = self.descriptor_scope_shadows.clone();
+                self.descriptor_scope_shadows.insert(ec.error_param.clone());
+                for s in &ec.handler_body {
+                    self.check_descriptor_use_in_stmt(s, false);
+                }
+                self.descriptor_scope_shadows = saved;
+            }
+            Statement::UnmoldForward(u) => {
+                self.check_descriptor_use_in_expr(&u.source, DescriptorUseCtx::Runtime);
+                if !top_level {
+                    self.descriptor_scope_shadows.insert(u.target.clone());
+                }
+            }
+            Statement::UnmoldBackward(u) => {
+                self.check_descriptor_use_in_expr(&u.source, DescriptorUseCtx::Runtime);
+                if !top_level {
+                    self.descriptor_scope_shadows.insert(u.target.clone());
+                }
+            }
+            // Exports name symbols (`<<< @(name)`); the bound value was
+            // validated at its binding site as the allow-listed RHS. Class /
+            // enum / import statements carry no descriptor value positions.
+            _ => {}
+        }
+    }
+
+    fn check_descriptor_use_in_expr(&mut self, expr: &Expr, ctx: DescriptorUseCtx) {
+        // Flag a descriptor value sitting in a runtime position before
+        // recursing — the wrapper position is where the misuse lives.
+        if ctx == DescriptorUseCtx::Runtime
+            && let Some(descriptor_name) = self.descriptor_value_name(expr)
+        {
+            self.push_descriptor_use_error(&descriptor_name, expr.span());
+            // A bare descriptor `Ident` has no children worth recursing into;
+            // for a `TypeInst` we still recurse below so a misuse nested in a
+            // field value is also reported.
+        }
+
+        match expr {
+            // Descriptor constructor: its own field values are the
+            // allow-listed nested-descriptor slots, so they are checked in
+            // `Allowed` context (a `RouteAsset` inside `BuildUnit.assets` is
+            // valid). Non-descriptor named constructors get `Runtime` fields.
+            Expr::TypeInst(name, fields, _) => {
+                let field_ctx = if self.is_descriptor_type_name(name) {
+                    DescriptorUseCtx::Allowed
+                } else {
+                    DescriptorUseCtx::Runtime
+                };
+                for f in fields {
+                    self.check_descriptor_use_in_expr(&f.value, field_ctx);
+                }
+            }
+            // Anonymous packs and lists pass their context through: a list
+            // that is itself a descriptor field (`assets <= @[RouteAsset(...)]`)
+            // keeps the descriptor field allowance for its elements, while a
+            // runtime list rejects descriptor elements.
+            Expr::BuchiPack(fields, _) => {
+                for f in fields {
+                    self.check_descriptor_use_in_expr(&f.value, ctx);
+                }
+            }
+            Expr::ListLit(items, _) => {
+                for item in items {
+                    self.check_descriptor_use_in_expr(item, ctx);
+                }
+            }
+            // Every remaining compound position is a runtime computation:
+            // descend with `Runtime` so a descriptor anywhere inside is flagged.
+            Expr::FuncCall(callee, args, _) => {
+                self.check_descriptor_use_in_expr(callee, DescriptorUseCtx::Runtime);
+                for arg in args {
+                    self.check_descriptor_use_in_expr(arg, DescriptorUseCtx::Runtime);
+                }
+            }
+            Expr::MethodCall(obj, _, args, _) => {
+                self.check_descriptor_use_in_expr(obj, DescriptorUseCtx::Runtime);
+                for arg in args {
+                    self.check_descriptor_use_in_expr(arg, DescriptorUseCtx::Runtime);
+                }
+            }
+            Expr::MoldInst(_, type_args, fields, _) => {
+                for arg in type_args {
+                    self.check_descriptor_use_in_expr(arg, DescriptorUseCtx::Runtime);
+                }
+                for f in fields {
+                    self.check_descriptor_use_in_expr(&f.value, DescriptorUseCtx::Runtime);
+                }
+            }
+            Expr::BinaryOp(l, _, r, _) => {
+                self.check_descriptor_use_in_expr(l, DescriptorUseCtx::Runtime);
+                self.check_descriptor_use_in_expr(r, DescriptorUseCtx::Runtime);
+            }
+            Expr::UnaryOp(_, inner, _) => {
+                self.check_descriptor_use_in_expr(inner, DescriptorUseCtx::Runtime);
+            }
+            Expr::FieldAccess(obj, _, _) => {
+                self.check_descriptor_use_in_expr(obj, DescriptorUseCtx::Runtime);
+            }
+            Expr::Unmold(inner, _) => {
+                self.check_descriptor_use_in_expr(inner, DescriptorUseCtx::Runtime);
+            }
+            Expr::Throw(inner, _) => {
+                self.check_descriptor_use_in_expr(inner, DescriptorUseCtx::Runtime);
+            }
+            Expr::Lambda(params, body, _) => {
+                // Lambda parameters shadow same-named top-level descriptor
+                // bindings within the lambda body.
+                let saved = self.descriptor_scope_shadows.clone();
+                for p in params {
+                    self.descriptor_scope_shadows.insert(p.name.clone());
+                }
+                self.check_descriptor_use_in_expr(body, DescriptorUseCtx::Runtime);
+                self.descriptor_scope_shadows = saved;
+            }
+            Expr::Pipeline(exprs, _) => {
+                for e in exprs {
+                    self.check_descriptor_use_in_expr(e, DescriptorUseCtx::Runtime);
+                }
+            }
+            Expr::CondBranch(arms, _) => {
+                // A descriptor selected by a runtime branch is a runtime use:
+                // arm bodies are never an allow-listed descriptor position.
+                for arm in arms {
+                    if let Some(cond) = &arm.condition {
+                        self.check_descriptor_use_in_expr(cond, DescriptorUseCtx::Runtime);
+                    }
+                    // Bindings inside one arm do not shadow names in the
+                    // next arm — restore the shadow set per arm.
+                    let saved = self.descriptor_scope_shadows.clone();
+                    for s in &arm.body {
+                        self.check_descriptor_use_in_stmt(s, false);
+                    }
+                    self.descriptor_scope_shadows = saved;
+                }
+            }
+            // Leaf expressions (handled above for the descriptor case).
             _ => {}
         }
     }
@@ -7669,6 +8259,21 @@ defaulted fields must be provided via `()`",
             }
 
             Expr::FuncCall(func, args, span) => {
+                // A placeholder-free call that is itself a pipeline stage
+                // receives the piped value as an implicit first argument
+                // at runtime (`data => f()` runs as `f(data)`). Take
+                // (consume) the stage state here so calls nested inside
+                // the arguments don't see it; when the injection applies,
+                // keep the previous stage's result type so arity and
+                // argument-type validation below can cover the injected
+                // value.
+                let pipeline_stage_type = std::mem::take(&mut self.pipeline_stage_injected_type);
+                let injected_first_arg: Option<Type> = if args.iter().any(expr_contains_placeholder)
+                {
+                    None
+                } else {
+                    pipeline_stage_type
+                };
                 // C-5c: Reject old `_` partial application syntax in function call args.
                 // Pipeline context (`data => f(_)`) is allowed — `_` refers to pipe value.
                 if !self.in_pipeline {
@@ -7870,7 +8475,11 @@ defaulted fields must be provided via `()`",
                             }
                         }
                         if self.crypto_sha256_funcs.contains(name) {
-                            self.validate_crypto_sha256_call(name, args, span);
+                            let injected = injected_first_arg.clone();
+                            self.validate_crypto_sha256_call(name, args, span, injected.as_ref());
+                        } else if let Some(kind) = self.crypto_funcs.get(name).copied() {
+                            let injected = injected_first_arg.clone();
+                            self.validate_crypto_call(name, kind, args, span, injected.as_ref());
                         }
                         // E1506: Check argument types against registered parameter types
                         if let Some(param_types) = self.func_param_types.get(name).cloned() {
@@ -8444,7 +9053,17 @@ defaulted fields must be provided via `()`",
                         self.define_var(name, result_type.clone());
                         continue;
                     }
+                    if i > 0 && matches!(pipe_expr, Expr::FuncCall(..)) {
+                        // The runtime hands the piped value to a
+                        // placeholder-free stage call as its implicit
+                        // first argument — pass the previous stage's
+                        // result type to the FuncCall arm (which
+                        // takes/consumes it) so arity and argument-type
+                        // validation can cover the injected value.
+                        self.pipeline_stage_injected_type = Some(result_type.clone());
+                    }
                     result_type = self.infer_expr_type(pipe_expr);
+                    self.pipeline_stage_injected_type = None;
                 }
                 self.pop_scope();
                 self.in_pipeline = old_in_pipeline;

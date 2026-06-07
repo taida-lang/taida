@@ -17,7 +17,7 @@ use super::helpers::{
     extract_response_fields, make_fulfilled_async, make_result_failure_msg, make_result_success,
     make_span,
 };
-use super::types::ConnStream;
+use super::types::{ActiveStreamingWriter, ConnStream, RequestBodyState, StreamingWriter};
 
 impl Interpreter {
     /// 2b/2c: HTTP/2 serve loop (Interpreter reference implementation).
@@ -451,53 +451,150 @@ impl Interpreter {
                 }
                 request_fields.push(("headers".into(), Value::list(header_values)));
 
-                // Body span still references the leading `body_len` bytes of
-                // the arena (offset 0), preserving the existing contract.
-                request_fields.push(("body".into(), make_span(0, body_len)));
-                request_fields.push(("bodyOffset".into(), Value::Int(0)));
-                request_fields.push(("contentLength".into(), Value::Int(body_len as i64)));
-                // raw = arena (body + headers concat). Track-ε's Arc<BytesValue>
-                // interior wrapping keeps `req.raw` zero-copy on subsequent
-                // clones (handler dispatch retains via Arc::clone, no Vec
-                // re-allocation).
-                request_fields.push(("raw".into(), Value::bytes(arena)));
-                request_fields.push(("remoteHost".into(), Value::str(peer_addr.ip().to_string())));
-                request_fields.push(("remotePort".into(), Value::Int(peer_addr.port() as i64)));
-                request_fields.push(("keepAlive".into(), Value::Bool(true)));
-                request_fields.push(("chunked".into(), Value::Bool(false)));
-                request_fields.push(("protocol".into(), Value::str("h2".into())));
+                // F55 S2: branch on handler arity. The 1-arg path is the
+                // pre-existing eager contract (body completed value, arena
+                // shape pinned by the existing span regression tests). The
+                // 2-arg path activates the streaming body observation
+                // contract that H1 already implements: req.body span is
+                // empty and the handler pulls bytes via readBody /
+                // readBodyChunk / readBodyAll.
+                //
+                // Streaming form chosen: eager fill, streaming
+                // observation. The DATA
+                // frames for this stream have already been read to END_STREAM
+                // by `process_frame` (which is what produces `body` here), so
+                // the per-stream queue is pre-materialized. readBody* pops it
+                // from `RequestBodyState.leftover` without ever touching the
+                // raw socket — so no re-entrant frame reading is needed and
+                // the 16 MiB cap (net_h2.rs MAX_REQUEST_BODY_SIZE, enforced on
+                // accumulation) still bounds memory. The handler observes the
+                // identical streaming contract to H1; only the supply timing
+                // differs (eager fill, streaming observation).
+                let handler_arity = handler.params.len();
 
-                let request_pack = Value::pack(request_fields);
+                if handler_arity >= 2 {
+                    // Pre-load the full (already capped) body into a
+                    // Content-Length-style RequestBodyState. H2 has no chunked
+                    // transfer encoding on the wire (DATA framing replaces it),
+                    // so the supply source is modelled as a fixed-length body
+                    // whose bytes all live in `leftover`. Built before the
+                    // request pack so the pack can embed the real token.
+                    let mut writer = StreamingWriter::new();
+                    let mut body_state =
+                        RequestBodyState::new(false, body_len as i64, true, body.clone());
 
-                // Call handler with request pack (1-arg path for h2).
-                let handler_result = self.call_function_with_values(handler, &[request_pack]);
+                    let request_pack = Self::build_h2_streaming_request_pack(
+                        &mut request_fields,
+                        arena,
+                        body_len,
+                        peer_addr,
+                        body_state.request_token,
+                    );
 
-                *total_request_count += 1;
-                h2_conn.request_count += 1;
+                    let writer_pack = Value::pack(vec![(
+                        "__writer_id".into(),
+                        Value::str("__v3_streaming_writer".into()),
+                    )]);
 
-                // Extract response from handler result
-                match handler_result {
-                    Ok(response) => {
-                        // Send h2 response
-                        if self
-                            .send_h2_response(stream, h2_conn, stream_id, &response)
-                            .is_err()
-                        {
-                            // Write error — close connection
-                            return Ok(());
+                    self.active_streaming_writer = Some(ActiveStreamingWriter {
+                        writer: &mut writer as *mut StreamingWriter,
+                        stream: stream as *mut ConnStream,
+                        borrowed: false,
+                        body_state: &mut body_state as *mut RequestBodyState,
+                        ws_closed: false,
+                        ws_token: 0,
+                        ws_close_code: 0,
+                    });
+
+                    let handler_result =
+                        self.call_function_with_values(handler, &[request_pack, writer_pack]);
+
+                    // Handler done — tear down the active writer before any
+                    // further borrow of `stream` / `h2_conn`.
+                    self.active_streaming_writer = None;
+
+                    *total_request_count += 1;
+                    h2_conn.request_count += 1;
+
+                    // 2-arg H2 handlers always return a one-shot response pack
+                    // (the v3 chunked-streaming writer API targets H1 wire
+                    // framing; H2 response DATA framing is handled by
+                    // send_h2_response). Any unread body bytes still in
+                    // `body_state.leftover` are simply dropped here — the
+                    // stream is closed below, so the design's "drain remaining
+                    // DATA, no RST" rule is satisfied trivially (all DATA was
+                    // already consumed off the wire by process_frame).
+                    match handler_result {
+                        Ok(response) => {
+                            if self
+                                .send_h2_response(stream, h2_conn, stream_id, &response)
+                                .is_err()
+                            {
+                                return Ok(());
+                            }
+                        }
+                        Err(_) => {
+                            let _ = send_response_headers(
+                                stream,
+                                &mut h2_conn.encoder,
+                                stream_id,
+                                500,
+                                &[],
+                                true,
+                                h2_conn.peer_settings.max_frame_size,
+                            );
                         }
                     }
-                    Err(_) => {
-                        // Handler error — send 500
-                        let _ = send_response_headers(
-                            stream,
-                            &mut h2_conn.encoder,
-                            stream_id,
-                            500,
-                            &[],
-                            true,
-                            h2_conn.peer_settings.max_frame_size,
-                        );
+                } else {
+                    // Body span still references the leading `body_len` bytes of
+                    // the arena (offset 0), preserving the existing contract.
+                    request_fields.push(("body".into(), make_span(0, body_len)));
+                    request_fields.push(("bodyOffset".into(), Value::Int(0)));
+                    request_fields.push(("contentLength".into(), Value::Int(body_len as i64)));
+                    // raw = arena (body + headers concat). Track-ε's Arc<BytesValue>
+                    // interior wrapping keeps `req.raw` zero-copy on subsequent
+                    // clones (handler dispatch retains via Arc::clone, no Vec
+                    // re-allocation).
+                    request_fields.push(("raw".into(), Value::bytes(arena)));
+                    request_fields
+                        .push(("remoteHost".into(), Value::str(peer_addr.ip().to_string())));
+                    request_fields.push(("remotePort".into(), Value::Int(peer_addr.port() as i64)));
+                    request_fields.push(("keepAlive".into(), Value::Bool(true)));
+                    request_fields.push(("chunked".into(), Value::Bool(false)));
+                    request_fields.push(("protocol".into(), Value::str("h2".into())));
+
+                    let request_pack = Value::pack(request_fields);
+
+                    // Call handler with request pack (1-arg path for h2).
+                    let handler_result = self.call_function_with_values(handler, &[request_pack]);
+
+                    *total_request_count += 1;
+                    h2_conn.request_count += 1;
+
+                    // Extract response from handler result
+                    match handler_result {
+                        Ok(response) => {
+                            // Send h2 response
+                            if self
+                                .send_h2_response(stream, h2_conn, stream_id, &response)
+                                .is_err()
+                            {
+                                // Write error — close connection
+                                return Ok(());
+                            }
+                        }
+                        Err(_) => {
+                            // Handler error — send 500
+                            let _ = send_response_headers(
+                                stream,
+                                &mut h2_conn.encoder,
+                                stream_id,
+                                500,
+                                &[],
+                                true,
+                                h2_conn.peer_settings.max_frame_size,
+                            );
+                        }
                     }
                 }
 
@@ -512,6 +609,43 @@ impl Interpreter {
                     .retain(|_, s| s.state != super::super::net_h2::StreamState::Closed);
             }
         }
+    }
+
+    /// F55 S2: assemble the 2-arg (streaming) H2 request pack.
+    ///
+    /// Mirrors the H1 2-arg contract from `dispatch_request`: `body` is an
+    /// empty span, `raw` is the per-request arena (body + headers, identical
+    /// to the 1-arg arena so `req.raw` / `Slice[req.raw, ...]` stay valid),
+    /// and the `__body_stream` sentinel marks the pack as streaming-capable so
+    /// `readBody` / `readBodyChunk` / `readBodyAll` accept it. `body_token`
+    /// must equal the `RequestBodyState.request_token` so the readBody*
+    /// identity check in `net_eval/mod.rs` accepts this pack.
+    fn build_h2_streaming_request_pack(
+        request_fields: &mut Vec<(String, Value)>,
+        arena: Vec<u8>,
+        body_len: usize,
+        peer_addr: &std::net::SocketAddr,
+        body_token: u64,
+    ) -> Value {
+        // body span is empty — body not surfaced eagerly (H1 2-arg parity).
+        request_fields.push(("body".into(), make_span(0, 0)));
+        // bodyOffset points at the body region (offset 0 in the arena) so
+        // addons that slice `req.raw` see the same origin as the 1-arg path.
+        request_fields.push(("bodyOffset".into(), Value::Int(0)));
+        request_fields.push(("contentLength".into(), Value::Int(body_len as i64)));
+        request_fields.push(("raw".into(), Value::bytes(arena)));
+        request_fields.push(("remoteHost".into(), Value::str(peer_addr.ip().to_string())));
+        request_fields.push(("remotePort".into(), Value::Int(peer_addr.port() as i64)));
+        request_fields.push(("keepAlive".into(), Value::Bool(true)));
+        request_fields.push(("chunked".into(), Value::Bool(false)));
+        request_fields.push(("protocol".into(), Value::str("h2".into())));
+        // v4 sentinel + request-scoped token (matches RequestBodyState).
+        request_fields.push((
+            "__body_stream".into(),
+            Value::str("__v4_body_stream".into()),
+        ));
+        request_fields.push(("__body_token".into(), Value::Int(body_token as i64)));
+        Value::pack(std::mem::take(request_fields))
     }
 
     /// Send an HTTP/2 response (HEADERS + DATA frames) for a completed request.

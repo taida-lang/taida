@@ -353,8 +353,8 @@ stdout(`${Foo.bar}`)
 }
 
 /// Phase 1E-β: a child facade file's zero-arg FuncDef whose body is
-/// a simple string literal (matches the real
-/// `.dev/official-package-repos/terminal/taida/ansi.td::ClearScreen`)
+/// a simple string literal (matches the real terminal addon's
+/// `ansi.td::ClearScreen`)
 /// must lower to a callable native symbol. User code imports the
 /// facade-exported name via `>>> taida-lang/terminal => @(ClearScreen)`
 /// and invokes it just like any other function.

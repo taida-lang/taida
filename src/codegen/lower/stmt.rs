@@ -303,6 +303,7 @@ impl Lowering {
                             .map(|variant| variant.name.clone())
                             .collect(),
                     );
+                    self.register_enum_type_id(&enum_def.name);
                 }
                 Statement::Export(export_stmt) => {
                     // RCB-212: Re-export path `<<< ./path` is not supported.
@@ -806,6 +807,9 @@ impl Lowering {
         // defined inside this function do not leak to sibling/parent scopes.
         let prev_var_aliases = self.var_aliases.clone();
         let prev_lambda_param_counts = self.lambda_param_counts.clone();
+        // Value-tag track: shadow kinds are IR variables of the CURRENT
+        // function body — a nested body must not UseVar a parent's shadow.
+        let prev_shadow_kinds = std::mem::take(&mut self.shadow_kind_vars);
         let prev_lambda_vars = self.lambda_vars.clone();
         let prev_closure_vars = self.closure_vars.clone();
         for p in &func_def.params {
@@ -1181,6 +1185,8 @@ impl Lowering {
         self.lambda_param_counts = prev_lambda_param_counts;
         self.lambda_vars = prev_lambda_vars;
         self.closure_vars = prev_closure_vars;
+        // Value-tag track: restore the caller scope's shadow kinds.
+        self.shadow_kind_vars = prev_shadow_kinds;
 
         Ok(ir_func)
     }
@@ -1518,6 +1524,9 @@ impl Lowering {
                 if self.expr_is_list(&assign.value) {
                     self.list_vars.insert(assign.target.clone());
                 }
+                // Value-tag track: a plain rebind invalidates any runtime
+                // shadow kind the name previously carried.
+                self.shadow_kind_vars.remove(&assign.target);
                 // C18-2: Enum-variant literal / known Enum var / annotation で
                 // 束縛された変数を enum_vars に記録する。
                 // `state <= HiveState:Policy()` や `state: HiveState <= ...`
@@ -1757,6 +1766,7 @@ impl Lowering {
                 func.push(IrInst::DefVar(uf.target.clone(), result));
                 // Track type from mold source for debug display
                 self.track_unmold_type(&uf.target, &uf.source);
+                self.maybe_capture_shadow_kind(func, &uf.target, &uf.source, source_var);
                 // Track local unmold-forward shadow for net builtins
                 if Self::NET_BUILTIN_NAMES.contains(&uf.target.as_str()) {
                     self.shadowed_net_builtins.insert(uf.target.clone());
@@ -1775,6 +1785,7 @@ impl Lowering {
                 func.push(IrInst::DefVar(ub.target.clone(), result));
                 // Track type from mold source for debug display
                 self.track_unmold_type(&ub.target, &ub.source);
+                self.maybe_capture_shadow_kind(func, &ub.target, &ub.source, source_var);
                 // Track local unmold-backward shadow for net builtins
                 if Self::NET_BUILTIN_NAMES.contains(&ub.target.as_str()) {
                     self.shadowed_net_builtins.insert(ub.target.clone());

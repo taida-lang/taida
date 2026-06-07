@@ -1441,7 +1441,22 @@ impl Lowering {
             // _to_double). Raw i64 comparison of f64 bit patterns made
             // `3 == 3.0` false and inverted negative-float ordering.
             BinOp::Eq => {
-                if lhs_is_str || rhs_is_str {
+                // Value-tag track: an operand carrying a runtime shadow
+                // kind (an unmolded Lax payload from a possibly mixed
+                // list) must not take a static fast path — its actual
+                // kind is only known at runtime, so the comparison goes
+                // through the tagged poly engine which reads the shadow.
+                if self.operand_shadow_kind(lhs).is_some()
+                    || self.operand_shadow_kind(rhs).is_some()
+                    // Value-tag track: two statically-known lists compare
+                    // structurally (kind-aware element walk) instead of
+                    // by raw pointer identity, matching the interpreter's
+                    // Value::eq. The untyped poly fallback below keeps the
+                    // historical raw comparison for dynamic operands.
+                    || (self.expr_is_list(lhs) && self.expr_is_list(rhs))
+                {
+                    "taida_poly_eq_tagged"
+                } else if lhs_is_str || rhs_is_str {
                     "taida_str_eq"
                 } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
                     "taida_float_eq"
@@ -1456,7 +1471,12 @@ impl Lowering {
                 }
             }
             BinOp::NotEq => {
-                if lhs_is_str || rhs_is_str {
+                if self.operand_shadow_kind(lhs).is_some()
+                    || self.operand_shadow_kind(rhs).is_some()
+                    || (self.expr_is_list(lhs) && self.expr_is_list(rhs))
+                {
+                    "taida_poly_neq_tagged"
+                } else if lhs_is_str || rhs_is_str {
                     "taida_str_neq"
                 } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
                     "taida_float_neq"
@@ -1495,6 +1515,40 @@ impl Lowering {
             BinOp::Or => "taida_bool_or",
             BinOp::Concat => "taida_str_concat",
         };
+        // Value-tag track: the tagged poly comparisons take four arguments
+        // (each operand rides with its kind — a shadow IR variable when
+        // the operand is an unmolded Lax payload, a compile-time EKIND
+        // constant otherwise).
+        if runtime_fn == "taida_poly_eq_tagged" || runtime_fn == "taida_poly_neq_tagged" {
+            let lhs_kind = self.emit_operand_ekind(func, lhs);
+            let rhs_kind = self.emit_operand_ekind(func, rhs);
+            let result = func.alloc_var();
+            func.push(IrInst::Call(
+                result,
+                runtime_fn.to_string(),
+                vec![lhs_var, lhs_kind, rhs_var, rhs_kind],
+            ));
+            return Ok(result);
+        }
+        // When a float-family helper was selected, lift any operand that is
+        // statically known to be Int to an f64 bit pattern at the call site
+        // (`taida_int_to_float` — the conversion the runtime's own comment
+        // always documented as "the lowering inserts a taida_int_to_float
+        // call" but binary ops never emitted). The helpers previously
+        // guessed the operand kind from the value via a ±2^20 magnitude
+        // heuristic, which broke both comparison (`2000000 == 2000000.0` →
+        // false) and arithmetic (`2000000 + 0.5` → 0.5) outside that
+        // window. With the lift, every statically-typed operand arrives as
+        // a genuine f64 bit pattern and the heuristic is only left covering
+        // dynamically-typed operands.
+        let (lhs_var, rhs_var) = if runtime_fn.starts_with("taida_float_") {
+            (
+                self.lift_static_int_to_f64(func, lhs, lhs_var),
+                self.lift_static_int_to_f64(func, rhs, rhs_var),
+            )
+        } else {
+            (lhs_var, rhs_var)
+        };
         let result = func.alloc_var();
         func.push(IrInst::Call(
             result,
@@ -1502,6 +1556,55 @@ impl Lowering {
             vec![lhs_var, rhs_var],
         ));
         Ok(result)
+    }
+
+    /// Value-tag track: the shadow-kind variable name for an operand, when
+    /// the operand is an identifier bound by a runtime-kind unmold.
+    pub(crate) fn operand_shadow_kind(&self, expr: &Expr) -> Option<String> {
+        if let Expr::Ident(name, _) = expr
+            && self.shadow_kind_vars.contains(name)
+        {
+            return Some(format!("__ekind__{}", name));
+        }
+        None
+    }
+
+    /// Emit the kind argument for one operand of a tagged runtime call
+    /// (poly comparisons and the tagged Set/collection entry points): the
+    /// shadow IR variable when one exists, otherwise the compile-time
+    /// EKIND constant.
+    pub(crate) fn emit_operand_ekind(&mut self, func: &mut IrFunction, expr: &Expr) -> IrVar {
+        if let Some(shadow_name) = self.operand_shadow_kind(expr) {
+            let v = func.alloc_var();
+            func.push(IrInst::UseVar(v, shadow_name));
+            v
+        } else {
+            let v = func.alloc_var();
+            func.push(IrInst::ConstInt(v, self.expr_ekind(expr)));
+            v
+        }
+    }
+
+    /// Lift an operand of a float-family binary op to an f64 bit pattern
+    /// when (and only when) it is statically known to be an Int. Float
+    /// operands already carry f64 bits, dynamically-typed operands keep the
+    /// runtime-side dispatch, and Bool/Str can only reach a float helper
+    /// through paths the checker rejects, so they are left untouched.
+    fn lift_static_int_to_f64(&mut self, func: &mut IrFunction, expr: &Expr, var: IrVar) -> IrVar {
+        if self.expr_returns_float(expr)
+            || self.expr_type_is_unknown(expr)
+            || self.expr_is_bool(expr)
+            || self.expr_is_string_full(expr)
+        {
+            return var;
+        }
+        let lifted = func.alloc_var();
+        func.push(IrInst::Call(
+            lifted,
+            "taida_int_to_float".to_string(),
+            vec![var],
+        ));
+        lifted
     }
 
     pub(super) fn lower_unary_op(
@@ -2136,6 +2239,10 @@ impl Lowering {
         let prev_lambda_vars = self.lambda_vars.clone();
         let prev_closure_vars = self.closure_vars.clone();
         let prev_int_vars = self.int_vars.clone();
+        // Value-tag track: shadow kinds are IR variables of the ENCLOSING
+        // body — a lambda body must not UseVar a parent's shadow (and its
+        // params must not inherit one by name collision).
+        let prev_shadow_kinds = std::mem::take(&mut self.shadow_kind_vars);
         let prev_float_vars = self.float_vars.clone();
         let prev_string_vars = self.string_vars.clone();
         let prev_bool_vars = self.bool_vars.clone();
@@ -2281,6 +2388,7 @@ impl Lowering {
             self.lambda_vars = prev_lambda_vars;
             self.closure_vars = prev_closure_vars;
             self.int_vars = prev_int_vars;
+            self.shadow_kind_vars = prev_shadow_kinds;
             self.float_vars = prev_float_vars;
             self.string_vars = prev_string_vars;
             self.bool_vars = prev_bool_vars;
@@ -2315,18 +2423,24 @@ impl Lowering {
         let mut current_list = list_var;
         for item in items {
             // C23B-007: stamp this element's tag BEFORE the push so the
-            // per-element downgrade logic in `taida_list_set_elem_tag`
-            // can latch onto HETEROGENEOUS as soon as two primitive
-            // types disagree. For homogeneous lists the tag converges
-            // to that primitive tag after the first call and stays put
-            // (subsequent calls are no-ops).
+            // per-element downgrade logic can latch as soon as two
+            // primitive types disagree. For homogeneous lists the tag
+            // converges to that primitive tag after the first call and
+            // stays put (subsequent calls are no-ops).
+            //
+            // Value-tag track: the stamp goes through the EKIND entry
+            // point (kind | enum-type-id<<8) so a mixed literal
+            // materialises the per-element kind array instead of
+            // collapsing to the bare HETEROGENEOUS sentinel, and enum
+            // variants keep their type id for container equality.
             let tag = self.expr_type_tag(item);
+            let ekind = self.expr_ekind(item);
             let tag_var = func.alloc_var();
-            func.push(IrInst::ConstInt(tag_var, tag));
+            func.push(IrInst::ConstInt(tag_var, ekind));
             let tag_dummy = func.alloc_var();
             func.push(IrInst::Call(
                 tag_dummy,
-                "taida_list_set_elem_tag".to_string(),
+                "taida_list_note_push_ekind".to_string(),
                 vec![current_list, tag_var],
             ));
             let item_var = self.lower_expr(func, item)?;

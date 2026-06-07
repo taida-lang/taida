@@ -411,7 +411,7 @@ fn d29b_015_native_echo_via_contig_readbody_roundtrips_correctly() {
 }
 
 /// Static check: the EXPECTED_TOTAL_LEN comment in mod.rs records the
-/// D29B-015 delta so future trackers can audit producer-flip / dispatcher
+/// size delta so future audits can track producer-flip / dispatcher
 /// changes. Catches accidental revert of the size update without a
 /// matching code revert.
 #[test]

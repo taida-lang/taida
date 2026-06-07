@@ -48,7 +48,7 @@ fn unique_temp(prefix: &str) -> PathBuf {
 /// that consumes them via a package import.
 ///
 /// The consumer exercises the three headline Enum-facing paths that
-/// used to blow up at build time pre-C18B-004:
+/// used to blow up at build time before the enum-import fix:
 ///   1. `Color:Red()` literal — tests that JS / Native resolve the
 ///      Enum at build time.
 ///   2. Enum equality on a function-returned Enum — tests function
@@ -58,8 +58,8 @@ fn unique_temp(prefix: &str) -> PathBuf {
 /// The `jsonEncode(@(state <= Color:Blue()))` direction is intentionally
 /// NOT covered here because cross-module `__taida_enumDefs` propagation
 /// is a separate pre-existing gap (present for both relative-path and
-/// package-path imports) that predates C18B-004 and is out of scope
-/// for the C18B-004 fix — see `.dev/C18_BLOCKERS.md` for triage.
+/// package-path imports) that predates the enum-import fix and is out of scope
+/// here — tracked separately in the internal notes.
 fn set_up_project() -> PathBuf {
     let project = unique_temp("c18b_004_enum_pkg_import");
     let _ = fs::remove_dir_all(&project);

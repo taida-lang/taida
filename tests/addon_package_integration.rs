@@ -288,7 +288,7 @@ stdout(echo("x"))
     let _ = std::fs::remove_dir_all(&project);
 }
 
-/// RC1B-110 regression: the `package` declared inside
+/// Regression: the `package` declared inside
 /// `native/addon.toml` must match the package id the import resolver
 /// is looking up. If it drifts (e.g. someone swaps the manifest but
 /// forgets to update the import path, or an attacker hijacks a
