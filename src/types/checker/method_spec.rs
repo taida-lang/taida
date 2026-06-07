@@ -1,11 +1,15 @@
-//! Single-source-of-truth table for builtin-type method existence and
-//! arity.
+//! Arity/existence mirror of `TypeChecker::builtin_method_signature`
+//! (the checker's arity path) — the first instalment toward a builtin
+//! method spec table.
 //!
-//! Scope (first instalment): the statically enumerable receivers handled
-//! by `TypeChecker::builtin_method_signature`. Receivers whose method set
-//! is value-dependent (`BuchiPack` function fields, user-defined `Named`
-//! types via `named_method_signature`) are intentionally NOT represented
-//! here — their specs live in user code, not in the language.
+//! Scope: exactly the statically enumerable receivers of that one
+//! function. Explicitly NOT covered (they live on other paths):
+//! value-dependent receivers (`BuchiPack` function fields, user-defined
+//! `Named` members via `named_method_signature`), the `Stream` receiver
+//! (known only to the return-type path `infer_method_return_type`), the
+//! universal `toString` fallback, and the `errorInfo` allow-list special
+//! case in `check_method_args`. A claim of "method existence SSOT" must
+//! wait until those paths are unified.
 //!
 //! The table is pinned to the checker implementation by the exhaustive
 //! cross test below: every (receiver, method) pair in the universe of
@@ -23,7 +27,7 @@
 // (and the cross-backend audit script under .dev). Later instalments
 // will switch the checker dispatch to read from it.
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum BuiltinRecv {
     /// `Str`
     Str,
@@ -278,6 +282,21 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// `.find()`-based comparison above would silently accept a duplicate
+    /// (recv, name) entry with a conflicting arity — forbid duplicates.
+    #[test]
+    fn spec_table_has_no_duplicate_entries() {
+        let mut seen = std::collections::HashSet::new();
+        for s in BUILTIN_METHOD_SPECS {
+            assert!(
+                seen.insert((s.recv, s.name)),
+                "duplicate spec entry: ({:?}, {})",
+                s.recv,
+                s.name
+            );
         }
     }
 
