@@ -316,4 +316,84 @@ mod tests {
             None
         );
     }
+
+    /// Cross-path drift gate: every method the arity path knows (= every
+    /// table entry) must also be known to the return-type path
+    /// (`infer_method_return_type` returns something other than
+    /// `Type::Unknown`). The two paths grew independently; a method added
+    /// to one but not the other is exactly the class of skew that produced
+    /// the runtime-only `Async.unmold` divergence.
+    ///
+    /// Documented exceptions:
+    /// - `Error.throw` exists on the arity path but deliberately yields
+    ///   `Type::Unknown` on the return path (a throw diverges, so it has
+    ///   no value type).
+    /// - `List.reduce` / `List.fold` return the type of their init
+    ///   argument, so only the args-aware variant
+    ///   (`infer_method_return_type_with_args`) can resolve them; the
+    ///   argless path is structurally `Type::Unknown` for both.
+    #[test]
+    fn return_type_path_knows_every_arity_path_method() {
+        let checker = TypeChecker::new();
+        for s in BUILTIN_METHOD_SPECS {
+            if s.recv == BuiltinRecv::Error && s.name == "throw" {
+                continue;
+            }
+            if s.recv == BuiltinRecv::List && matches!(s.name, "reduce" | "fold") {
+                continue;
+            }
+            for ty in recv_types(s.recv) {
+                let ret = checker.infer_method_return_type(&ty, s.name);
+                assert!(
+                    ret != Type::Unknown,
+                    "return-type path does not know ({:?} as {:?}).{} \
+                     which the arity path lists",
+                    s.recv,
+                    ty,
+                    s.name
+                );
+            }
+        }
+    }
+
+    /// Pin the known asymmetries between the checker's two method paths
+    /// so any future change to either side surfaces here and forces the
+    /// spec table (and the cross-backend audit) to be revisited:
+    /// - `Stream` is a return-path-only receiver (arity path: None).
+    /// - `Async.unmold` is implemented by the interp and native runtimes
+    ///   but known to NEITHER checker path (reachable only via
+    ///   `--no-check`; recorded as a parity-hole finding).
+    #[test]
+    fn known_path_asymmetries_hold() {
+        let mut checker = TypeChecker::new();
+        let stream = Type::Generic("Stream".to_string(), vec![Type::Int]);
+        assert_eq!(
+            checker
+                .builtin_method_signature(&stream, "length")
+                .map(|(min, max, _)| (min, max)),
+            None,
+            "arity path unexpectedly learned Stream.length — add Stream \
+             to the spec table"
+        );
+        assert_eq!(
+            checker.infer_method_return_type(&stream, "length"),
+            Type::Int
+        );
+
+        let async_ty = Type::Generic("Async".to_string(), vec![Type::Int]);
+        assert_eq!(
+            checker
+                .builtin_method_signature(&async_ty, "unmold")
+                .map(|(min, max, _)| (min, max)),
+            None,
+            "arity path unexpectedly learned Async.unmold — update the \
+             spec table and the cross-backend audit notes"
+        );
+        assert_eq!(
+            checker.infer_method_return_type(&async_ty, "unmold"),
+            Type::Unknown,
+            "return path unexpectedly learned Async.unmold — update the \
+             spec table and the cross-backend audit notes"
+        );
+    }
 }
