@@ -15,7 +15,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn is_js_rilla_constructor(name: &str) -> bool {
+    fn is_js_rilla_constructor(name: &str) -> bool {
         matches!(
             name,
             "JSGet" | "JSCall" | "JSCallAsync" | "JSNew" | "JSSet" | "JSBind" | "JSSpread"

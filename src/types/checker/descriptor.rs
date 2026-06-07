@@ -17,7 +17,7 @@ impl TypeChecker {
     /// indirection). Anything wrapped further (in a pack, list, call, ...)
     /// is intentionally *not* unwrapped here — that wrapping is itself the
     /// runtime use we want to flag at the wrapper.
-    pub(super) fn descriptor_value_name(&self, expr: &Expr) -> Option<String> {
+    fn descriptor_value_name(&self, expr: &Expr) -> Option<String> {
         match expr {
             Expr::TypeInst(name, _, _) if self.is_descriptor_type_name(name) => Some(name.clone()),
             Expr::Ident(name, _)
@@ -30,7 +30,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn push_descriptor_use_error(&mut self, descriptor_name: &str, span: &Span) {
+    fn push_descriptor_use_error(&mut self, descriptor_name: &str, span: &Span) {
         self.errors.push(TypeError {
             message: format!(
                 "[E1532] '{}' is a build-driver descriptor, not a runtime value, and cannot be \
@@ -76,7 +76,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn check_descriptor_use_in_stmt(&mut self, stmt: &Statement, top_level: bool) {
+    fn check_descriptor_use_in_stmt(&mut self, stmt: &Statement, top_level: bool) {
         match stmt {
             // A *top-level* binding RHS is allow-listed when it is directly a
             // descriptor value (`name <= BuildUnit(...)`) — that is the form
@@ -148,7 +148,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn check_descriptor_use_in_expr(&mut self, expr: &Expr, ctx: DescriptorUseCtx) {
+    fn check_descriptor_use_in_expr(&mut self, expr: &Expr, ctx: DescriptorUseCtx) {
         // Flag a descriptor value sitting in a runtime position before
         // recursing — the wrapper position is where the misuse lives.
         if ctx == DescriptorUseCtx::Runtime

@@ -911,7 +911,7 @@ impl TypeChecker {
     /// Infer the return type of a method call based on the receiver type and method name.
     /// Updated for v0.7.0: operation methods are abolished (mold-ified).
     /// Only state check methods and toString remain.
-    pub(super) fn infer_method_return_type(&self, obj_type: &Type, method: &str) -> Type {
+    fn infer_method_return_type(&self, obj_type: &Type, method: &str) -> Type {
         match obj_type {
             Type::Str => match method {
                 // State checks (v0.7.0 remaining methods)

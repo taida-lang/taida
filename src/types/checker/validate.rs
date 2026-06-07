@@ -49,7 +49,7 @@ impl TypeChecker {
         self.validate_unique_mold_type_param_names("MoldDef", &md.name, header_args, &md.span);
     }
 
-    pub(super) fn validate_child_header_prefix(
+    fn validate_child_header_prefix(
         &mut self,
         kind: &str,
         child_name: &str,
@@ -1269,7 +1269,7 @@ impl TypeChecker {
     /// literal `"unmold"`). So this check can unconditionally reject
     /// `__`-prefixed `FieldDef.name` without a built-in exception
     /// escape hatch.
-    pub(super) fn validate_reserved_internal_field_name(
+    fn validate_reserved_internal_field_name(
         &mut self,
         kind: &str,
         def_name: &str,
@@ -1490,7 +1490,7 @@ defaulted fields must be provided via `()`",
         }
     }
 
-    pub(super) fn validate_builtin_mold_arg_kind(
+    fn validate_builtin_mold_arg_kind(
         &mut self,
         mold_name: &str,
         idx: usize,
@@ -1517,7 +1517,7 @@ defaulted fields must be provided via `()`",
         });
     }
 
-    pub(super) fn validate_builtin_mold_option_kind(
+    fn validate_builtin_mold_option_kind(
         &mut self,
         mold_name: &str,
         option_name: &str,
@@ -1571,7 +1571,7 @@ defaulted fields must be provided via `()`",
         }
     }
 
-    pub(super) fn validate_single_mold_header_arg(
+    fn validate_single_mold_header_arg(
         &mut self,
         name: &str,
         idx: usize,

@@ -203,7 +203,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn type_name_to_type(&self, name: &str) -> Type {
+    fn type_name_to_type(&self, name: &str) -> Type {
         match name {
             "Int" => Type::Int,
             "Float" => Type::Float,
@@ -289,7 +289,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn lookup_branch_info(&self, name: &str) -> BranchInfo {
+    fn lookup_branch_info(&self, name: &str) -> BranchInfo {
         for scope in self.branch_scope_stack.iter().rev() {
             if let Some(info) = scope.get(name) {
                 return *info;

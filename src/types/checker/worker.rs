@@ -91,7 +91,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn decide_worker_addon_import(
+    fn decide_worker_addon_import(
         &self,
         policy: &crate::pkg::addon_purity_policy::AddonPurityPolicy,
         manifest: &crate::addon::manifest::AddonManifest,
@@ -145,7 +145,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn push_worker_error(&mut self, code: &str, span: &Span, message: String) {
+    fn push_worker_error(&mut self, code: &str, span: &Span, message: String) {
         if self
             .errors
             .iter()
@@ -204,7 +204,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn validate_worker_user_function(
+    fn validate_worker_user_function(
         &mut self,
         name: &str,
         span: &Span,
@@ -266,7 +266,7 @@ impl TypeChecker {
         function_stack.remove(name);
     }
 
-    pub(super) fn validate_worker_stmt(
+    fn validate_worker_stmt(
         &mut self,
         stmt: &Statement,
         local_names: &mut HashSet<String>,
@@ -325,7 +325,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn validate_worker_expr(
+    fn validate_worker_expr(
         &mut self,
         expr: &Expr,
         local_names: &mut HashSet<String>,
@@ -441,7 +441,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn validate_worker_lambda(
+    fn validate_worker_lambda(
         &mut self,
         params: &[Param],
         body: &Expr,
@@ -466,7 +466,7 @@ impl TypeChecker {
         self.pop_scope();
     }
 
-    pub(super) fn validate_worker_inline_function_def(
+    fn validate_worker_inline_function_def(
         &mut self,
         fd: &FuncDef,
         local_names: &mut HashSet<String>,
@@ -510,7 +510,7 @@ impl TypeChecker {
         local_names.insert(fd.name.clone());
     }
 
-    pub(super) fn validate_worker_call_name(
+    fn validate_worker_call_name(
         &mut self,
         name: &str,
         span: &Span,
@@ -620,12 +620,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn validate_worker_ident(
-        &mut self,
-        name: &str,
-        span: &Span,
-        local_names: &HashSet<String>,
-    ) {
+    fn validate_worker_ident(&mut self, name: &str, span: &Span, local_names: &HashSet<String>) {
         if local_names.contains(name) {
             return;
         }
@@ -729,7 +724,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn validate_worker_mold_name(&mut self, name: &str, span: &Span) {
+    fn validate_worker_mold_name(&mut self, name: &str, span: &Span) {
         if Self::is_worker_effect_mold(name) {
             self.push_worker_error(
                 "[E1620]",
@@ -763,7 +758,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn is_worker_effect_builtin(name: &str) -> bool {
+    fn is_worker_effect_builtin(name: &str) -> bool {
         matches!(
             name,
             "debug"
@@ -871,7 +866,7 @@ impl TypeChecker {
 }
 
 impl TypeChecker {
-    pub(super) fn worker_mold_value_arg_count(name: &str, arg_count: usize) -> usize {
+    fn worker_mold_value_arg_count(name: &str, arg_count: usize) -> usize {
         match name {
             "JSGet" if arg_count == 2 => 1,
             "JSCall" | "JSCallAsync" if arg_count == 3 => 2,
@@ -880,29 +875,29 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn is_worker_effect_symbol(&self, name: &str) -> bool {
+    fn is_worker_effect_symbol(&self, name: &str) -> bool {
         self.worker_effect_symbols.contains(name) || Self::is_worker_effect_builtin(name)
     }
 
-    pub(super) fn is_worker_effect_mold(name: &str) -> bool {
+    fn is_worker_effect_mold(name: &str) -> bool {
         use crate::types::mold_specs::{WorkerMoldBoundary, lookup_worker_mold_boundary};
 
         lookup_worker_mold_boundary(name) == WorkerMoldBoundary::Effectful
     }
 
-    pub(super) fn is_worker_host_boundary_mold(name: &str) -> bool {
+    fn is_worker_host_boundary_mold(name: &str) -> bool {
         use crate::types::mold_specs::{WorkerMoldBoundary, lookup_worker_mold_boundary};
 
         name == "RustAddon" || lookup_worker_mold_boundary(name) == WorkerMoldBoundary::HostBoundary
     }
 
-    pub(super) fn is_worker_nested_async_mold(name: &str) -> bool {
+    fn is_worker_nested_async_mold(name: &str) -> bool {
         use crate::types::mold_specs::{WorkerMoldBoundary, lookup_worker_mold_boundary};
 
         lookup_worker_mold_boundary(name) == WorkerMoldBoundary::NestedAsync
     }
 
-    pub(super) fn is_worker_safe_user_mold(
+    fn is_worker_safe_user_mold(
         &self,
         name: &str,
         args: &[Type],
@@ -935,10 +930,7 @@ impl TypeChecker {
         safe
     }
 
-    pub(super) fn substitute_worker_type_params(
-        ty: &Type,
-        bindings: &HashMap<String, Type>,
-    ) -> Type {
+    fn substitute_worker_type_params(ty: &Type, bindings: &HashMap<String, Type>) -> Type {
         match ty {
             Type::Named(name) => bindings.get(name).cloned().unwrap_or_else(|| ty.clone()),
             Type::BuchiPack(fields) => Type::BuchiPack(

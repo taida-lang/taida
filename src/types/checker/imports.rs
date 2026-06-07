@@ -22,7 +22,7 @@ impl TypeChecker {
         self.pin_exec_shell_interactive_signature("execShellInteractive");
     }
 
-    pub(super) fn pin_run_interactive_signature(&mut self, local_name: &str) {
+    fn pin_run_interactive_signature(&mut self, local_name: &str) {
         // runInteractive(program: Str, args: @[Str]) → Gorillax[@(code: Int)]
         let inner = Type::BuchiPack(vec![("code".to_string(), Type::Int)]);
         let ret = Type::Generic("Gorillax".to_string(), vec![inner]);
@@ -34,7 +34,7 @@ impl TypeChecker {
         );
     }
 
-    pub(super) fn pin_exec_shell_interactive_signature(&mut self, local_name: &str) {
+    fn pin_exec_shell_interactive_signature(&mut self, local_name: &str) {
         // execShellInteractive(command: Str) → Gorillax[@(code: Int)]
         let inner = Type::BuchiPack(vec![("code".to_string(), Type::Int)]);
         let ret = Type::Generic("Gorillax".to_string(), vec![inner]);
@@ -100,7 +100,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn abi_request_fields() -> Vec<(String, Type)> {
+    fn abi_request_fields() -> Vec<(String, Type)> {
         let pair_list = Self::abi_name_value_pair_list_type();
         vec![
             ("method".to_string(), Type::Str),
@@ -112,7 +112,7 @@ impl TypeChecker {
         ]
     }
 
-    pub(super) fn abi_response_fields() -> Vec<(String, Type)> {
+    fn abi_response_fields() -> Vec<(String, Type)> {
         let pair_list = Self::abi_name_value_pair_list_type();
         vec![
             ("status".to_string(), Type::Int),
@@ -121,7 +121,7 @@ impl TypeChecker {
         ]
     }
 
-    pub(super) fn register_abi_type_symbol(&mut self, symbol_name: &str, local_name: &str) {
+    fn register_abi_type_symbol(&mut self, symbol_name: &str, local_name: &str) {
         match symbol_name {
             "WebRequest" => {
                 self.registry
@@ -245,7 +245,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn alias_imported_func_def(
+    fn alias_imported_func_def(
         fd: &crate::parser::FuncDef,
         local_name: &str,
         type_aliases: &std::collections::HashMap<&str, &str>,
@@ -272,7 +272,7 @@ impl TypeChecker {
         aliased
     }
 
-    pub(super) fn alias_imported_type_expr(
+    fn alias_imported_type_expr(
         ty: &crate::parser::TypeExpr,
         type_aliases: &std::collections::HashMap<&str, &str>,
     ) -> crate::parser::TypeExpr {

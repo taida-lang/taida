@@ -108,7 +108,7 @@ impl TypeChecker {
         self.check_mold_errors_in_expr_ctx(expr, false);
     }
 
-    pub(super) fn check_mold_errors_in_expr_ctx(&mut self, expr: &Expr, in_cage_runner: bool) {
+    fn check_mold_errors_in_expr_ctx(&mut self, expr: &Expr, in_cage_runner: bool) {
         match expr {
             // B11B-016: TypeExtends does not accept enum variant literals
             Expr::MoldInst(name, type_args, fields, _) => {
@@ -251,7 +251,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn check_call_argument_limit(&mut self, kind: &str, arg_count: usize, span: Span) {
+    fn check_call_argument_limit(&mut self, kind: &str, arg_count: usize, span: Span) {
         if arg_count <= MAX_CALL_ARGUMENTS {
             return;
         }
@@ -373,7 +373,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn check_comparison_errors_in_expr(&mut self, expr: &Expr) {
+    fn check_comparison_errors_in_expr(&mut self, expr: &Expr) {
         match expr {
             Expr::BinaryOp(_, _, _, _) => {
                 let _ = self.infer_expr_type_recording_only_e1605(expr);
@@ -1136,7 +1136,7 @@ impl TypeChecker {
     // miss `[E1605]` just because a tail of the interpolation failed to
     // tokenize, not to claim soundness in the presence of arbitrary
     // partial trees.
-    pub(super) fn parse_template_interpolation_expr(source: &str) -> Option<Expr> {
+    fn parse_template_interpolation_expr(source: &str) -> Option<Expr> {
         fn parse_expr(source: &str) -> Option<Expr> {
             let (program, _parse_errors) = crate::parser::parse(source);
             if let Some(Statement::Expr(parsed_expr)) = program.statements.first() {

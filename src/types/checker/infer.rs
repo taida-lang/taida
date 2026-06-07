@@ -11,18 +11,18 @@ use super::{
 };
 
 impl TypeChecker {
-    pub(super) fn result_type(success_ty: Type) -> Type {
+    fn result_type(success_ty: Type) -> Type {
         Type::Generic(
             "Result".to_string(),
             vec![success_ty, Type::Named("ErrorInfo".to_string())],
         )
     }
 
-    pub(super) fn async_type(inner_ty: Type) -> Type {
+    fn async_type(inner_ty: Type) -> Type {
         Type::Generic("Async".to_string(), vec![inner_ty])
     }
 
-    pub(super) fn core_builtin_return_type(&mut self, name: &str, args: &[Expr]) -> Option<Type> {
+    fn core_builtin_return_type(&mut self, name: &str, args: &[Expr]) -> Option<Type> {
         match name {
             "debug" => Some(
                 args.first()
@@ -148,7 +148,7 @@ impl TypeChecker {
         ty
     }
 
-    pub(super) fn infer_expr_type_with_expected_for_function_arg(
+    fn infer_expr_type_with_expected_for_function_arg(
         &mut self,
         expr: &Expr,
         expected: &Type,
@@ -160,7 +160,7 @@ impl TypeChecker {
         )
     }
 
-    pub(super) fn infer_expr_type_with_expected_inner(
+    fn infer_expr_type_with_expected_inner(
         &mut self,
         expr: &Expr,
         expected: &Type,
@@ -183,7 +183,7 @@ impl TypeChecker {
         hinted
     }
 
-    pub(super) fn infer_named_function_with_hint(
+    fn infer_named_function_with_hint(
         &mut self,
         expr: &Expr,
         expected: &Type,
@@ -258,7 +258,7 @@ impl TypeChecker {
         Some(fn_ty)
     }
 
-    pub(super) fn infer_function_body_with_param_types(
+    fn infer_function_body_with_param_types(
         &mut self,
         fd: &FuncDef,
         param_types: &[Type],
@@ -2443,7 +2443,7 @@ impl TypeChecker {
         ok.then_some((param_types, ret_ty))
     }
 
-    pub(super) fn collect_named_function_param_constraints(
+    fn collect_named_function_param_constraints(
         &mut self,
         fd: &FuncDef,
         expr: &Expr,
@@ -2502,11 +2502,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn binary_operand_constraint_from_expected(
-        &self,
-        op: &BinOp,
-        expected: &Type,
-    ) -> Option<Type> {
+    fn binary_operand_constraint_from_expected(&self, op: &BinOp, expected: &Type) -> Option<Type> {
         match op {
             BinOp::Add => match expected {
                 Type::Int | Type::Float | Type::Num | Type::Str => Some(expected.clone()),
@@ -2523,7 +2519,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn constrain_named_function_param(
+    fn constrain_named_function_param(
         &mut self,
         fd: &FuncDef,
         name: &str,
@@ -2560,11 +2556,11 @@ impl TypeChecker {
         self.infer_expr_type_with_expected_inner(expr, expected, FunctionHintDiagnostic::MethodArg)
     }
 
-    pub(super) fn fill_unknowns_from_expected(inferred: &Type, expected: &Type) -> Type {
+    fn fill_unknowns_from_expected(inferred: &Type, expected: &Type) -> Type {
         Self::fill_unknowns_from_expected_at_depth(inferred, expected, 0)
     }
 
-    pub(super) fn fill_unknowns_from_expected_at_depth(
+    fn fill_unknowns_from_expected_at_depth(
         inferred: &Type,
         expected: &Type,
         depth: usize,
@@ -2663,7 +2659,7 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn generic_expected_hint(
+    fn generic_expected_hint(
         &self,
         pattern: &Type,
         generic_names: &HashSet<String>,
@@ -2673,11 +2669,11 @@ impl TypeChecker {
         Self::erase_unbound_generic_names(&substituted, generic_names)
     }
 
-    pub(super) fn erase_unbound_generic_names(ty: &Type, generic_names: &HashSet<String>) -> Type {
+    fn erase_unbound_generic_names(ty: &Type, generic_names: &HashSet<String>) -> Type {
         Self::erase_unbound_generic_names_at_depth(ty, generic_names, 0)
     }
 
-    pub(super) fn erase_unbound_generic_names_at_depth(
+    fn erase_unbound_generic_names_at_depth(
         ty: &Type,
         generic_names: &HashSet<String>,
         depth: usize,
