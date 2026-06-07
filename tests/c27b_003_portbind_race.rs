@@ -62,7 +62,7 @@ fn run_one_iteration(release: bool) -> bool {
     let out = cmd
         .args([
             "--lib",
-            "net_eval::tests::test_http_serve_max_requests_3",
+            "net::eval::tests::test_http_serve_max_requests_3",
             "--",
             "--test-threads=1",
         ])
