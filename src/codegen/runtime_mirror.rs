@@ -38,6 +38,13 @@
 //! group (or a new one) — the default response to a mirror-drift
 //! failure is to finish the half-done edit on the other runtime.
 //!
+//! Scope: the gate guarantees *textual body identity* of the
+//! allowlisted layer (plus the non-`taida_*` helpers it calls). When an
+//! allowlisted body calls a deliberately-divergent `taida_*` symbol
+//! (e.g. `taida_lax_has_value` → `taida_pack_get_idx`), the callee's
+//! cross-target behavioral agreement is NOT this gate's job — that is
+//! what the backend parity test suite verifies end to end.
+//!
 //! The gate is intentionally test-only (no production code reads these
 //! tables): it changes zero behavior and exists to make the implicit
 //! cross-runtime contract executable.
@@ -103,13 +110,22 @@ fn significant_depths(src: &str) -> Vec<Option<i32>> {
 /// from `src`, keyed by function name. Token-aware: signatures inside
 /// comments/strings and nested scopes are ignored, and prototype
 /// declarations (`);`-terminated) are skipped.
+///
+/// Known limitation: the scanner has no preprocessor model — `#if`
+/// branches are scanned as plain text. Today no shared function
+/// definition sits inside a conditional block (the `#if` uses in both
+/// runtimes wrap macro constants and platform errno shims only); if
+/// one ever does, the duplicate-definition check below fails the gate
+/// rather than silently picking one branch.
 pub(crate) fn enumerate_fn_defs(src: &str) -> BTreeMap<String, String> {
     use regex::Regex;
     use std::sync::OnceLock;
     static SIG: OnceLock<Regex> = OnceLock::new();
+    // Each return-type token may carry attached pointer stars
+    // (`char* f(...)` / `char *f(...)` / `char * f(...)` all parse).
     let sig = SIG.get_or_init(|| {
         Regex::new(
-            r"(?m)^(?:static\s+)?(?:[A-Za-z_][A-Za-z0-9_]*\s+)+\**\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            r"(?m)^(?:static\s+)?(?:[A-Za-z_][A-Za-z0-9_]*\**\s+)+\**\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(",
         )
         .expect("static signature regex")
     });
@@ -167,7 +183,13 @@ pub(crate) fn enumerate_fn_defs(src: &str) -> BTreeMap<String, String> {
                     b'}' => {
                         bd -= 1;
                         if bd == 0 {
-                            defs.insert(name.to_string(), src[start..=k].to_string());
+                            let prev = defs.insert(name.to_string(), src[start..=k].to_string());
+                            assert!(
+                                prev.is_none(),
+                                "duplicate top-level definition of `{name}` — likely a \
+                                 preprocessor-conditional pair the scanner cannot \
+                                 disambiguate; teach it the `#if` structure first"
+                            );
                             break;
                         }
                     }
@@ -232,20 +254,67 @@ fn strip_comments(src: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Replace `taida_val` identifier tokens with `int64_t`, leaving
+/// string/char literal contents untouched (a literal mentioning the
+/// typedef name is data, and rewriting it would let a real message
+/// drift slip through normalization). Expects comments to be stripped
+/// already.
+fn replace_value_typedef(src: &str) -> String {
+    let b = src.as_bytes();
+    let n = b.len();
+    let mut out: Vec<u8> = Vec::with_capacity(n);
+    let mut i = 0usize;
+    while i < n {
+        let c = b[i];
+        if c == b'"' || c == b'\'' {
+            let quote = c;
+            let start = i;
+            i += 1;
+            while i < n {
+                if b[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if b[i] == quote {
+                    break;
+                }
+                i += 1;
+            }
+            i = (i + 1).min(n);
+            out.extend_from_slice(&b[start..i]);
+            continue;
+        }
+        if c.is_ascii_alphabetic() || c == b'_' {
+            let start = i;
+            while i < n && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            if &b[start..i] == b"taida_val" {
+                out.extend_from_slice(b"int64_t");
+            } else {
+                out.extend_from_slice(&b[start..i]);
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Normalize a definition for cross-runtime comparison. Tolerated
 /// differences, and nothing else: the value-typedef spelling
-/// (`taida_val` on native, `int64_t` on WASM), comments (the runtimes
-/// have different documentation styles — executable drift is what the
-/// gate hunts), and whitespace layout.
+/// (`taida_val` on native, `int64_t` on WASM — identifier tokens only,
+/// never inside string literals), comments (the runtimes have
+/// different documentation styles — executable drift is what the gate
+/// hunts), and whitespace layout.
 pub(crate) fn normalize_def(text: &str) -> String {
     use regex::Regex;
     use std::sync::OnceLock;
-    static VAL: OnceLock<Regex> = OnceLock::new();
     static WS: OnceLock<Regex> = OnceLock::new();
-    let val = VAL.get_or_init(|| Regex::new(r"\btaida_val\b").expect("typename regex"));
     let ws = WS.get_or_init(|| Regex::new(r"\s+").expect("whitespace regex"));
     let stripped = strip_comments(text);
-    let replaced = val.replace_all(&stripped, "int64_t");
+    let replaced = replace_value_typedef(&stripped);
     ws.replace_all(&replaced, " ").trim().to_string()
 }
 
@@ -292,11 +361,12 @@ pub(crate) const MIRROR_SYNC_ALLOWLIST: &[&str] = &[
     "taida_poly_neq_tagged",
 ];
 
-/// Non-`taida_*` static helpers that allowlisted bodies call. They are
-/// outside the common-symbol enumeration (no `taida_` prefix) but their
+/// Non-`taida_*` static helpers that allowlisted bodies call (directly
+/// or transitively: `_to_double` itself calls `_l2d`). They are outside
+/// the common-symbol enumeration (no `taida_` prefix) but their
 /// definitions must match for the allowlist equalities to be
 /// meaningful.
-pub(crate) const HELPER_ALLOWLIST: &[&str] = &["_d2l", "_to_double"];
+pub(crate) const HELPER_ALLOWLIST: &[&str] = &["_d2l", "_l2d", "_to_double"];
 
 /// Deliberately divergent: async is pthread worker/aggregation based on
 /// native; WASM ships deterministic single-threaded stubs.
@@ -467,10 +537,12 @@ const DIVERGENT_CONTAINER_ALLOC_RC: &[&str] = &[
     "taida_set_to_list",
     "taida_set_to_string",
     "taida_set_union",
+    "taida_str_alloc",
     "taida_str_concat",
     "taida_str_from_bool",
     "taida_str_from_float",
     "taida_str_from_int",
+    "taida_str_new_copy",
     "taida_str_repeat",
     "taida_str_replace",
     "taida_str_replace_first",
@@ -663,6 +735,7 @@ const DIVERGENT_MISC: &[&str] = &[
     "taida_has_magic_header",
     "taida_invoke_callback1",
     "taida_invoke_callback2",
+    "taida_lookup_field_name",
     "taida_lookup_field_type",
     "taida_make_error",
     "taida_make_error_with_kind",
@@ -772,6 +845,8 @@ void helper_caller(void) {
     int64_t taida_not_a_def = 0;
     (void)taida_not_a_def;
 }
+static char* taida_star_attached(int64_t a) { return 0; }
+static const char *taida_star_spaced(int64_t a) { return 0; }
 "#;
         let defs = enumerate_fn_defs(src);
         assert!(defs.contains_key("taida_real_fn"));
@@ -781,6 +856,9 @@ void helper_caller(void) {
         assert!(!defs.contains_key("taida_fake_string"));
         assert!(!defs.contains_key("taida_proto_only"));
         assert!(!defs.contains_key("taida_not_a_def"));
+        // pointer return types parse in both spellings (`char*` / `char *`)
+        assert!(defs.contains_key("taida_star_attached"));
+        assert!(defs.contains_key("taida_star_spaced"));
         let body = &defs["taida_real_fn"];
         assert!(body.contains("return 0;"), "body cut short: {body}");
         assert!(body.trim_end().ends_with('}'));
@@ -806,6 +884,12 @@ void helper_caller(void) {
         assert_ne!(
             normalize_def(r#"int64_t f() { return s("//x"); }"#),
             normalize_def(r#"int64_t f() { return s(""); }"#)
+        );
+        // the typedef rename never rewrites string literal contents —
+        // a message drift must stay visible
+        assert_ne!(
+            normalize_def(r#"int64_t f() { return s("taida_val"); }"#),
+            normalize_def(r#"int64_t f() { return s("int64_t"); }"#)
         );
     }
 
@@ -840,21 +924,26 @@ void helper_caller(void) {
                 "{name} is in both the allowlist and a divergence group"
             );
         }
-        for name in &common {
-            assert!(
-                allow.contains(name) || divergent.contains(name),
-                "unclassified common runtime symbol `{name}`: add it to \
-                 MIRROR_SYNC_ALLOWLIST (bodies must stay identical) or to a \
-                 DIVERGENT_* group (with the divergence reason)"
-            );
-        }
-        for name in allow.iter().chain(divergent.iter()) {
-            assert!(
-                common.contains(name),
-                "stale classification entry `{name}`: no longer defined in \
-                 both runtimes — remove it from the table"
-            );
-        }
+        let unclassified: Vec<&&str> = common
+            .iter()
+            .filter(|n| !allow.contains(*n) && !divergent.contains(*n))
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "unclassified common runtime symbols {unclassified:?}: add each \
+             to MIRROR_SYNC_ALLOWLIST (bodies must stay identical) or to a \
+             DIVERGENT_* group (with the divergence reason)"
+        );
+        let stale: Vec<&&str> = allow
+            .iter()
+            .chain(divergent.iter())
+            .filter(|n| !common.contains(*n))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "stale classification entries {stale:?}: no longer defined in \
+             both runtimes — remove them from the table"
+        );
         println!(
             "mirror-sync metrics: common={} allowlist={} helpers={} divergent={}",
             common.len(),
