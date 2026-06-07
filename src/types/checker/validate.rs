@@ -172,16 +172,15 @@ impl TypeChecker {
         fields: &[FieldDef],
         inherited_field_names: &HashSet<String>,
     ) {
-        // (E30 Phase 4 / E30B-002) declare-only function fields are NOT
-        // counted as positional binding targets for additional child-side
-        // header type-args. They are interface members whose values are
-        // supplied at instantiation time or, after Phase 6 (E30B-004), by an
-        // automatically-generated `defaultFn`. Counting them here would
-        // (a) silently consume a child-side type-arg slot that the user
-        // intended to bind to a regular new field, and (b) suppress the
-        // `[E1401]` "unbound type parameter" diagnostic that surfaces this
-        // mistake. See `FieldDef::is_declare_only_fn_field` and the Phase 4
-        // plan in `.dev/E30_SESSION_PLANS/Phase-4_*.md`.
+        // Declare-only function fields are NOT counted as positional
+        // binding targets for additional child-side header type-args.
+        // They are interface members whose values are supplied at
+        // instantiation time or by an automatically-generated
+        // `defaultFn`. Counting them here would (a) silently consume a
+        // child-side type-arg slot that the user intended to bind to a
+        // regular new field, and (b) suppress the `[E1401]` "unbound
+        // type parameter" diagnostic that surfaces this mistake. See
+        // `FieldDef::is_declare_only_fn_field`.
         let positional_field_count = fields
             .iter()
             .filter(|f| {
