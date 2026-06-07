@@ -5,3 +5,5 @@ pub(crate) mod help;
 pub(crate) mod build_descriptor;
 
 pub(crate) mod build;
+
+pub(crate) mod way;
