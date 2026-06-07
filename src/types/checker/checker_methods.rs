@@ -1,16 +1,15 @@
 use super::*;
 
 impl TypeChecker {
-    pub(super) fn check_method_args(
+    /// Static arity/signature table for builtin-type methods, split out of
+    /// `check_method_args` so the spec can be exercised directly by the
+    /// builtin-method spec tests. Pure factoring: body unchanged.
+    pub(super) fn builtin_method_signature(
         &mut self,
         obj_type: &Type,
         method: &str,
-        args: &[Expr],
-        span: &Span,
-    ) {
-        // Get method arity: (min_args, max_args, param_types)
-        // Only check for known methods with well-defined signatures.
-        let method_sig: Option<(usize, usize, Vec<Type>)> = match obj_type {
+    ) -> Option<(usize, usize, Vec<Type>)> {
+        match obj_type {
             Type::Str => match method {
                 "length" | "toString" => Some((0, 0, vec![])),
                 "contains" | "startsWith" | "endsWith" => Some((1, 1, vec![Type::Str])),
@@ -265,7 +264,20 @@ impl TypeChecker {
                 // does not fully know.
                 None
             }
-        };
+        }
+    }
+
+    pub(super) fn check_method_args(
+        &mut self,
+        obj_type: &Type,
+        method: &str,
+        args: &[Expr],
+        span: &Span,
+    ) {
+        // Get method arity: (min_args, max_args, param_types)
+        // Only check for known methods with well-defined signatures.
+        let method_sig: Option<(usize, usize, Vec<Type>)> =
+            self.builtin_method_signature(obj_type, method);
 
         // errorInfo intentionally uses an explicit allow-list. Accepting any
         // `(type, message)` shaped pack would reintroduce duck typing here.
