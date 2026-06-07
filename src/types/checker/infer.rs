@@ -2196,7 +2196,7 @@ impl TypeChecker {
                             // span and recurse. The callee span is the
                             // `mold_span` itself; positional args are the
                             // `type_args` list (which for `Fn[a, b]()` are
-                            // the runtime values, cf. lower_molds.rs).
+                            // the runtime values, cf. lower/molds_inst.rs).
                             let synth_callee = Expr::Ident(name.clone(), mold_span.clone());
                             let synth_call = Expr::FuncCall(
                                 Box::new(synth_callee),

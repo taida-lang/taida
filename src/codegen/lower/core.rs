@@ -1,8 +1,8 @@
 // C12B-024: src/codegen/lower.rs mechanical split (FB-21 / C12-9 Step 2).
 //
 // Semantics-preserving split of the former monolithic `lower.rs`. This file
-// groups core methods of the `Lowering` struct (placement table §2 of
-// `.dev/taida-logs/docs/design/file_boundaries.md`). All methods keep their
+// groups core methods of the `Lowering` struct (per the lower/ split's
+// placement table). All methods keep their
 // original signatures, bodies, and privacy; only the enclosing file changes.
 
 use super::{Lowering, simple_hash};
@@ -39,7 +39,7 @@ impl Lowering {
         // Prelude collection functions — function form parity with mold form
         // (`Zip[a, b]()` / `Enumerate[xs]()`). C25B-027 (2026-04-23 Codex
         // reopen of C24-B HOLD): the mold form was wired up by
-        // `src/codegen/lower_molds.rs::Zip|Enumerate`, but the function form
+        // `lower/molds_inst.rs::Zip|Enumerate`, but the function form
         // previously fell through `stdlib_runtime_funcs` lookup → user-func
         // lookup → lambda `CallIndirect` and crashed (native: segfault,
         // wasm: `uninitialized element` trap). Routing both spellings to
@@ -268,7 +268,7 @@ impl Lowering {
     /// downstream tag-aware ops (`taida_to_string_dispatch` /
     /// `stdout_with_tag`) can render the value with the correct type
     /// projection. Exposed at `pub(crate)` because `lower_pack_field_call`
-    /// lives in the sibling module `crate::codegen::lower_methods`.
+    /// lives in the sibling module `crate::codegen::lower::methods`.
     pub(crate) fn record_call_return_tag(&mut self, result: IrVar, return_tag: IrVar) {
         self.return_tag_vars.insert(result, return_tag);
     }

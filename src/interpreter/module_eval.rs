@@ -183,8 +183,8 @@ impl Interpreter {
         // The check uses the SAME package-directory resolution that
         // the source path uses (`resolve_package_module_versioned` /
         // `resolve_package_module`), so addon-backed and pure-source
-        // packages share the resolution order documented in
-        // `.dev/RC1_DESIGN.md` Phase 4 Lock.
+        // packages share the same resolution order
+        // (addon-backed lookups fall through to the source resolver).
         //
         // C25B-030: the interpreter is a first-class addon backend.
         // The `feature = "native"` gate here selects whether the

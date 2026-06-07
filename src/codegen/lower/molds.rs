@@ -1,8 +1,8 @@
 // C12B-024: src/codegen/lower.rs mechanical split (FB-21 / C12-9 Step 2).
 //
 // Semantics-preserving split of the former monolithic `lower.rs`. This file
-// groups molds methods of the `Lowering` struct (placement table §2 of
-// `.dev/taida-logs/docs/design/file_boundaries.md`). All methods keep their
+// groups molds methods of the `Lowering` struct (per the lower/ split's
+// placement table). All methods keep their
 // original signatures, bodies, and privacy; only the enclosing file changes.
 
 use super::{LowerError, Lowering, simple_hash};

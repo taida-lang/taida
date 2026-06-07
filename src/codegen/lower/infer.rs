@@ -1,8 +1,8 @@
 // C12B-024: src/codegen/lower.rs mechanical split (FB-21 / C12-9 Step 2).
 //
 // Semantics-preserving split of the former monolithic `lower.rs`. This file
-// groups infer methods of the `Lowering` struct (placement table §2 of
-// `.dev/taida-logs/docs/design/file_boundaries.md`). All methods keep their
+// groups infer methods of the `Lowering` struct (per the lower/ split's
+// placement table). All methods keep their
 // original signatures, bodies, and privacy; only the enclosing file changes.
 
 use super::{LowerError, Lowering};
@@ -478,8 +478,8 @@ impl Lowering {
     /// arithmetic 演算、Int-returning メソッド/関数、int_vars を網羅する。
     ///
     /// reopen 4 (2026-04-22): visibility widened from
-    /// `pub(super)` to `pub(crate)` so the sibling `lower_molds.rs`
-    /// module (`src/codegen/lower_molds.rs`, not under `lower/`) can
+    /// `pub(super)` to `pub(crate)` so the sibling
+    /// `lower/molds_inst.rs` module can
     /// use the richer Int check in the `Str[x]()` fast-path dispatch.
     /// No behavioural change — only the call surface widened.
     pub(crate) fn expr_is_int(&self, expr: &Expr) -> bool {
@@ -558,7 +558,7 @@ impl Lowering {
         match source {
             // C26B-011 (Phase 11): Div/Mod return Float when at least one
             // type-arg is Float (matches `taida_div_mold_f` lowering in
-            // `lower_molds.rs`). Without this, `Div[1.0, 2.0]() >=> r`
+            // `lower/molds_inst.rs`). Without this, `Div[1.0, 2.0]() >=> r`
             // leaves `r` untagged, `debug(r)` falls through to
             // `taida_debug_int`, and prints the f64 bit-pattern as an
             // int. `track_unmold_type_by_mold_name` only sees the mold

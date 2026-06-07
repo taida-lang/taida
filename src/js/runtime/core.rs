@@ -2264,7 +2264,7 @@ function Sort(list, opts) {
   // E34B-021: `desc` is treated as an alias for `reverse` so that
   // every backend honours `Sort[xs](by <= ..., desc <= true)` the
   // same way (Native / WASM already OR these two options together
-  // in `lower_molds.rs`).
+  // in `lower/molds_inst.rs`).
   if (opts && (opts.reverse || opts.desc)) copy.reverse();
   return Object.freeze(copy);
 }
