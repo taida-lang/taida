@@ -1,6 +1,7 @@
 //! infer — methods split out of the TypeChecker impl.
 //! Pure move from the parent module; behaviour unchanged.
 
+use crate::lexer::Span;
 use crate::parser::*;
 use crate::types::Type;
 use std::collections::{HashMap, HashSet};
@@ -2386,6 +2387,348 @@ impl TypeChecker {
             Statement::UnmoldForward(u) => self.lookup_var(&u.target).unwrap_or(Type::Unknown),
             Statement::UnmoldBackward(u) => self.lookup_var(&u.target).unwrap_or(Type::Unknown),
             _ => Type::Unknown,
+        }
+    }
+}
+
+impl TypeChecker {
+    pub(super) fn finalize_named_function_signature(
+        &mut self,
+        fd: &FuncDef,
+    ) -> Option<(Vec<Type>, Type)> {
+        let Some(return_type) = &fd.return_type else {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1526] Function '{}' must declare a return type with `=> :Type`.",
+                    fd.name
+                ),
+                span: fd.span.clone(),
+            });
+            return None;
+        };
+
+        let ret_ty = self.registry.resolve_type(return_type);
+        let mut param_types: Vec<Type> = fd
+            .params
+            .iter()
+            .map(|p| {
+                p.type_annotation
+                    .as_ref()
+                    .map(|t| self.registry.resolve_type(t))
+                    .unwrap_or(Type::Unknown)
+            })
+            .collect();
+
+        if let Some(tail_expr) = fd.body.last().and_then(Statement::yielded_expr) {
+            self.current_func_type_params.push(fd.type_params.clone());
+            self.collect_named_function_param_constraints(fd, tail_expr, &ret_ty, &mut param_types);
+            self.current_func_type_params.pop();
+        }
+
+        let mut ok = true;
+        for (idx, param) in fd.params.iter().enumerate() {
+            let ty = param_types.get(idx).cloned().unwrap_or(Type::Unknown);
+            if Self::contains_unknown(&ty) {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1525] Cannot infer type of parameter '{}' in function '{}'. Add a type annotation.",
+                        param.name, fd.name
+                    ),
+                    span: param.span.clone(),
+                });
+                ok = false;
+            }
+        }
+
+        ok.then_some((param_types, ret_ty))
+    }
+
+    pub(super) fn collect_named_function_param_constraints(
+        &mut self,
+        fd: &FuncDef,
+        expr: &Expr,
+        expected: &Type,
+        param_types: &mut [Type],
+    ) {
+        match expr {
+            Expr::Ident(name, span) => {
+                self.constrain_named_function_param(fd, name, expected, param_types, span);
+            }
+            Expr::BinaryOp(left, op, right, span) => {
+                if let Some(operand_ty) = self.binary_operand_constraint_from_expected(op, expected)
+                {
+                    self.collect_named_function_param_constraints(
+                        fd,
+                        left,
+                        &operand_ty,
+                        param_types,
+                    );
+                    self.collect_named_function_param_constraints(
+                        fd,
+                        right,
+                        &operand_ty,
+                        param_types,
+                    );
+                } else if matches!(op, BinOp::Add) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1525] Cannot resolve overloaded '+' in function '{}'. Add parameter annotations or use a concrete return type.",
+                            fd.name
+                        ),
+                        span: span.clone(),
+                    });
+                }
+            }
+            Expr::UnaryOp(_, inner, _) => {
+                self.collect_named_function_param_constraints(fd, inner, expected, param_types);
+            }
+            Expr::Unmold(base, _) | Expr::Throw(base, _) => {
+                self.collect_named_function_param_constraints(fd, base, expected, param_types);
+            }
+            Expr::FieldAccess(_, _, _) => {}
+            Expr::CondBranch(arms, _) => {
+                for arm in arms {
+                    if let Some(arm_expr) = arm.last_expr() {
+                        self.collect_named_function_param_constraints(
+                            fd,
+                            arm_expr,
+                            expected,
+                            param_types,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn binary_operand_constraint_from_expected(
+        &self,
+        op: &BinOp,
+        expected: &Type,
+    ) -> Option<Type> {
+        match op {
+            BinOp::Add => match expected {
+                Type::Int | Type::Float | Type::Num | Type::Str => Some(expected.clone()),
+                Type::Named(name) if self.type_param_is_numeric(name) => Some(expected.clone()),
+                _ => None,
+            },
+            BinOp::Sub | BinOp::Mul => match expected {
+                Type::Int | Type::Float | Type::Num => Some(expected.clone()),
+                Type::Named(name) if self.type_param_is_numeric(name) => Some(expected.clone()),
+                _ => None,
+            },
+            BinOp::Lt | BinOp::Gt | BinOp::GtEq => None,
+            BinOp::Eq | BinOp::NotEq | BinOp::And | BinOp::Or | BinOp::Concat => None,
+        }
+    }
+
+    pub(super) fn constrain_named_function_param(
+        &mut self,
+        fd: &FuncDef,
+        name: &str,
+        expected: &Type,
+        param_types: &mut [Type],
+        span: &Span,
+    ) {
+        if matches!(expected, Type::Unknown) || Self::contains_unknown(expected) {
+            return;
+        }
+        let Some(idx) = fd.params.iter().position(|param| param.name == name) else {
+            return;
+        };
+        let current = param_types.get(idx).cloned().unwrap_or(Type::Unknown);
+        if current == Type::Unknown {
+            param_types[idx] = expected.clone();
+            return;
+        }
+        if current != *expected
+            && !self.registry.is_subtype_of(&current, expected)
+            && !self.registry.is_subtype_of(expected, &current)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1525] Conflicting inferred type for parameter '{}' in function '{}': {} vs {}.",
+                    name, fd.name, current, expected
+                ),
+                span: span.clone(),
+            });
+        }
+    }
+
+    pub(super) fn infer_expr_type_with_expected(&mut self, expr: &Expr, expected: &Type) -> Type {
+        self.infer_expr_type_with_expected_inner(expr, expected, FunctionHintDiagnostic::MethodArg)
+    }
+
+    pub(super) fn fill_unknowns_from_expected(inferred: &Type, expected: &Type) -> Type {
+        Self::fill_unknowns_from_expected_at_depth(inferred, expected, 0)
+    }
+
+    pub(super) fn fill_unknowns_from_expected_at_depth(
+        inferred: &Type,
+        expected: &Type,
+        depth: usize,
+    ) -> Type {
+        if depth >= Self::MAX_BIDI_TYPE_HINT_DEPTH {
+            return inferred.clone();
+        }
+        match (inferred, expected) {
+            (
+                Type::Generic(inferred_name, inferred_args),
+                Type::Generic(expected_name, expected_args),
+            ) if inferred_name == expected_name && inferred_args.len() == expected_args.len() => {
+                Type::Generic(
+                    inferred_name.clone(),
+                    inferred_args
+                        .iter()
+                        .zip(expected_args.iter())
+                        .map(|(actual, expected)| {
+                            if matches!(actual, Type::Unknown) {
+                                expected.clone()
+                            } else {
+                                Self::fill_unknowns_from_expected_at_depth(
+                                    actual,
+                                    expected,
+                                    depth + 1,
+                                )
+                            }
+                        })
+                        .collect(),
+                )
+            }
+            (Type::List(inferred_inner), Type::List(expected_inner)) => Type::List(Box::new(
+                if matches!(inferred_inner.as_ref(), Type::Unknown) {
+                    expected_inner.as_ref().clone()
+                } else {
+                    Self::fill_unknowns_from_expected_at_depth(
+                        inferred_inner,
+                        expected_inner,
+                        depth + 1,
+                    )
+                },
+            )),
+            (Type::BuchiPack(inferred_fields), Type::BuchiPack(expected_fields)) => {
+                Type::BuchiPack(
+                    inferred_fields
+                        .iter()
+                        .map(|(field_name, inferred_ty)| {
+                            let hinted_ty = expected_fields
+                                .iter()
+                                .find(|(expected_name, _)| expected_name == field_name)
+                                .map(|(_, expected_ty)| {
+                                    if matches!(inferred_ty, Type::Unknown) {
+                                        expected_ty.clone()
+                                    } else {
+                                        Self::fill_unknowns_from_expected_at_depth(
+                                            inferred_ty,
+                                            expected_ty,
+                                            depth + 1,
+                                        )
+                                    }
+                                })
+                                .unwrap_or_else(|| inferred_ty.clone());
+                            (field_name.clone(), hinted_ty)
+                        })
+                        .collect(),
+                )
+            }
+            (
+                Type::Function(inferred_params, inferred_ret),
+                Type::Function(expected_params, expected_ret),
+            ) if inferred_params.len() == expected_params.len() => Type::Function(
+                // This is hint filling, not subtype validation. Function
+                // boundary variance is checked later by is_function_arg_subtype_of.
+                inferred_params
+                    .iter()
+                    .zip(expected_params.iter())
+                    .map(|(actual, expected)| {
+                        if matches!(actual, Type::Unknown) {
+                            expected.clone()
+                        } else {
+                            Self::fill_unknowns_from_expected_at_depth(actual, expected, depth + 1)
+                        }
+                    })
+                    .collect(),
+                Box::new(if matches!(inferred_ret.as_ref(), Type::Unknown) {
+                    expected_ret.as_ref().clone()
+                } else {
+                    Self::fill_unknowns_from_expected_at_depth(
+                        inferred_ret,
+                        expected_ret,
+                        depth + 1,
+                    )
+                }),
+            ),
+            _ => inferred.clone(),
+        }
+    }
+
+    pub(super) fn generic_expected_hint(
+        &self,
+        pattern: &Type,
+        generic_names: &HashSet<String>,
+        bindings: &HashMap<String, Type>,
+    ) -> Type {
+        let substituted = self.substitute_generic_type(pattern, generic_names, bindings);
+        Self::erase_unbound_generic_names(&substituted, generic_names)
+    }
+
+    pub(super) fn erase_unbound_generic_names(ty: &Type, generic_names: &HashSet<String>) -> Type {
+        Self::erase_unbound_generic_names_at_depth(ty, generic_names, 0)
+    }
+
+    pub(super) fn erase_unbound_generic_names_at_depth(
+        ty: &Type,
+        generic_names: &HashSet<String>,
+        depth: usize,
+    ) -> Type {
+        if depth >= Self::MAX_BIDI_TYPE_HINT_DEPTH {
+            return ty.clone();
+        }
+        match ty {
+            Type::Named(name) if generic_names.contains(name) => Type::Unknown,
+            Type::List(inner) => Type::List(Box::new(Self::erase_unbound_generic_names_at_depth(
+                inner,
+                generic_names,
+                depth + 1,
+            ))),
+            Type::Generic(name, args) => Type::Generic(
+                name.clone(),
+                args.iter()
+                    .map(|arg| {
+                        Self::erase_unbound_generic_names_at_depth(arg, generic_names, depth + 1)
+                    })
+                    .collect(),
+            ),
+            Type::BuchiPack(fields) => Type::BuchiPack(
+                fields
+                    .iter()
+                    .map(|(name, ty)| {
+                        (
+                            name.clone(),
+                            Self::erase_unbound_generic_names_at_depth(
+                                ty,
+                                generic_names,
+                                depth + 1,
+                            ),
+                        )
+                    })
+                    .collect(),
+            ),
+            Type::Function(params, ret) => Type::Function(
+                params
+                    .iter()
+                    .map(|param| {
+                        Self::erase_unbound_generic_names_at_depth(param, generic_names, depth + 1)
+                    })
+                    .collect(),
+                Box::new(Self::erase_unbound_generic_names_at_depth(
+                    ret,
+                    generic_names,
+                    depth + 1,
+                )),
+            ),
+            _ => ty.clone(),
         }
     }
 }

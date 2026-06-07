@@ -4,7 +4,7 @@
 use crate::lexer::Span;
 use crate::parser::*;
 use crate::types::Type;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::{TypeChecker, TypeError, WorkerAddonBinding, WorkerAddonDecision};
 
@@ -866,6 +866,109 @@ impl TypeChecker {
             | Type::Any
             | Type::Json
             | Type::Molten => false,
+        }
+    }
+}
+
+impl TypeChecker {
+    pub(super) fn worker_mold_value_arg_count(name: &str, arg_count: usize) -> usize {
+        match name {
+            "JSGet" if arg_count == 2 => 1,
+            "JSCall" | "JSCallAsync" if arg_count == 3 => 2,
+            "JSNew" if arg_count == 3 => 2,
+            _ => arg_count,
+        }
+    }
+
+    pub(super) fn is_worker_effect_symbol(&self, name: &str) -> bool {
+        self.worker_effect_symbols.contains(name) || Self::is_worker_effect_builtin(name)
+    }
+
+    pub(super) fn is_worker_effect_mold(name: &str) -> bool {
+        use crate::types::mold_specs::{WorkerMoldBoundary, lookup_worker_mold_boundary};
+
+        lookup_worker_mold_boundary(name) == WorkerMoldBoundary::Effectful
+    }
+
+    pub(super) fn is_worker_host_boundary_mold(name: &str) -> bool {
+        use crate::types::mold_specs::{WorkerMoldBoundary, lookup_worker_mold_boundary};
+
+        name == "RustAddon" || lookup_worker_mold_boundary(name) == WorkerMoldBoundary::HostBoundary
+    }
+
+    pub(super) fn is_worker_nested_async_mold(name: &str) -> bool {
+        use crate::types::mold_specs::{WorkerMoldBoundary, lookup_worker_mold_boundary};
+
+        lookup_worker_mold_boundary(name) == WorkerMoldBoundary::NestedAsync
+    }
+
+    pub(super) fn is_worker_safe_user_mold(
+        &self,
+        name: &str,
+        args: &[Type],
+        seen_named: &mut HashSet<String>,
+    ) -> bool {
+        let Some((type_params, fields)) = self.registry.mold_defs.get(name) else {
+            return false;
+        };
+        let key = format!(
+            "{}[{}]",
+            name,
+            args.iter()
+                .map(|arg| arg.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if !seen_named.insert(key.clone()) {
+            return true;
+        }
+        let bindings: HashMap<String, Type> = type_params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect();
+        let safe = fields.iter().all(|(_, field_ty)| {
+            let resolved = Self::substitute_worker_type_params(field_ty, &bindings);
+            self.is_worker_safe_type_inner(&resolved, seen_named)
+        });
+        seen_named.remove(&key);
+        safe
+    }
+
+    pub(super) fn substitute_worker_type_params(
+        ty: &Type,
+        bindings: &HashMap<String, Type>,
+    ) -> Type {
+        match ty {
+            Type::Named(name) => bindings.get(name).cloned().unwrap_or_else(|| ty.clone()),
+            Type::BuchiPack(fields) => Type::BuchiPack(
+                fields
+                    .iter()
+                    .map(|(name, field_ty)| {
+                        (
+                            name.clone(),
+                            Self::substitute_worker_type_params(field_ty, bindings),
+                        )
+                    })
+                    .collect(),
+            ),
+            Type::List(inner) => Type::List(Box::new(Self::substitute_worker_type_params(
+                inner, bindings,
+            ))),
+            Type::Function(params, ret) => Type::Function(
+                params
+                    .iter()
+                    .map(|param| Self::substitute_worker_type_params(param, bindings))
+                    .collect(),
+                Box::new(Self::substitute_worker_type_params(ret, bindings)),
+            ),
+            Type::Generic(name, args) => Type::Generic(
+                name.clone(),
+                args.iter()
+                    .map(|arg| Self::substitute_worker_type_params(arg, bindings))
+                    .collect(),
+            ),
+            _ => ty.clone(),
         }
     }
 }

@@ -1100,3 +1100,163 @@ impl TypeChecker {
         result_ty
     }
 }
+
+impl TypeChecker {
+    // ── Comparison diagnostics in skipped expression contexts ──
+    //
+    // Some containers know their own type without fully inferring children
+    // (for example builtin function args, method args with `Unknown`
+    // parameters, lambdas passed as values, and TemplateLit raw strings).
+    // The old implementation ran a whole-program fourth pass with its own
+    // scope reconstruction.  That both re-inferred nested expressions and
+    // could drift from the main pass.  This walker is started from main
+    // inference paths that may skip child expressions or treat their argument
+    // signature as Unknown, and records only `[E1605]` diagnostics from those
+    // speculative walks.
+    pub(super) fn run_comparison_error_walk(&mut self, expr: &Expr) {
+        if self.in_comparison_error_walk {
+            return;
+        }
+        self.in_comparison_error_walk = true;
+        self.check_comparison_errors_in_expr(expr);
+        self.in_comparison_error_walk = false;
+    }
+
+    // E32B-045: When the interpolation source has trailing syntax errors
+    // (e.g. `foo == "x" |> bar` — `|>` is not valid in expression context),
+    // the parser still produces a partial AST for the prefix that *did*
+    // parse cleanly (`foo == "x"`). Earlier code dropped the partial AST
+    // whenever `parse_errors` was non-empty, which silently hid `[E1605]`
+    // detection on any comparison sitting inside such an interpolation.
+    // We now accept the partial AST and let `check_comparison_errors_in_expr`
+    // walk it as a best-effort diagnosis: comparison prefixes that *did*
+    // parse get diagnosed, and downstream `Type::Unknown` guards keep
+    // false positives away on the missing pieces. This is a diagnostic
+    // policy rather than a soundness proof — the goal is to refuse to
+    // miss `[E1605]` just because a tail of the interpolation failed to
+    // tokenize, not to claim soundness in the presence of arbitrary
+    // partial trees.
+    pub(super) fn parse_template_interpolation_expr(source: &str) -> Option<Expr> {
+        fn parse_expr(source: &str) -> Option<Expr> {
+            let (program, _parse_errors) = crate::parser::parse(source);
+            if let Some(Statement::Expr(parsed_expr)) = program.statements.first() {
+                return Some(parsed_expr.clone());
+            }
+            None
+        }
+
+        parse_expr(source).or_else(|| parse_expr(&format!("({source})")))
+    }
+
+    pub(super) fn func_call_args_need_comparison_walk(&self, func: &Expr, args: &[Expr]) -> bool {
+        fn args_with_unknown_expected_need_walk(args: &[Expr], params: &[Type]) -> bool {
+            args.iter().enumerate().any(|(i, arg)| {
+                if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                    return false;
+                }
+                params
+                    .get(i)
+                    .is_none_or(|expected| matches!(expected, Type::Unknown))
+            })
+        }
+
+        let Expr::Ident(name, _) = func else {
+            return true;
+        };
+
+        if self.generic_func_defs.contains_key(name) {
+            // Generic function dispatch infers every provided argument while
+            // binding type parameters, so an additional E1605 walk would only
+            // duplicate that work.
+            return false;
+        }
+        if let Some(param_types) = self.func_param_types.get(name) {
+            return args_with_unknown_expected_need_walk(args, param_types);
+        }
+        if self.func_types.contains_key(name) {
+            return true;
+        }
+        if let Some(Type::Function(params, _)) = self.lookup_var(name) {
+            return args_with_unknown_expected_need_walk(args, &params);
+        }
+        if let Some(Type::Named(var_name)) = self.lookup_var(name)
+            && let Some(Type::Function(params, _)) = self.type_param_function_constraint(&var_name)
+        {
+            return args_with_unknown_expected_need_walk(args, &params);
+        }
+        true
+    }
+
+    // The two complex `if` guards under each `BinOp` arm cover several
+    // distinct fall-through cases; collapsing them into match-arm guards
+    // pushes long boolean expressions next to the pattern and hurts
+    // readability without changing semantics.
+    #[allow(clippy::collapsible_match)]
+    pub(super) fn emit_comparison_mismatch_if_needed(
+        &mut self,
+        left_type: &Type,
+        op: &BinOp,
+        right_type: &Type,
+        span: &Span,
+    ) {
+        let left_is_numeric_var =
+            matches!(left_type, Type::Named(n) if self.type_param_is_numeric(n));
+        let right_is_numeric_var =
+            matches!(right_type, Type::Named(n) if self.type_param_is_numeric(n));
+        let left_is_numeric_ext = left_type.is_numeric() || left_is_numeric_var;
+        let right_is_numeric_ext = right_type.is_numeric() || right_is_numeric_var;
+
+        match op {
+            BinOp::Eq | BinOp::NotEq => {
+                if left_type != &Type::Unknown
+                    && right_type != &Type::Unknown
+                    && !Self::contains_unknown(left_type)
+                    && !Self::contains_unknown(right_type)
+                    && left_type != right_type
+                    && !(left_type.is_numeric() && right_type.is_numeric())
+                    && !(left_is_numeric_ext && right_is_numeric_ext)
+                    && !self.registry.is_subtype_of(left_type, right_type)
+                    && !self.registry.is_subtype_of(right_type, left_type)
+                {
+                    self.push_e1605_once(
+                        span,
+                        format!(
+                            "[E1605] Cannot compare {} with {} using {:?}. \
+                             Hint: Both operands should be of compatible types.",
+                            left_type, right_type, op
+                        ),
+                    );
+                }
+            }
+            BinOp::Lt | BinOp::Gt | BinOp::GtEq => {
+                if left_type != &Type::Unknown
+                    && right_type != &Type::Unknown
+                    && !Self::contains_unknown(left_type)
+                    && !Self::contains_unknown(right_type)
+                {
+                    let both_numeric = left_type.is_numeric() && right_type.is_numeric();
+                    let both_str =
+                        matches!(left_type, Type::Str) && matches!(right_type, Type::Str);
+                    let same_enum = match (left_type, right_type) {
+                        (Type::Named(a), Type::Named(b)) => a == b && self.registry.is_enum_type(a),
+                        _ => false,
+                    };
+                    let both_numeric_ext = left_is_numeric_ext && right_is_numeric_ext;
+                    let valid = both_numeric || both_numeric_ext || both_str || same_enum;
+                    if !valid {
+                        self.push_e1605_once(
+                            span,
+                            format!(
+                                "[E1605] Cannot compare {} with {} using {:?}. \
+                                 Hint: Ordering comparison requires numeric, string, or same-Enum operands. \
+                                 For Enum↔Int comparisons use `Ordinal[<enum>]()` to obtain the Int first.",
+                                left_type, right_type, op
+                            ),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
