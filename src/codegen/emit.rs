@@ -1259,6 +1259,19 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[],
             returns: &[Ptr],
         },
+        // F56: opaque secret carriers + redaction.
+        "taida_moltenize_new" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_secret_new" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_redact" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
         // C25B-001: minimal Stream wrapper — see `taida_stream_new` in
         // src/codegen/native_runtime/core.c and runtime_core_wasm/
         // 02_containers.inc.c for the implementation.

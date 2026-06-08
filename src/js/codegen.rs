@@ -3962,6 +3962,39 @@ impl JsCodegen {
                     self.write("__taida_molten()");
                     return Ok(());
                 }
+                // F56: Moltenize[v]() / MoltenizeSecret[v]() → __taida_moltenize(v, policy)
+                if name == "Moltenize" || name == "MoltenizeSecret" {
+                    if type_args.len() != 1 {
+                        return Err(JsError {
+                            message: format!(
+                                "{} requires exactly 1 type argument: {}[value]",
+                                name, name
+                            ),
+                        });
+                    }
+                    let policy = if name == "MoltenizeSecret" {
+                        "Secret"
+                    } else {
+                        "Moltenized"
+                    };
+                    self.write("__taida_moltenize(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(&format!(", '{}')", policy));
+                    return Ok(());
+                }
+                // F56: Redact[secret]() → __taida_redact(secret)
+                if name == "Redact" {
+                    if type_args.len() != 1 {
+                        return Err(JsError {
+                            message: "Redact requires exactly 1 type argument: Redact[secret]"
+                                .to_string(),
+                        });
+                    }
+                    self.write("__taida_redact(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(")");
+                    return Ok(());
+                }
                 // Stream[value]() → Stream_mold(value)
                 if name == "Stream" {
                     self.write("Stream_mold(");

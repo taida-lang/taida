@@ -1081,6 +1081,43 @@ int64_t taida_molten_new(void) {
     return pack;
 }
 
+/* F56: opaque secret carriers (Moltenized / Secret). fc=2 pack with an extra
+   __value slot. Checker sink matrix rejects display / JSON / concat / unmold;
+   this is the value-construction half of the contract.
+
+   INVARIANT: the __type slot MUST store the shared `__wasm_moltenized_str` /
+   `__wasm_secret_str` statics (defined in 01_core.inc.c). `_wasm_carrier_kind`
+   classifies a carrier by *pointer identity* against those exact addresses (a
+   content compare faulted out of bounds on magic-tagged AsyncTask/Par packs).
+   All `.inc.c` fragments compile as one translation unit, so the addresses
+   match. Any future carrier producer must use these same statics — a distinct
+   "Moltenized" literal would fail closed in display (renders the pack) but
+   fail OPEN in the detector, so do not inline the string here. (Native's
+   `taida_is_moltenized` additionally falls back to a bounded content compare,
+   so the native/wasm guards are intentionally asymmetric.) */
+int64_t taida_moltenize_new(int64_t value) {
+    int64_t pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, WASM_HASH___TYPE);
+    taida_pack_set(pack, 0, (int64_t)(intptr_t)__wasm_moltenized_str);
+    taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
+    taida_pack_set(pack, 1, value);
+    return pack;
+}
+
+int64_t taida_secret_new(int64_t value) {
+    int64_t pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, WASM_HASH___TYPE);
+    taida_pack_set(pack, 0, (int64_t)(intptr_t)__wasm_secret_str);
+    taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
+    taida_pack_set(pack, 1, value);
+    return pack;
+}
+
+int64_t taida_redact(int64_t carrier) {
+    (void)carrier;
+    return taida_str_new_copy((int64_t)(intptr_t)"***");
+}
+
 int64_t taida_stub_new(int64_t message) {
     (void)message;
     return taida_molten_new();

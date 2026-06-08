@@ -709,6 +709,22 @@ pub enum Value {
     /// that need the enum identity ( jsonEncode, Ordinal[],
     /// ordering) use pattern-match on `EnumVal`.
     EnumVal(String, i64),
+    /// Moltenized opaque carrier (F56) — a sealed value that cannot be
+    /// displayed, serialized, compared, or unmolded directly. `value` holds
+    /// the inner runtime value; `reveal_type` is the type-name of `T` (for
+    /// future Reveal / graph verify); `policy` is `"Moltenized"` or
+    /// `"Secret"`. `Value::Molten` is NOT reused because it carries no `T`.
+    ///
+    /// Level 0 (F56 MVP): the type checker rejects every sink (display /
+    /// jsonEncode / concat / equality / collection / Cage subject) at compile
+    /// time; the runtime guards below are the fail-closed second layer so a
+    /// value reaching a sink via `--no-check` or an `Unknown` hole still
+    /// errors instead of leaking.
+    Moltenized {
+        value: Box<Value>,
+        reveal_type: String,
+        policy: String,
+    },
 }
 
 /// A function closure.
@@ -1014,6 +1030,10 @@ impl Value {
             Value::Gorilla => false,
             Value::Error(_) => true,
             Value::Molten => false,
+            // F56: a Moltenized/Secret carrier always holds a sealed value;
+            // report a fixed true so the inner value's truthiness can never
+            // leak through a conditional branch.
+            Value::Moltenized { .. } => true,
             Value::Stream(s) => !s.items.is_empty() || s.status == StreamStatus::Active,
             Value::Async(a) => a.status == AsyncStatus::Fulfilled,
             Value::AsyncTask(_) => true,
@@ -1138,6 +1158,10 @@ impl Value {
             },
             Value::Json(j) => serde_json::to_string(j).unwrap_or_default(),
             Value::Molten => "Molten".to_string(),
+            // F56: never render the sealed inner value. Show only the policy
+            // label (the compile-time sink checks already reject this path;
+            // this is the fail-closed runtime layer).
+            Value::Moltenized { policy, .. } => format!("<{}>", policy),
             Value::Stream(s) => match s.status {
                 StreamStatus::Active => "Stream[active]".to_string(),
                 StreamStatus::Completed => format!("Stream[completed: {} items]", s.items.len()),

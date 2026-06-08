@@ -840,6 +840,10 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         // W-5: Error/Molten/Stub helpers
         "taida_molten_new" => "int64_t taida_molten_new(void);".to_string(),
+        // F56: opaque secret carriers + redaction.
+        "taida_moltenize_new" => "int64_t taida_moltenize_new(int64_t value);".to_string(),
+        "taida_secret_new" => "int64_t taida_secret_new(int64_t value);".to_string(),
+        "taida_redact" => "int64_t taida_redact(int64_t carrier);".to_string(),
         // C25B-001: minimal Stream wrapper (runtime lives in
         // runtime_core_wasm/02_containers.inc.c).
         "taida_stream_new" => "int64_t taida_stream_new(int64_t inner_value);".to_string(),

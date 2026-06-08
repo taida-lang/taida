@@ -598,6 +598,9 @@ pub fn build_host_input_value(value: &Value) -> Result<*mut TaidaAddonValueV1, B
         Value::AsyncTask(_) => Err(BridgeError::UnsupportedInput { kind: "AsyncTask" }),
         Value::Json(_) => Err(BridgeError::UnsupportedInput { kind: "Json" }),
         Value::Molten => Err(BridgeError::UnsupportedInput { kind: "Molten" }),
+        // F56: a Moltenized/Secret carrier never crosses the addon boundary
+        // (it would expose the sealed value to host-controlled code).
+        Value::Moltenized { .. } => Err(BridgeError::UnsupportedInput { kind: "Moltenized" }),
         Value::Stream(_) => Err(BridgeError::UnsupportedInput { kind: "Stream" }),
         // C18-2: EnumVal marshals to the addon ABI as a plain Int(ordinal).
         // The addon protocol has no dedicated Enum tag; the variant name

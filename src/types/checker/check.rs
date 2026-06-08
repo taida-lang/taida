@@ -971,6 +971,7 @@ impl TypeChecker {
             Statement::UnmoldForward(uf) => {
                 // `expr >=> target` -- target gets the unmolded (inner) value
                 let source_ty = self.infer_expr_type(&uf.source);
+                self.reject_sealed_carrier_unmold(&source_ty, &uf.span);
                 let target_ty = self.unmold_type(&source_ty);
                 self.define_var_with_span(&uf.target, target_ty.clone(), Some(&uf.span));
                 if target_ty == Type::Molten
@@ -982,6 +983,7 @@ impl TypeChecker {
             Statement::UnmoldBackward(ub) => {
                 // `target <=< expr`
                 let source_ty = self.infer_expr_type(&ub.source);
+                self.reject_sealed_carrier_unmold(&source_ty, &ub.span);
                 let target_ty = self.unmold_type(&source_ty);
                 self.define_var_with_span(&ub.target, target_ty.clone(), Some(&ub.span));
                 if target_ty == Type::Molten

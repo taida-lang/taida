@@ -371,6 +371,17 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::range("Optional", 0, Some(1), ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("Molten", 0, &[], MoldReturnKind::Pack)
         .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    // F56: opaque secret carriers. A sealed value must not cross a CPU
+    // worker boundary (it would expose the inner value), mirroring `Molten`.
+    MoldSpec::exact("Moltenize", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
+    MoldSpec::exact("MoltenizeSecret", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
+    MoldSpec::exact("Redact", 1, ANY1, MoldReturnKind::Str)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
     MoldSpec::exact("Stub", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::range("TODO", 0, Some(4), ANY4, MoldReturnKind::Pack).with_options(TODO_OPTIONS),
     MoldSpec::exact("Cage", 2, ANY2, MoldReturnKind::Pack)

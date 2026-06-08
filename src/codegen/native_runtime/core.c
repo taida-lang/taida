@@ -827,6 +827,9 @@ taida_ptr taida_lax_map(taida_ptr lax_ptr, taida_fn_ptr fn_ptr);
 taida_ptr taida_lax_flat_map(taida_ptr lax_ptr, taida_fn_ptr fn_ptr);
 taida_ptr taida_gorillax_new(taida_val value);
 taida_ptr taida_molten_new(void);
+taida_ptr taida_moltenize_new(taida_val value);
+taida_ptr taida_secret_new(taida_val value);
+taida_ptr taida_redact(taida_val carrier);
 taida_ptr taida_stub_new(taida_ptr message);
 taida_ptr taida_todo_new(taida_ptr id, taida_ptr task, taida_ptr sol, taida_ptr unm);
 taida_ptr taida_gorillax_err(taida_ptr error);
@@ -1673,6 +1676,36 @@ taida_val taida_molten_new(void) {
     return pack;
 }
 
+// F56: opaque secret carriers (Moltenized / Secret). Same pack family as
+// Molten but fc=2 with an extra __value slot holding the sealed value. The
+// checker sink matrix rejects display / JSON / concat / equality / unmold;
+// native display renders "<Moltenized>" / "<Secret>" as the fail-closed layer.
+static const char __moltenized_type_str[] = "Moltenized";
+static const char __secret_type_str[] = "Secret";
+
+taida_val taida_moltenize_new(taida_val value) {
+    taida_val pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 0, (taida_val)__moltenized_type_str);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH___VALUE);
+    taida_pack_set(pack, 1, value);
+    return pack;
+}
+
+taida_val taida_secret_new(taida_val value) {
+    taida_val pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, (taida_val)HASH___TYPE);
+    taida_pack_set(pack, 0, (taida_val)__secret_type_str);
+    taida_pack_set_hash(pack, 1, (taida_val)HASH___VALUE);
+    taida_pack_set(pack, 1, value);
+    return pack;
+}
+
+taida_val taida_redact(taida_val carrier) {
+    (void)carrier;
+    return (taida_val)taida_str_new_copy("***");
+}
+
 // C25B-001: Stream[val]() — minimal wrapper matching the interpreter's
 // `Stream[val]()` semantics (wrap a single value as a single-item
 // completed stream; see `src/interpreter/mold.rs:3127`). Phase 3
@@ -1775,6 +1808,41 @@ static int taida_is_molten(taida_val ptr) {
     size_t len = 0;
     if (!taida_read_cstr_len_safe(type_str, 32, &len)) return 0;
     return len == 6 && memcmp(type_str, "Molten", 6) == 0;
+}
+
+// F56: detect a Moltenized/Secret carrier pack (fc=2, __type = "Moltenized"
+// or "Secret"). Used by unmold and display to fail closed.
+static int taida_is_moltenized(taida_val ptr) {
+    if (!TAIDA_IS_PACK(ptr)) return 0;
+    if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 5)) return 0;
+    taida_val *obj = (taida_val*)ptr;
+    if (obj[1] != 2) return 0;
+    if (obj[2] != (taida_val)HASH___TYPE) return 0;
+    taida_val type_ptr = obj[4];
+    if (type_ptr == (taida_val)__moltenized_type_str) return 1;
+    if (type_ptr == (taida_val)__secret_type_str) return 1;
+    if (!taida_ptr_is_readable(type_ptr, 1)) return 0;
+    const char *type_str = (const char*)type_ptr;
+    size_t len = 0;
+    if (!taida_read_cstr_len_safe(type_str, 32, &len)) return 0;
+    return (len == 10 && memcmp(type_str, "Moltenized", 10) == 0)
+        || (len == 6 && memcmp(type_str, "Secret", 6) == 0);
+}
+
+// F56: render a sealed carrier as "<Secret>" / "<Moltenized>" (policy label
+// only — never the sealed value). Caller must have confirmed taida_is_moltenized.
+static taida_val taida_moltenized_display(taida_val ptr) {
+    taida_val *obj = (taida_val*)ptr;
+    taida_val type_ptr = obj[4];
+    if (type_ptr == (taida_val)__secret_type_str)
+        return (taida_val)taida_str_new_copy("<Secret>");
+    const char *type_str = (const char*)type_ptr;
+    size_t len = 0;
+    if (taida_ptr_is_readable(type_ptr, 1)
+        && taida_read_cstr_len_safe(type_str, 32, &len)
+        && len == 6 && memcmp(type_str, "Secret", 6) == 0)
+        return (taida_val)taida_str_new_copy("<Secret>");
+    return (taida_val)taida_str_new_copy("<Moltenized>");
 }
 
 // ── Gorillax / RelaxedGorillax ──────────────────────────────
@@ -2717,11 +2785,20 @@ static int taida_is_string_value(taida_val v) {
     return 1;
 }
 taida_val taida_poly_eq(taida_val a, taida_val b) {
+    // F56: a sealed carrier (Moltenized/Secret) is never equal — not even to
+    // itself. Checked before the pointer-identity fast-path below so `==` /
+    // `indexOf` / tagged `==` agree with the interpreter (value semantics →
+    // always non-equal) and never expose an equality oracle. (`==` is `[E1536]`
+    // in checked code; this covers the `--no-check` path + collection helpers.)
+    if (taida_is_moltenized(a) || taida_is_moltenized(b)) return 0;
     if (taida_is_string_value(a) && taida_is_string_value(b))
         return strcmp((char*)a, (char*)b) == 0 ? 1 : 0;
     return a == b ? 1 : 0;
 }
 taida_val taida_poly_neq(taida_val a, taida_val b) {
+    // F56: a sealed carrier is never equal, so `!=` is always true (see
+    // taida_poly_eq). Checked before the identity fast-path for parity.
+    if (taida_is_moltenized(a) || taida_is_moltenized(b)) return 1;
     if (taida_is_string_value(a) && taida_is_string_value(b))
         return strcmp((char*)a, (char*)b) != 0 ? 1 : 0;
     return a != b ? 1 : 0;
@@ -5708,6 +5785,11 @@ taida_val taida_bool_to_int(taida_val a) { return a ? 1 : 0; }
 
 // ── Additional List methods ──────────────────────────────
 taida_val taida_list_index_of(taida_val list_ptr, taida_val item) {
+    // F56: a sealed carrier is never "found" — it is non-equal to everything,
+    // including the same pointer (matching the interpreter, whose `==` on a
+    // secret is always false). Without this the raw `==` below would locate the
+    // same object by identity (an identity-vs-value parity split).
+    if (taida_is_moltenized(item)) return -1;
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     for (taida_val i = 0; i < len; i++) {
@@ -5717,6 +5799,7 @@ taida_val taida_list_index_of(taida_val list_ptr, taida_val item) {
 }
 
 taida_val taida_list_last_index_of(taida_val list_ptr, taida_val item) {
+    if (taida_is_moltenized(item)) return -1; // F56: see taida_list_index_of.
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     for (taida_val i = len - 1; i >= 0; i--) {
@@ -5960,6 +6043,13 @@ static unsigned char taida_bytes_byte_at(taida_val v, size_t i) {
 // raw identity for everything else.
 static int taida_list_struct_eq_k(taida_val *la, taida_val *lb); // kind-aware list walk (below)
 static int taida_value_struct_eq(taida_val a, taida_val b) {
+    // F56: a sealed carrier (Moltenized/Secret) is NEVER equal — not even to
+    // itself (same pointer). A content compare of __value would be an equality
+    // oracle (`Unique` dedup, `Set`, `contains`, `indexOf`, `@[a]==@[b]` leak the
+    // match bit), and the interpreter has value semantics (no pointer identity)
+    // so it always returns non-equal. Checked BEFORE the identity fast-path so
+    // every backend agrees (`a == a` is false for a secret on all of them).
+    if (taida_is_moltenized(a) || taida_is_moltenized(b)) return 0;
     if (a == b) return 1;
     taida_value_kind_t ka = taida_value_kind(a);
     taida_value_kind_t kb = taida_value_kind(b);
@@ -6035,6 +6125,10 @@ static void taida_fnv_bytes(uint64_t *h, const void *p, size_t n) {
 static void taida_fp_accum_k(taida_val v, uint32_t ekind, uint64_t *h);
 
 static void taida_fp_accum(taida_val v, uint64_t *h) {
+    // F56: a sealed carrier contributes a fixed tag to the fingerprint, never
+    // its __value — mixing the plaintext into a hash is a side channel (and the
+    // hashable gate below already keeps carriers out of collection hashing).
+    if (taida_is_moltenized(v)) { unsigned char tag = 0x5F; taida_fnv_bytes(h, &tag, 1); return; }
     switch (taida_value_kind(v)) {
         case TKIND_STR: {
             unsigned char tag = 2; taida_fnv_bytes(h, &tag, 1);
@@ -6094,6 +6188,10 @@ static uint64_t taida_value_fingerprint(taida_val v) {
 static int taida_elem_hashable_for_gate(taida_val v, uint32_t ekind); // below
 
 static int taida_value_hashable(taida_val v) {
+    // F56: a sealed carrier is non-hashable so it never enters a hash-based
+    // dedup / Set bucket / fingerprint path (any of which would expose an
+    // equality oracle). Mirrors the interpreter's `is_hashable == false`.
+    if (taida_is_moltenized(v)) return 0;
     switch (taida_value_kind(v)) {
         case TKIND_SCALAR: case TKIND_STR: case TKIND_BYTES: return 1;
         case TKIND_LIST: {
@@ -9420,6 +9518,10 @@ static taida_val taida_bytes_to_display_string(taida_val bytes_ptr) {
 
 // Convert a BuchiPack to display string: @(field <= value, ...)
 static taida_val taida_pack_to_display_string(taida_val pack_ptr) {
+    // F56: a sealed carrier (Moltenized/Secret) is a 2-field __type/__value
+    // pack. Every display path converges here; render only the policy label so
+    // the sealed __value can never reach stdout / Str[] / debug / nesting.
+    if (taida_is_moltenized(pack_ptr)) return taida_moltenized_display(pack_ptr);
     taida_val *pack = (taida_val*)pack_ptr;
     taida_val fc = pack[1];
     size_t cap = 128;
@@ -9530,6 +9632,9 @@ static taida_val taida_error_to_display_string(taida_val val) {
 // a Lax built by `taida_float_mold_float` would render its `__value` as the
 // raw int64 bit-pattern of the f64 (= `4613937818241073152` for `3.0`).
 static taida_val taida_pack_to_display_string_full(taida_val pack_ptr) {
+    // F56: sealed carrier — policy label only (the full-form path keeps __
+    // fields, so without this guard stdout(secret) would expose __value).
+    if (taida_is_moltenized(pack_ptr)) return taida_moltenized_display(pack_ptr);
     taida_val *pack = (taida_val*)pack_ptr;
     taida_val fc = pack[1];
     size_t cap = 128;
@@ -10546,7 +10651,15 @@ taida_val taida_generic_unmold(taida_val ptr) {
         );
         return taida_throw(error);
     }
-    
+    // F56: a sealed carrier (Moltenized/Secret) cannot be unmolded directly.
+    if (taida_is_moltenized(ptr)) {
+        taida_val error = taida_make_error(
+            "TypeError",
+            "Cannot unmold a sealed carrier (Moltenized/Secret) directly. Use a secret-aware consumer."
+        );
+        return taida_throw(error);
+    }
+
     // Check for BuchiPack (monadic types) using magic
     if (TAIDA_IS_PACK(ptr)) {
         taida_val *obj = (taida_val*)ptr;
@@ -12203,6 +12316,15 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val
     if (type_hint == 3) {
         const char *s = (const char*)val;
         json_append_escaped_str(buf, cap, len, s);
+        return;
+    }
+
+    // F56: a sealed carrier (Moltenized/Secret) serializes to JSON `null` — the
+    // sealed value must never reach the wire (direct or nested). Matches the
+    // interpreter's `jsonEncode(Moltenized)` → `null`. The checker rejects this
+    // at compile time ([E1534]); this is the fail-closed runtime layer.
+    if (taida_is_moltenized(val)) {
+        json_append(buf, cap, len, "null");
         return;
     }
 

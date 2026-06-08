@@ -803,7 +803,25 @@ mod tests {
         //   = addon_eval->addon ×2) from updating stale `*_eval.rs` path
         //   references in comments to the renamed bare modules. Comment-only;
         //   code bytes untouched. Total 1,284,595 -> 1,284,555.
-        const EXPECTED_TOTAL_LEN: usize = 1_284_555;
+        // 2026-06-08 F56 secret carrier: +2,545 bytes (core.c — taida_moltenize_new
+        //   / taida_secret_new / taida_redact / taida_is_moltenized + forward
+        //   decls + unmold reject for sealed carriers). Total 1,284,555 -> 1,287,100.
+        // 2026-06-08 F56 fail-closed display + JSON (core.c): +1,708 bytes total.
+        //   F1 (+738): taida_moltenized_display helper (before the marker).
+        //   F2 (+970): is_moltenized guards on both pack renderers
+        //   (taida_pack_to_display_string / _full) so stdout/Str[]/debug render
+        //   "<Secret>"/"<Moltenized>", plus the json_serialize_typed guard so
+        //   `jsonEncode(secret)` emits `null` (matching the interpreter) instead
+        //   of exposing __value. Total 1,287,100 -> 1,288,808.
+        // 2026-06-09 F56 equality fail-closed (core.c, all in F1): +2,269 bytes.
+        //   is_moltenized guards on every comparison entry point so a sealed
+        //   carrier is never equal (even to itself), never hashable, and never
+        //   mixes __value into a fingerprint — closing the `==`/`!=`/Unique/Set/
+        //   contains/indexOf/`@[a]==@[b]` equality oracle on native/wasm (/so
+        //   review #2): taida_value_struct_eq + taida_value_hashable +
+        //   taida_fp_accum + taida_poly_eq + taida_poly_neq + taida_list_index_of
+        //   + taida_list_last_index_of. Total 1,288,808 -> 1,291,077.
+        const EXPECTED_TOTAL_LEN: usize = 1_291_077;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1487,7 +1505,19 @@ mod tests {
         // 2026-06-08 interpreter module rename (C8): F1 comments lost -30
         //   bytes (mold_eval->mold ×4, regex_eval->regex ×2, all before the
         //   Error-ceiling marker). F1_LEN 384,723 -> 384,693.
-        const F1_LEN: usize = 384_693;
+        // 2026-06-08 F56 secret carrier: +2,210 bytes in F1 (forward decls +
+        //   taida_moltenize_new / taida_secret_new / taida_redact /
+        //   taida_is_moltenized, all before the Error-ceiling marker).
+        //   F1_LEN 384,693 -> 386,903.
+        // 2026-06-08 F56 display fail-closed: +738 bytes in F1
+        //   (taida_moltenized_display + the is_moltenized doc-comment tweak,
+        //   both before the Error-ceiling marker). F1_LEN 386,903 -> 387,641.
+        // 2026-06-09 F56 equality fail-closed: +2,269 bytes in F1 (is_moltenized
+        //   guards on taida_value_struct_eq / taida_value_hashable / taida_fp_accum
+        //   / taida_poly_eq / taida_poly_neq / taida_list_index_of /
+        //   taida_list_last_index_of, all before the Error-ceiling marker).
+        //   F1_LEN 387,641 -> 389,910.
+        const F1_LEN: usize = 389_910;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1508,7 +1538,9 @@ mod tests {
         // const above.
         assert_eq!(
             CORE_SECTION.len(),
-            F1_LEN + 222_688, // F2 shrank by -86 in the F55 S4 review follow-up
+            // F56 after the marker: +335 (unmold reject) +970 (display pack-renderer
+            // guards + json_serialize_typed fail-closed guard). F2 222,688 -> 223,993.
+            F1_LEN + 223_993,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

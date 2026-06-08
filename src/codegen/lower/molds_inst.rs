@@ -2006,6 +2006,27 @@ impl Lowering {
                 func.push(IrInst::Call(result, "taida_molten_new".to_string(), vec![]));
                 Ok(result)
             }
+            // F56: Moltenize[v]() -> taida_moltenize_new(v),
+            // MoltenizeSecret[v]() -> taida_secret_new(v), Redact[v]() -> taida_redact(v).
+            "Moltenize" | "MoltenizeSecret" | "Redact" => {
+                if type_args.len() != 1 {
+                    return Err(LowerError {
+                        message: format!(
+                            "{} requires exactly 1 type argument: {}[value]",
+                            type_name, type_name
+                        ),
+                    });
+                }
+                let val = self.lower_expr(func, &type_args[0])?;
+                let result = func.alloc_var();
+                let fn_name = match type_name {
+                    "MoltenizeSecret" => "taida_secret_new",
+                    "Redact" => "taida_redact",
+                    _ => "taida_moltenize_new",
+                };
+                func.push(IrInst::Call(result, fn_name.to_string(), vec![val]));
+                Ok(result)
+            }
             // C25B-001: Stream[val]() — minimal native/wasm lowering for
             // string-form parity. Wraps a single value into a completed
             // single-item stream; `Str[stream]()` renders it as

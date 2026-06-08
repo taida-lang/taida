@@ -97,13 +97,10 @@ fn make_bytes_cursor_step(value: Value, cursor: Value) -> Value {
     Value::pack(vec![("value".into(), value), ("cursor".into(), cursor)])
 }
 
-fn parse_bytes_cursor(
-    value: Value,
-    mold_name: &str,
-) -> Result<(Arc<BytesValue>, usize), RuntimeError> {
+fn parse_bytes_cursor(value: Value, name: &str) -> Result<(Arc<BytesValue>, usize), RuntimeError> {
     let Value::BuchiPack(fields) = value else {
         return Err(RuntimeError {
-            message: format!("{}: argument must be BytesCursor, got {}", mold_name, value),
+            message: format!("{}: argument must be BytesCursor, got {}", name, value),
         });
     };
 
@@ -113,12 +110,12 @@ fn parse_bytes_cursor(
         Some((_, Value::Bytes(v))) => Arc::clone(v),
         Some((_, v)) => {
             return Err(RuntimeError {
-                message: format!("{}: cursor.bytes must be Bytes, got {}", mold_name, v),
+                message: format!("{}: cursor.bytes must be Bytes, got {}", name, v),
             });
         }
         None => {
             return Err(RuntimeError {
-                message: format!("{}: cursor.bytes field is required", mold_name),
+                message: format!("{}: cursor.bytes field is required", name),
             });
         }
     };
@@ -127,7 +124,7 @@ fn parse_bytes_cursor(
         Some((_, Value::Int(v))) => *v,
         Some((_, v)) => {
             return Err(RuntimeError {
-                message: format!("{}: cursor.offset must be Int, got {}", mold_name, v),
+                message: format!("{}: cursor.offset must be Int, got {}", name, v),
             });
         }
         None => 0,
@@ -2645,6 +2642,52 @@ impl Interpreter {
                     });
                 }
                 Ok(Some(Signal::Value(Value::Molten)))
+            }
+
+            // Moltenize[v]() / MoltenizeSecret[v](): wrap a value in an opaque
+            // Moltenized[T] / Secret[T] carrier (F56). The sealed value can only
+            // be consumed by secret-aware operations; display / JSON / unmold /
+            // equality are rejected by the checker sink matrix and fail-closed
+            // at runtime (see Value::to_display_string / is_hashable).
+            "Moltenize" | "MoltenizeSecret" => {
+                if type_args.len() != 1 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "{} requires exactly 1 type argument: {}[value]",
+                            name, name
+                        ),
+                    });
+                }
+                let inner = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let reveal_type = Self::type_name_of(&inner).to_string();
+                let policy = if name == "MoltenizeSecret" {
+                    "Secret"
+                } else {
+                    "Moltenized"
+                };
+                Ok(Some(Signal::Value(Value::Moltenized {
+                    value: Box::new(inner),
+                    reveal_type,
+                    policy: policy.to_string(),
+                })))
+            }
+
+            // Redact[secret](): consume a Moltenized/Secret value and return a
+            // fixed "***" Str. The inner value is never revealed.
+            "Redact" => {
+                if type_args.len() != 1 {
+                    return Err(RuntimeError {
+                        message: "Redact requires exactly 1 type argument: Redact[secret]".into(),
+                    });
+                }
+                match self.eval_expr(&type_args[0])? {
+                    Signal::Value(_) => {}
+                    other => return Ok(Some(other)),
+                }
+                Ok(Some(Signal::Value(Value::str("***".to_string()))))
             }
 
             // Gorillax[T](): create Gorillax.

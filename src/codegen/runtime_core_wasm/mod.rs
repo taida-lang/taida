@@ -92,7 +92,36 @@ mod tests {
         // 2026-06-08 interpreter module rename (C8): -5 bytes from updating a
         //   stale `mold_eval.rs` path reference in an 02_containers.inc.c
         //   comment to `mold.rs`. Comment-only. Total 449,085 -> 449,080.
-        const EXPECTED_TOTAL_LEN: usize = 449_080;
+        // 2026-06-08 F56 secret carrier: +940 bytes (02_containers.inc.c —
+        //   taida_moltenize_new / taida_secret_new / taida_redact). Total
+        //   449,080 -> 450,020.
+        // 2026-06-08 F56 unmold reject + fail-closed display/JSON: +3,451 bytes.
+        //   01_core.inc.c: shared __wasm_moltenized_str / __wasm_secret_str
+        //   statics + _wasm_carrier_kind (pointer-identity, never derefs an
+        //   arbitrary __type slot — a content compare OOB-trapped on magic-tagged
+        //   AsyncTask/Par packs) + taida_generic_unmold reject placed inside the
+        //   field-pack __type branch (after the async/lax/result guards) +
+        //   is-carrier guards on both pack renderers (_wasm_pack_to_string /
+        //   _full) so sealed carriers throw on `>=>` and render
+        //   "<Secret>"/"<Moltenized>".
+        //   02_containers.inc.c: producers store the shared __type statics.
+        //   04_json_async.inc.c: _wc_json_serialize_typed guard so
+        //   `jsonEncode(secret)` emits `null` (matching the interpreter) instead
+        //   of exposing __value. Total 450,020 -> 453,471.
+        // 2026-06-09 F56 equality fail-closed: +2,510 bytes. _wasm_carrier_kind
+        //   guards on every comparison entry point so a sealed carrier is never
+        //   equal (even to itself), never hashable, and never mixes __value into a
+        //   fingerprint — closing the `==`/`!=`/Unique/contains/indexOf/
+        //   `@[a]==@[b]` equality oracle (/so review #2). 01_core.inc.c:
+        //   _wasm_value_eq / _wasm_value_hashable / _wasm_fp_accum / taida_poly_eq
+        //   / taida_poly_neq. 03_typeof_list.inc.c: taida_list_index_of /
+        //   taida_list_last_index_of. 453,471 -> 455,981.
+        // 2026-06-09 F56 _wasm_carrier_kind OOB fix: +814 bytes. Reads the pack
+        //   header + field-0 slots directly instead of taida_pack_has_hash /
+        //   taida_pack_get, which iterate the hash slots and OOB-trapped on
+        //   magic-tagged Async/Lax/Result packs reaching the equality helpers
+        //   (`i == n` in pi_approx). 455,981 -> 456,795.
+        const EXPECTED_TOTAL_LEN: usize = 456_795;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

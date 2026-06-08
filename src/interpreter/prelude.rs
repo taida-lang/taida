@@ -54,6 +54,13 @@ impl Interpreter {
             Value::AsyncTask(_) => "AsyncTask",
             Value::Json(_) => "JSON",
             Value::Molten => "Molten",
+            Value::Moltenized { policy, .. } => {
+                if policy == "Secret" {
+                    "Secret"
+                } else {
+                    "Moltenized"
+                }
+            }
             Value::Stream(_) => "Stream",
             // C18-2: EnumVal reports as "Int" so that prelude `typeOf` /
             // `typeof` builtins return the same type name they did before

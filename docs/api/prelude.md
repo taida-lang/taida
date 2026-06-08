@@ -422,6 +422,9 @@ exit code: Int => :Int
 | `Stream[value]()` | `Stream[T]` | 逐次値を表す stream wrapper。 |
 | `StreamFrom[list]()` | `Stream[T]` | リストから stream を生成。 |
 | `Molten[]()` | `Molten` | 外部由来の不透明値。通常は境界 API が生成する。 |
+| `Moltenize[value]()` | `Moltenized[T]` | 値を不透明な封印キャリアに包む。表示・シリアライズ・直接 unmold・等値比較は型レベルで遮断される。 |
+| `MoltenizeSecret[value]()` | `Secret[T]` | secret / credential 用の封印キャリア。`Moltenized[T]` と同じ遮断に加え、用途をシグネチャで明示する。 |
+| `Redact[secret]()` | `Str` | 封印キャリアを固定マスク `"***"` の文字列へ落とす。内部値は読み出さない唯一の表示手段。 |
 | `Stub[value]()` | `T` | 「ここはまだ仮の値」と印を付けた値を返す。 |
 | `TODO[]()` | `T` | 未実装の印として置く値。リリース版のビルドでは残存を拒否できる。 |
 | `Cage[subject, runner]()` | `Gorillax[T]` / `Async[T]` | `Molten` を扱う境界。同期 runner は `Gorillax[T]`、Promise-returning JS runner (`JSCallAsync`) は `Async[T]` で受ける。 |
@@ -438,6 +441,32 @@ exit code: Int => :Int
 > File / Build branch は、対応する具体 runner を公開している API の
 > リファレンスで説明されている場合にだけ使います。JS 実行記述の詳細は
 > [`docs/api/js.md`](js.md) を参照してください。
+
+#### 封印キャリア (Moltenized / Secret)
+
+`Moltenize[v]()` / `MoltenizeSecret[v]()` は値を `Molten` の不透明性を継承する
+封印キャリアに包みます。secret / credential を平文の `Str` として持ち回らず、
+観測される経路を型レベルで遮断するための型です。包んだ値の観測は
+`Redact[secret]()` (固定マスク `"***"`) を介してのみ行えます。
+
+```taida
+secret <= MoltenizeSecret["api-key"]()
+stdout(Redact[secret]())
+```
+
+型チェッカーは封印された値が漏れ口に届くことをコンパイル時に拒否します:
+
+- 表示ビルトイン (`stdout` / `stderr` / `debug`) — `[E1533]`
+- シリアライズ (`jsonEncode` / `jsonPretty`) — `[E1534]`
+- 直接 unmold (`>=>` / `<=<`) — `[E1535]`
+- 二項演算 (`+` 連結・`==` / `!=` 等値オラクル) — `[E1536]`
+
+コンパイルエラーにならない経路 (`Str[]` 変換・文字列補間・`toString` 等) でも、
+全バックエンド (interpreter / JS / native / wasm) のランタイムは fail-closed で、
+封印値の代わりに policy ラベル (`<Secret>` / `<Moltenized>`) を返します。封印値は
+どの経路でも平文として現れません。診断コードの詳細は
+[`docs/reference/diagnostic_codes.md`](../reference/diagnostic_codes.md)
+を参照してください。
 
 ### 7.4 文字列モールド
 

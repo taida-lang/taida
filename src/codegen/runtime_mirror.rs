@@ -742,6 +742,11 @@ const DIVERGENT_MISC: &[&str] = &[
     "taida_make_error_with_kind_code",
     "taida_make_io_error",
     "taida_molten_new",
+    // F56: opaque secret carriers + redaction. native (taida_val) / wasm
+    // (int64_t) signatures normalize to identical bodies (same pack shape).
+    "taida_moltenize_new",
+    "taida_secret_new",
+    "taida_redact",
     "taida_monadic_field_count",
     "taida_monadic_flat_map",
     "taida_monadic_get_or_throw",

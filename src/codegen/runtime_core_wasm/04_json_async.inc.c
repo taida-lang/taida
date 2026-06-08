@@ -1315,6 +1315,15 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
         return;
     }
 
+    /* F56: a sealed carrier (Moltenized/Secret) serializes to JSON `null` — the
+       sealed value must never reach the wire (direct or nested). Matches the
+       interpreter's `jsonEncode(Moltenized)` -> `null`. The checker rejects this
+       at compile time ([E1534]); this is the fail-closed runtime layer. */
+    if (_wasm_carrier_kind(val)) {
+        _wc_jb_append(jb, "null");
+        return;
+    }
+
     /* No type hint: heuristic detection */
     if (val < 0 || val > 0xFFFFFFFF) {
         char *num = _wc_i64_to_str(val);
