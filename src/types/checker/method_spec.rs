@@ -13,8 +13,10 @@
 //! case in `check_method_args`, and the args-aware return refinements
 //! in `infer_method_return_type_with_args` (Lax/Result/Async lambda
 //! plumbing; `List.reduce`/`fold` whose return is the init argument's
-//! type). For the receivers it does cover, the table is the
-//! existence/arity/return SSOT; those tail paths stay separate by design.
+//! type; `HashMap.set` and bare `HashMap.merge`, whose argless table
+//! return (`Receiver`) is refined from the argument there). For the
+//! receivers it does cover, the table is the existence/arity/return
+//! SSOT; those tail paths stay separate by design.
 //!
 //! The table is pinned to the checker implementation by the exhaustive
 //! cross tests below: for every (receiver, method) pair in the universe
@@ -462,14 +464,27 @@ mod tests {
                         .iter()
                         .find(|s| s.recv == recv && s.name == *name)
                         .map(|s| (s.min_args, s.max_args));
-                    let actual = checker
-                        .builtin_method_signature(&ty, name)
-                        .map(|(min, max, _)| (min, max));
+                    let sig = checker.builtin_method_signature(&ty, name);
+                    let actual = sig.as_ref().map(|(min, max, _)| (*min, *max));
                     assert_eq!(
                         expected, actual,
                         "spec table vs builtin_method_signature mismatch \
                          for ({recv:?} as {ty:?}).{name}"
                     );
+                    // Argument types live outside the table (element-type
+                    // dependent), so the table cannot pin their content —
+                    // but every builtin method has fixed arity, so the
+                    // arg-type vector length must equal max_args. This
+                    // catches an arg-count drift in builtin_method_arg_types
+                    // that the arity columns alone would miss.
+                    if let Some((_, max, args)) = &sig {
+                        assert_eq!(
+                            args.len(),
+                            *max,
+                            "builtin_method_arg_types arg count for \
+                             ({recv:?} as {ty:?}).{name} disagrees with max_args"
+                        );
+                    }
                 }
             }
         }
