@@ -2048,6 +2048,20 @@ impl Lowering {
                 func.push(IrInst::Call(result, fn_name.to_string(), vec![secret, other]));
                 Ok(result)
             }
+            // F56 Phase 4: Reveal[secret, consumer]() is the explicit escape
+            // hatch (apply a user function to the revealed plaintext). It is
+            // available on the Interpreter and JS backends; the Native / WASM
+            // backends gate it with a capability error (calling an arbitrary
+            // function value on a revealed secret in a non-list mold is deferred
+            // alongside the graph-flow lint that governs Reveal). The secret-
+            // aware consumers (HmacSha256 / ConstantTimeEq) cover the common
+            // cases on all four backends.
+            "Reveal" => Err(LowerError {
+                message: "Reveal is supported on the Interpreter and JS backends only. \
+                          On Native / WASM, use a secret-aware consumer \
+                          (HmacSha256 / ConstantTimeEq) instead of revealing the plaintext."
+                    .into(),
+            }),
             // F56 Phase 2: MoltenizeSecretFromEnv[name]() -> Lax[Secret[Str]].
             "MoltenizeSecretFromEnv" => {
                 if type_args.len() != 1 {

@@ -4034,6 +4034,21 @@ impl JsCodegen {
                     self.write(")");
                     return Ok(());
                 }
+                // F56 Phase 4: Reveal[secret, consumer]() → __taida_reveal(secret, consumer)
+                if name == "Reveal" {
+                    if type_args.len() != 2 {
+                        return Err(JsError {
+                            message: "Reveal requires 2 type arguments: Reveal[secret, consumer]"
+                                .to_string(),
+                        });
+                    }
+                    self.write("__taida_reveal(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(", ");
+                    self.gen_expr(&type_args[1])?;
+                    self.write(")");
+                    return Ok(());
+                }
                 // Stream[value]() → Stream_mold(value)
                 if name == "Stream" {
                     self.write("Stream_mold(");

@@ -1575,6 +1575,12 @@ function __taida_hmac_sha256_secret(secret, message) {
 function __taida_constant_time_eq_secret(secret, candidate) {
   return constantTimeEquals(__taida_reveal_secret(secret, 'ConstantTimeEq'), candidate);
 }
+// F56 Phase 4: Reveal[secret, consumer]() — the explicit escape hatch. Apply
+// the consumer function to the revealed plaintext and return its result. This
+// weakens the sealing; prefer the secret-aware consumers above.
+function __taida_reveal(secret, consumer) {
+  return consumer(__taida_reveal_secret(secret, 'Reveal'));
+}
 const __TAIDA_HEX = '0123456789abcdef';
 function hexEncode(value) {
   const buf = __taida_crypto_to_buffer(value, 'hexEncode');

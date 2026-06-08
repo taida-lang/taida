@@ -1976,6 +1976,17 @@ impl TypeChecker {
                     // secret, so it leaves the sealed-carrier type behind.
                     "HmacSha256" => Type::Str,
                     "ConstantTimeEq" => Type::Bool,
+                    // F56 Phase 4: Reveal[secret, consumer]() returns the
+                    // consumer's return type `R` (the plaintext `T` is consumed
+                    // inside the function and does not appear in the result type).
+                    "Reveal" => type_args
+                        .get(1)
+                        .map(|a| self.infer_expr_type(a))
+                        .and_then(|t| match t {
+                            Type::Function(_, ret) => Some(*ret),
+                            _ => None,
+                        })
+                        .unwrap_or(Type::Unknown),
                     // Div[x, y]() and Mod[x, y]() return Lax[Num]
                     "Div" | "Mod" => {
                         let inner = type_args

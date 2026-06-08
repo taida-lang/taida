@@ -247,6 +247,48 @@ fn secret_aware_consumer_rejects_non_secret() {
     );
 }
 
+#[test]
+fn reveal_applies_consumer_to_plaintext() {
+    // Reveal is the escape hatch: it hands the plaintext to a consumer and
+    // returns the consumer's result. Here the consumer returns the secret's
+    // length (not the secret), so the revealed value is genuinely used while
+    // nothing leaks.
+    let out = run_interp(
+        "reveal",
+        &format!(
+            "secret <= MoltenizeSecret[\"{CANARY}\"]()\n\
+             n <= Reveal[secret, _ s: Str = s.length()]()\n\
+             stdout(n.toString())\n"
+        ),
+        false,
+    );
+    let t = combined(&out);
+    assert!(out.status.success(), "Reveal program should run:\n{t}");
+    assert_eq!(
+        t.trim(),
+        CANARY.chars().count().to_string(),
+        "Reveal must apply the consumer to the revealed plaintext"
+    );
+    assert!(
+        !t.contains(CANARY),
+        "the consumer returned a length — nothing should leak:\n{t}"
+    );
+}
+
+#[test]
+fn reveal_rejects_non_secret() {
+    let out = run_interp(
+        "reveal-non-secret",
+        "n <= Reveal[\"plain\", _ s: Str = s.length()]()\nstdout(n.toString())\n",
+        false,
+    );
+    assert!(
+        !out.status.success(),
+        "Reveal must reject a non-secret first argument:\n{}",
+        combined(&out)
+    );
+}
+
 // ── Layer 2 (cross-backend): no plaintext leak on any compiled backend ──────
 
 /// Build `source` for `profile` into `out`, returning the captured run output

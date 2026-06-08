@@ -409,6 +409,14 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("ConstantTimeEq", 2, ANY2, MoldReturnKind::Bool)
         .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
         .enforce_checker(),
+    // F56 Phase 4: Reveal[secret, consumer]() is the explicit escape hatch —
+    // it applies `consumer: T => R` to the revealed plaintext and returns `R`.
+    // It weakens the sealing (the plaintext enters the consumer's scope), so the
+    // secret-aware consumers above are preferred; `Reveal` is for cases they do
+    // not cover. The return kind is dynamic (`R`), resolved by checker inference.
+    MoldSpec::exact("Reveal", 2, ANY2, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
     MoldSpec::exact("Stub", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::range("TODO", 0, Some(4), ANY4, MoldReturnKind::Pack).with_options(TODO_OPTIONS),
     MoldSpec::exact("Cage", 2, ANY2, MoldReturnKind::Pack)

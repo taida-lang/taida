@@ -2781,6 +2781,45 @@ impl Interpreter {
                 ))))
             }
 
+            // F56 Phase 4: Reveal[secret, consumer]() — the explicit escape
+            // hatch. Apply `consumer: T => R` to the revealed plaintext and
+            // return `R`. The plaintext is passed by reference (Reveal itself
+            // makes no copy); the consumer's parameter binding scopes it to the
+            // call. This weakens the sealing — prefer the secret-aware consumers
+            // (`HmacSha256` / `ConstantTimeEq`) where they suffice.
+            "Reveal" => {
+                if type_args.len() != 2 {
+                    return Err(RuntimeError {
+                        message: "Reveal requires 2 type arguments: Reveal[secret, consumer]"
+                            .into(),
+                    });
+                }
+                let sealed = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let consumer = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Function(f)) => f,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "Reveal: the second argument must be a consumer function, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let Value::Moltenized { value, .. } = &sealed else {
+                    return Err(RuntimeError {
+                        message: "Reveal expects a sealed Secret as its first argument".into(),
+                    });
+                };
+                let result =
+                    self.call_function_with_values(&consumer, std::slice::from_ref(value.reveal()))?;
+                Ok(Some(Signal::Value(result)))
+            }
+
             // F56 Phase 2: MoltenizeSecretFromEnv[name]() -> Lax[Secret[Str]].
             // Reads an environment variable straight into a sealed carrier — the
             // value is sealed at the boundary instead of living as a plain `Str`.
