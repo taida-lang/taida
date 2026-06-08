@@ -1,7 +1,8 @@
-//! Arity/existence + return-kind mirror of the checker's two builtin
-//! method paths (`TypeChecker::builtin_method_signature` for arity,
-//! `TypeChecker::infer_method_return_type` for the argless return
-//! type) — instalments 1 and 2 of the builtin method spec table.
+//! The single source of truth for the checker's builtin-method dispatch
+//! over statically enumerable receivers: `builtin_method_signature`
+//! reads arity from this table and `infer_method_return_type` reads the
+//! argless return kind, both classifying the receiver via
+//! `builtin_recv_of`.
 //!
 //! Scope: exactly the statically enumerable receivers of those two
 //! functions. Explicitly NOT covered (they live on other paths):
@@ -12,8 +13,8 @@
 //! case in `check_method_args`, and the args-aware return refinements
 //! in `infer_method_return_type_with_args` (Lax/Result/Async lambda
 //! plumbing; `List.reduce`/`fold` whose return is the init argument's
-//! type). A claim of "method existence SSOT" must wait until those
-//! paths are unified.
+//! type). For the receivers it does cover, the table is the
+//! existence/arity/return SSOT; those tail paths stay separate by design.
 //!
 //! The table is pinned to the checker implementation by the exhaustive
 //! cross tests below: for every (receiver, method) pair in the universe
@@ -23,18 +24,16 @@
 //! (absent entries ⇒ `Type::Unknown`). Editing one side without the
 //! other fails the tests, which is the point.
 //!
-//! Argument types are deliberately out of scope for this instalment:
-//! several signatures are parameterised by the receiver's element types
-//! and cannot live in a static table without loss.
+//! Argument types stay out of the table proper: several are
+//! parameterised by the receiver's element types, so they live in
+//! `builtin_method_arg_types`, paired with the table arity by
+//! `builtin_method_signature`.
 
 use crate::types::Type;
 
-/// Statically enumerable builtin receiver kinds.
-// Production code does not consume the table yet — in this first
-// instalment its sole binding force is the exhaustive cross test below
-// (and the cross-backend audit script under .dev). Later instalments
-// will switch the checker dispatch to read from it.
-#[allow(dead_code)]
+/// Statically enumerable builtin receiver kinds. `builtin_recv_of`
+/// classifies a checker `Type` into one of these, or `None` for
+/// receivers the table does not model.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum BuiltinRecv {
     /// `Str`
@@ -74,7 +73,6 @@ pub(crate) enum BuiltinRecv {
 /// `HashMap[K, V].values` → `V[]`). Each variant is used only under the
 /// receiver kinds it names; `render_return_kind` matches on the
 /// receiver's concrete shape and reproduces those degradations exactly.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ReturnKind {
     /// `Int`
@@ -121,9 +119,8 @@ pub(crate) enum ReturnKind {
 
 /// One builtin method: existence + arity + argless return kind — the
 /// statically enumerable facet of the checker's two builtin method
-/// paths. Not yet an existence SSOT: the module doc lists the paths
+/// paths, which now read from it. The module doc lists the tail paths
 /// this table deliberately does not cover.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BuiltinMethodSpec {
     pub(crate) recv: BuiltinRecv,
@@ -135,9 +132,8 @@ pub(crate) struct BuiltinMethodSpec {
 
 /// Expand a `ReturnKind` against a concrete receiver type, reproducing
 /// the argless return rules of `infer_method_return_type` exactly —
-/// including the bare-`Named` degradations. Test-bound in this
-/// instalment; the dispatch rewrite will make the checker read from it.
-#[allow(dead_code)]
+/// including the bare-`Named` degradations. `infer_method_return_type`
+/// calls this for every statically enumerable receiver.
 pub(crate) fn render_return_kind(kind: ReturnKind, recv: &Type) -> Type {
     fn lax(t: Type) -> Type {
         Type::Generic("Lax".to_string(), vec![t])
@@ -250,9 +246,9 @@ macro_rules! spec {
     };
 }
 
-/// Faithful transcription of `builtin_method_signature` (arity columns)
-/// and `infer_method_return_type` (return-kind column), checked by test.
-#[allow(dead_code)]
+/// The builtin-method table. `builtin_method_signature` reads the arity
+/// columns and `infer_method_return_type` the return-kind column; the
+/// cross tests below pin it against the universe of checker-known names.
 pub(crate) static BUILTIN_METHOD_SPECS: &[BuiltinMethodSpec] = &[
     // ── Str ─────────────────────────────────────────────────────────
     spec!(Str, "length", 0, 0, Int),
