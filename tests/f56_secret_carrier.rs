@@ -303,6 +303,50 @@ fn reveal_rejects_non_secret() {
     );
 }
 
+#[test]
+fn secret_flow_audit_surfaces_reveal() {
+    // Phase 5: `taida way verify --check secret-flow` surfaces every Reveal
+    // de-seal point (the design's governance for the escape hatch), and a
+    // consumer-only program (no Reveal) is clean.
+    let dir = unique_temp_dir("secret-flow");
+
+    let reveal_src = dir.join("reveal.td");
+    write_file(
+        &reveal_src,
+        "secret <= MoltenizeSecret[\"k\"]()\n\
+         n <= Reveal[secret, _ s: Str = s.length()]()\nstdout(n.toString())\n",
+    );
+    let out = Command::new(taida_bin())
+        .args(["way", "verify", "--check", "secret-flow"])
+        .arg(&reveal_src)
+        .output()
+        .expect("run way verify");
+    let t = combined(&out);
+    assert!(
+        t.contains("secret-flow") && t.to_lowercase().contains("reveal"),
+        "secret-flow must flag the Reveal de-seal point:\n{t}"
+    );
+
+    let clean_src = dir.join("clean.td");
+    write_file(
+        &clean_src,
+        "secret <= MoltenizeSecret[\"k\"]()\n\
+         mac <= HmacSha256[secret, \"m\"]()\nstdout(mac)\n",
+    );
+    let out2 = Command::new(taida_bin())
+        .args(["way", "verify", "--check", "secret-flow"])
+        .arg(&clean_src)
+        .output()
+        .expect("run way verify");
+    let t2 = combined(&out2);
+    assert!(
+        t2.contains("[PASS]") || t2.contains("0 warnings"),
+        "a consumer-only program must pass secret-flow:\n{t2}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 // ── Layer 2 (cross-backend): no plaintext leak on any compiled backend ──────
 
 /// Build `source` for `profile` into `out`, returning the captured run output

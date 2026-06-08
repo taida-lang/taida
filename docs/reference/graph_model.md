@@ -466,4 +466,5 @@ taida way verify [--check CHECK] [--format FORMAT] <PATH>
 | `unchecked-division` | warning | 除算安全性チェック枠（現行構文では通常 finding なし） |
 | `direction-constraint` | error | 単一方向制約の検証 |
 | `unchecked-lax` | warning | Lax 未検査利用検出 |
+| `secret-flow` | warning | 封印キャリアの de-seal 点 (`Reveal`) を監査し、秘密が平文として consumer に入る箇所を可視化する |
 `naming-convention` は `taida way lint` の責務です。

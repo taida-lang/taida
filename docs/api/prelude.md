@@ -428,6 +428,9 @@ exit code: Int => :Int
 | `MoltenizeSecretFromEnv[name]()` | `Lax[Secret[Str]]` | 環境変数を封印キャリアへ直接読み込む（同期）。値は境界で封印され、平文 `Str` を経由しない。 |
 | `MoltenizeSecretFromInput[prompt]()` | `Async[Lax[Secret[Str]]]` | 標準入力 1 行を封印キャリアへ読み込む。 |
 | `MoltenizeSecretFromFile[path]()` | `Async[Lax[Secret[Bytes]]]` | ファイルのバイト列を封印キャリアへ読み込む。 |
+| `HmacSha256[secret, message]()` | `Str` | 封印された秘密鍵で HMAC-SHA256 を計算する secret-aware consumer。秘密を平文へ revealせず鍵として使う。戻り値の MAC は公開値。 |
+| `ConstantTimeEq[secret, candidate]()` | `Bool` | 封印された秘密と候補を定数時間で比較する。`==`（`[E1536]`）の代わりに秘密の照合に使う。 |
+| `Reveal[secret, consumer]()` | `R` | escape hatch。`consumer: T => R` を revealed 平文に適用し `R` を返す。封印を弱めるため上の consumer を優先する（interpreter / JS のみ）。 |
 | `Stub[value]()` | `T` | 「ここはまだ仮の値」と印を付けた値を返す。 |
 | `TODO[]()` | `T` | 未実装の印として置く値。リリース版のビルドでは残存を拒否できる。 |
 | `Cage[subject, runner]()` | `Gorillax[T]` / `Async[T]` | `Molten` を扱う境界。同期 runner は `Gorillax[T]`、Promise-returning JS runner (`JSCallAsync`) は `Async[T]` で受ける。 |
@@ -470,6 +473,48 @@ stdout(Redact[secret]())
 どの経路でも平文として現れません。診断コードの詳細は
 [`docs/reference/diagnostic_codes.md`](../reference/diagnostic_codes.md)
 を参照してください。
+
+**秘密を観測せずに使う (secret-aware consumer):** 封印された秘密は、平文へ戻さずに
+そのまま消費できます。
+
+```taida
+apiKey <= MoltenizeSecretFromEnv["API_KEY"]() => unwrapped
+sig <= HmacSha256[unwrapped, requestBody]()
+stdout(sig)
+ok <= ConstantTimeEq[unwrapped, providedToken]()
+```
+
+- `HmacSha256[secret, message]()` — 封印鍵で署名を計算。戻り値 (MAC) は公開値で、
+  封印キャリア型を離れます。
+- `ConstantTimeEq[secret, candidate]()` — 秘密と候補を定数時間で比較。秘密の照合は
+  `==`（`[E1536]` で拒否）ではなく必ずこれを使います。
+
+これらの第1引数は `Secret`/`Moltenized` が `Str`/`Bytes` を包んだ封印キャリア、第2引数は
+非秘密の `Str`/`Bytes` であることを型チェッカーが強制します。非封印の鍵や封印された
+第2引数は `[E1506]` でコンパイル時に拒否されます (全バックエンド共通)。
+
+`Reveal[secret, consumer]()` は **escape hatch** です。`consumer: T => R` を revealed
+平文に適用して `R` を返します。封印を弱める（平文が consumer のスコープに入る）ため、
+上の secret-aware consumer で済む場合はそちらを使ってください。`Reveal` は interpreter と
+JS バックエンドでのみ利用でき、native / WASM では capability error になります。
+
+`Reveal` による de-seal 点は `taida way verify --check secret-flow` で監査できます。秘密が
+平文として consumer に入る箇所を全て列挙するので、consumer の戻り値が平文を再漏洩しない
+ことをレビューで確認してください。
+
+**脅威モデルとメモリ保証 (Level):** 封印キャリアの第一目的は、秘密が **誤って** 平文の
+`Str` として表示・シリアライズ・比較される経路を塞ぐことです。**プロセスの全メモリを
+読める攻撃者** への完全防御は脅威モデルの対象外です。メモリ上の保証はバックエンドごとに
+異なります。
+
+| バックエンド | メモリ保証 | 内容 |
+|------------|-----------|------|
+| Interpreter | Level 1 (ZeroizedBuffer) | 封印値は破棄時に zeroize される。生存中のメモリは脅威モデル外 |
+| Native / WASM / JS | Level 0 (RedactedOpaque) | sink 遮断のみ。封印値はメモリ上に平文で保持され、消費時にコピーが生じうる |
+
+`HmacSha256` / `ConstantTimeEq` を使った時点で、各バックエンドの暗号プリミティブは内部で
+鍵バッファを扱います（interpreter 以外では平文コピーを materialize します）。秘密を扱う
+本番ワークロードでは、メモリ保証が必要なバックエンド (interpreter) を選んでください。
 
 ### 7.4 文字列モールド
 

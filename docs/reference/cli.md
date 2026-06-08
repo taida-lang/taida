@@ -224,6 +224,7 @@ taida way todo [--format text|json|jsonl|sarif] [--strict] [--quiet] [PATH]
 | `unchecked-division` | warning | 除算の安全性チェック |
 | `direction-constraint` | error | 単一方向制約 |
 | `unchecked-lax` | warning | Lax の未検査利用検出 |
+| `secret-flow` | warning | 封印キャリアの de-seal 点 (`Reveal`) を監査。秘密が平文として consumer に入る箇所を可視化する |
 
 `naming-convention` は `way lint` の責務です。`way verify` では実行しません。
 
