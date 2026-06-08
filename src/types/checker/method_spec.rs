@@ -385,6 +385,32 @@ mod tests {
         BuiltinRecv::Error,
     ];
 
+    /// The name universe for the cross tests: every name the spec table
+    /// lists, PLUS every method-name-shaped string literal appearing in
+    /// the checker's two static method paths (`checker_methods.rs`), plus
+    /// a guaranteed-absent probe.
+    ///
+    /// The checker-sourced names are the load-bearing part: a
+    /// table-derived universe only exercises names the table already
+    /// knows, so it cannot see a method the checker learned on one path
+    /// but the table never heard about (the reverse-drift direction —
+    /// the class that produced the runtime-only `Async.unmold` skew).
+    /// Pulling literals straight from the checker source closes that gap;
+    /// any checker arm that returns Some/non-`Unknown` for a name absent
+    /// from the table now fails the cross tests below.
+    fn name_universe() -> Vec<&'static str> {
+        static CHECKER_SRC: &str = include_str!("checker_methods.rs");
+        let re = regex::Regex::new(r#""([a-z][a-zA-Z0-9]*)""#).expect("method-name literal regex");
+        let mut u: Vec<&'static str> = BUILTIN_METHOD_SPECS.iter().map(|s| s.name).collect();
+        for cap in re.captures_iter(CHECKER_SRC) {
+            u.push(cap.get(1).expect("capture group 1").as_str());
+        }
+        u.push("zzzDefinitelyNotAMethod");
+        u.sort_unstable();
+        u.dedup();
+        u
+    }
+
     /// The universe = every method name in the table + a guaranteed-unknown
     /// probe. For every (receiver kind, universe name) pair, the table and
     /// `builtin_method_signature` must agree exactly: present-with-same
@@ -392,10 +418,7 @@ mod tests {
     #[test]
     fn spec_table_and_checker_signature_agree_over_the_universe() {
         let mut checker = TypeChecker::new();
-        let mut universe: Vec<&'static str> = BUILTIN_METHOD_SPECS.iter().map(|s| s.name).collect();
-        universe.push("zzzDefinitelyNotAMethod");
-        universe.sort_unstable();
-        universe.dedup();
+        let universe = name_universe();
 
         for &recv in ALL_RECVS {
             for ty in recv_types(recv) {
@@ -460,10 +483,7 @@ mod tests {
     #[test]
     fn spec_table_and_return_type_path_agree_over_the_universe() {
         let checker = TypeChecker::new();
-        let mut universe: Vec<&'static str> = BUILTIN_METHOD_SPECS.iter().map(|s| s.name).collect();
-        universe.push("zzzDefinitelyNotAMethod");
-        universe.sort_unstable();
-        universe.dedup();
+        let universe = name_universe();
 
         for &recv in ALL_RECVS {
             for ty in recv_types(recv) {
