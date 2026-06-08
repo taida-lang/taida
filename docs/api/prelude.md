@@ -462,15 +462,14 @@ stdout(Redact[secret]())
 
 型チェッカーは封印された値が漏れ口に届くことをコンパイル時に拒否します:
 
-- 表示ビルトイン (`stdout` / `stderr` / `debug`) — `[E1533]`
-- シリアライズ (`jsonEncode` / `jsonPretty`) — `[E1534]`
+- 表示 (`stdout` / `stderr` / `debug`、`.toString()` / `.toStr()`、`Str[secret]()`、文字列補間 `` `${secret}` ``) — `[E1533]`
+- シリアライズ (`jsonEncode` / `jsonPretty`、`@(...)` / `@[...]` 構造内の封印値を含む) — `[E1534]`
 - 直接 unmold (`>=>` / `<=<`) — `[E1535]`
-- 二項演算 (`+` 連結・`==` / `!=` 等値オラクル) — `[E1536]`
+- 二項演算・等値・メンバシップ (`+` 連結・`==` / `!=`・`.contains()` / `.indexOf()` のオラクル) — `[E1536]`
 
-コンパイルエラーにならない経路 (`Str[]` 変換・文字列補間・`toString` 等) でも、
-全バックエンド (interpreter / JS / native / wasm) のランタイムは fail-closed で、
-封印値の代わりに policy ラベル (`<Secret>` / `<Moltenized>`) を返します。封印値は
-どの経路でも平文として現れません。診断コードの詳細は
+万一コンパイル時検査を省いた場合 (`--no-check`) でも、全バックエンド (interpreter /
+JS / native / wasm) のランタイムは標準 sink を fail-closed で処理し、封印値の代わりに
+policy ラベル (`<Secret>` / `<Moltenized>`) を返します。診断コードの詳細は
 [`docs/reference/diagnostic_codes.md`](../reference/diagnostic_codes.md)
 を参照してください。
 
