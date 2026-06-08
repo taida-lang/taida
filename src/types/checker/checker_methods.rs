@@ -1,3 +1,4 @@
+use super::method_spec::{builtin_method_spec, builtin_recv_of, render_return_kind};
 use super::*;
 
 impl TypeChecker {
@@ -924,194 +925,45 @@ impl TypeChecker {
     /// Updated for v0.7.0: operation methods are abolished (mold-ified).
     /// Only state check methods and toString remain.
     pub(super) fn infer_method_return_type(&self, obj_type: &Type, method: &str) -> Type {
-        match obj_type {
-            Type::Str => match method {
-                // State checks (v0.7.0 remaining methods)
-                "length" => Type::Int,
-                "contains" | "startsWith" | "endsWith" => Type::Bool,
-                "indexOf" | "lastIndexOf" => Type::Int,
-                "indexOfLax" | "lastIndexOfLax" => {
-                    Type::Generic("Lax".to_string(), vec![Type::Int])
-                }
-                "get" => Type::Generic("Lax".to_string(), vec![Type::Str]),
-                "toString" => Type::Str,
-                // replace / replaceAll / split accept fixed strings and Regex values.
-                "replace" | "replaceAll" => Type::Str,
-                "split" => Type::List(Box::new(Type::Str)),
-                // match returns a RegexMatch pack; search returns an Int
-                // character index. Typing `match` as Named("RegexMatch")
-                // preserves later field access lowering.
-                "match" => Type::Named("RegexMatch".to_string()),
-                "search" => Type::Int,
-                "searchLax" => Type::Generic("Lax".to_string(), vec![Type::Int]),
-                _ => Type::Unknown,
-            },
-            Type::Int | Type::Float | Type::Num => match method {
-                // State checks (v0.7.0 remaining methods)
-                "toString" => Type::Str,
-                "isNaN" | "isInfinite" | "isFinite" | "isPositive" | "isNegative" | "isZero" => {
-                    Type::Bool
-                }
-                _ => Type::Unknown,
-            },
-            Type::Bool => match method {
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            Type::Bytes => match method {
-                "length" => Type::Int,
-                "get" => Type::Generic("Lax".to_string(), vec![Type::Int]),
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            Type::List(inner) => match method {
-                // State checks (v0.7.0 remaining methods)
-                "length" => Type::Int,
-                "isEmpty" => Type::Bool,
-                "first" | "last" | "max" | "min" => {
-                    Type::Generic("Lax".to_string(), vec![*inner.clone()])
-                }
-                "get" => Type::Generic("Lax".to_string(), vec![*inner.clone()]),
-                "contains" => Type::Bool,
-                "indexOf" | "lastIndexOf" => Type::Int,
-                "indexOfLax" | "lastIndexOfLax" => {
-                    Type::Generic("Lax".to_string(), vec![Type::Int])
-                }
-                "any" | "all" | "none" => Type::Bool,
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            // JSON is an opaque primitive (molten iron) -- no methods allowed (v0.7.0)
-            Type::Json => Type::Unknown,
-            // Molten is an opaque primitive -- no methods allowed
-            Type::Molten => Type::Unknown,
-            // HashMap methods
-            Type::Named(name) if name == "HashMap" => match method {
-                "get" => Type::Generic("Lax".to_string(), vec![Type::Any]),
-                "set" | "remove" | "merge" => Type::Named("HashMap".to_string()),
-                "has" => Type::Bool,
-                "keys" => Type::List(Box::new(Type::Str)),
-                "values" => Type::List(Box::new(Type::Any)),
-                "entries" => Type::List(Box::new(Type::Any)),
-                "size" => Type::Int,
-                "isEmpty" => Type::Bool,
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            Type::Generic(name, args) if name == "HashMap" => {
-                let key = args.first().cloned().unwrap_or(Type::Unknown);
-                let value = args.get(1).cloned().unwrap_or(Type::Unknown);
-                match method {
-                    "get" => Type::Generic("Lax".to_string(), vec![value.clone()]),
-                    "set" | "remove" | "merge" => obj_type.clone(),
-                    "has" | "isEmpty" => Type::Bool,
-                    "keys" => Type::List(Box::new(key)),
-                    "values" => Type::List(Box::new(value)),
-                    "entries" => Type::List(Box::new(Type::Unknown)),
-                    "size" => Type::Int,
-                    "toString" => Type::Str,
-                    _ => Type::Unknown,
-                }
+        // Statically enumerable receivers read their argless return type
+        // straight from the spec table (the SSOT the universe cross-test
+        // pins to this function). A builtin receiver whose method the
+        // table omits returns Unknown — except Error, which falls back to
+        // user-defined members. Receivers the table does not model at all
+        // (Json/Molten/Stream/user Named/other) drop to the tail below.
+        if let Some(recv) = builtin_recv_of(obj_type) {
+            if let Some(spec) = builtin_method_spec(recv, method) {
+                return render_return_kind(spec.ret, obj_type);
             }
-            // Set methods
-            Type::Named(name) if name == "Set" => match method {
-                "add" | "remove" | "union" | "intersect" | "diff" => Type::Named("Set".to_string()),
-                "has" => Type::Bool,
-                "toList" => Type::List(Box::new(Type::Unknown)),
-                "size" => Type::Int,
-                "isEmpty" => Type::Bool,
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            Type::Generic(name, args) if name == "Set" => {
-                let value = args.first().cloned().unwrap_or(Type::Unknown);
-                match method {
-                    "add" | "remove" | "union" | "intersect" | "diff" => obj_type.clone(),
-                    "has" | "isEmpty" => Type::Bool,
-                    "toList" => Type::List(Box::new(value)),
-                    "size" => Type::Int,
-                    "toString" => Type::Str,
-                    _ => Type::Unknown,
-                }
-            }
-            // Lax methods
-            Type::Generic(name, args) if name == "Lax" => match method {
-                "hasValue" | "isEmpty" => Type::Bool,
-                "getOrDefault" => args.first().cloned().unwrap_or(Type::Unknown),
-                "map" | "flatMap" => obj_type.clone(),
-                "errorInfo" => Type::Generic(
-                    "Lax".to_string(),
-                    vec![Type::Named("ErrorInfo".to_string())],
-                ),
-                "unmold" => args.first().cloned().unwrap_or(Type::Unknown),
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            // Result methods
-            Type::Generic(name, args) if name == "Result" => match method {
-                "isSuccess" | "isError" => Type::Bool,
-                "map" | "flatMap" | "mapError" => obj_type.clone(),
-                "getOrDefault" => args.first().cloned().unwrap_or(Type::Unknown),
-                "getOrThrow" => args.first().cloned().unwrap_or(Type::Unknown),
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            Type::Generic(name, args) if name == "Gorillax" => match method {
-                "hasValue" | "isEmpty" => Type::Bool,
-                "relax" => Type::Generic("RelaxedGorillax".to_string(), args.clone()),
-                "errorInfo" => Type::Generic(
-                    "Lax".to_string(),
-                    vec![Type::Named("ErrorInfo".to_string())],
-                ),
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            Type::Generic(name, _) if name == "RelaxedGorillax" => match method {
-                "hasValue" | "isEmpty" => Type::Bool,
-                "errorInfo" => Type::Generic(
-                    "Lax".to_string(),
-                    vec![Type::Named("ErrorInfo".to_string())],
-                ),
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            Type::Error(error_name) => match method {
-                "errorInfo" => Type::Generic(
-                    "Lax".to_string(),
-                    vec![Type::Named("ErrorInfo".to_string())],
-                ),
-                "throw" => Type::Unknown,
-                "toString" => Type::Str,
-                _ => self
+            if let Type::Error(error_name) = obj_type {
+                return self
                     .named_method_return_type(error_name, method)
-                    .unwrap_or(Type::Unknown),
-            },
-            // Async methods
-            Type::Generic(name, args) if name == "Async" => match method {
-                "isPending" | "isFulfilled" | "isRejected" => Type::Bool,
-                "map" => obj_type.clone(),
-                "getOrDefault" => args.first().cloned().unwrap_or(Type::Unknown),
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            // Stream methods
-            Type::Generic(name, _args) if name == "Stream" => match method {
+                    .unwrap_or(Type::Unknown);
+            }
+            return Type::Unknown;
+        }
+        match obj_type {
+            // Opaque primitives expose no methods — not even toString.
+            Type::Json | Type::Molten => Type::Unknown,
+            // Stream is a return-path-only receiver (no arity entry).
+            Type::Generic(name, _) if name == "Stream" => match method {
                 "length" => Type::Int,
                 "isEmpty" => Type::Bool,
                 "toString" => Type::Str,
                 _ => Type::Unknown,
             },
-            // For named types, check if they have known fields/methods
+            // User-defined Named types: declared members, else the
+            // universal toString helper.
             Type::Named(type_name) => {
                 if let Some(ret) = self.named_method_return_type(type_name, method) {
-                    return ret;
-                }
-                if method == "toString" {
+                    ret
+                } else if method == "toString" {
                     Type::Str
                 } else {
                     Type::Unknown
                 }
             }
+            // Everything else gets the universal toString helper only.
             _ => {
                 if method == "toString" {
                     Type::Str

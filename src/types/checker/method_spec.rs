@@ -199,6 +199,45 @@ pub(crate) fn render_return_kind(kind: ReturnKind, recv: &Type) -> Type {
     }
 }
 
+/// Classify a checker `Type` into its statically enumerable builtin
+/// receiver kind, or `None` for receivers handled outside the spec
+/// table: opaque `Json` / `Molten` (no methods at all, not even
+/// `toString`), the return-path-only `Stream`, user-defined `Named`
+/// types (their members come from `named_method_signature`), and any
+/// other shape. `Error` maps to `BuiltinRecv::Error` for its builtin
+/// members; names the table omits fall back to user members at the call
+/// site.
+pub(crate) fn builtin_recv_of(obj_type: &Type) -> Option<BuiltinRecv> {
+    Some(match obj_type {
+        Type::Str => BuiltinRecv::Str,
+        Type::Int | Type::Float | Type::Num => BuiltinRecv::Num,
+        Type::Bool => BuiltinRecv::Bool,
+        Type::Bytes => BuiltinRecv::Bytes,
+        Type::List(_) => BuiltinRecv::List,
+        Type::Named(n) | Type::Generic(n, _) if n == "HashMap" => BuiltinRecv::HashMap,
+        Type::Named(n) | Type::Generic(n, _) if n == "Set" => BuiltinRecv::Set,
+        Type::Generic(n, _) if n == "Lax" => BuiltinRecv::Lax,
+        Type::Generic(n, _) if n == "Result" => BuiltinRecv::Result,
+        Type::Generic(n, _) if n == "Async" => BuiltinRecv::Async,
+        Type::Generic(n, _) if n == "Gorillax" => BuiltinRecv::Gorillax,
+        Type::Generic(n, _) if n == "RelaxedGorillax" => BuiltinRecv::RelaxedGorillax,
+        Type::Error(_) => BuiltinRecv::Error,
+        _ => return None,
+    })
+}
+
+/// Look up `(min_args, max_args, return_kind)` for a builtin method by
+/// receiver kind and name. The single table read shared by the
+/// checker's arity and return-type paths.
+pub(crate) fn builtin_method_spec(
+    recv: BuiltinRecv,
+    method: &str,
+) -> Option<&'static BuiltinMethodSpec> {
+    BUILTIN_METHOD_SPECS
+        .iter()
+        .find(|s| s.recv == recv && s.name == method)
+}
+
 macro_rules! spec {
     ($recv:ident, $name:literal, $min:literal, $max:literal, $ret:ident) => {
         BuiltinMethodSpec {
