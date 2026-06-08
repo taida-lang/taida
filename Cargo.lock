@@ -2136,6 +2136,7 @@ dependencies = [
  "target-lexicon",
  "tokio",
  "tower-lsp",
+ "zeroize",
 ]
 
 [[package]]

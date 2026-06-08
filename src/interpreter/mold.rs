@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use super::eval::{Interpreter, RuntimeError, Signal};
 use super::value::{
-    AsyncStatus, AsyncTaskValue, AsyncValue, BytesValue, ErrorValue, StreamStatus, StreamTransform,
-    StreamValue, Value,
+    AsyncStatus, AsyncTaskValue, AsyncValue, BytesValue, ErrorValue, SealedCell, StreamStatus,
+    StreamTransform, StreamValue, Value,
 };
 /// Operation mold evaluation for the Taida interpreter.
 ///
@@ -2669,7 +2669,7 @@ impl Interpreter {
                     "Moltenized"
                 };
                 Ok(Some(Signal::Value(Value::Moltenized {
-                    value: Box::new(inner),
+                    value: SealedCell::new(inner),
                     reveal_type,
                     policy: policy.to_string(),
                 })))
@@ -2693,7 +2693,8 @@ impl Interpreter {
             // F56 Phase 2: MoltenizeSecretFromEnv[name]() -> Lax[Secret[Str]].
             // Reads an environment variable straight into a sealed carrier — the
             // value is sealed at the boundary instead of living as a plain `Str`.
-            // (Source-side zeroize of the temporary plaintext is Phase 3.)
+            // The sealed buffer is held behind `SealedCell` and zeroized on drop
+            // (Phase 3, Level 1). The OS-owned `environ` copy is outside our heap.
             "MoltenizeSecretFromEnv" => {
                 if type_args.len() != 1 {
                     return Err(RuntimeError {
@@ -2716,7 +2717,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let seal = |inner: String| Value::Moltenized {
-                    value: Box::new(Value::str(inner)),
+                    value: SealedCell::new(Value::str(inner)),
                     reveal_type: "Str".to_string(),
                     policy: "Secret".to_string(),
                 };
@@ -2731,7 +2732,8 @@ impl Interpreter {
 
             // F56 Phase 2: MoltenizeSecretFromInput[prompt]() ->
             // Async[Lax[Secret[Str]]]. Reads a line of stdin into a sealed
-            // carrier. (No-echo / masked input and zeroize are Phase 3.)
+            // carrier zeroized on drop (Phase 3, Level 1). No-echo / masked
+            // terminal input is a separate TTY concern (not in F56 scope).
             "MoltenizeSecretFromInput" => {
                 use rustyline::{DefaultEditor, error::ReadlineError};
                 let prompt = match type_args.first() {
@@ -2742,7 +2744,7 @@ impl Interpreter {
                     None => String::new(),
                 };
                 let seal = |inner: String| Value::Moltenized {
-                    value: Box::new(Value::str(inner)),
+                    value: SealedCell::new(Value::str(inner)),
                     reveal_type: "Str".to_string(),
                     policy: "Secret".to_string(),
                 };
@@ -2781,7 +2783,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let seal = |inner: Vec<u8>| Value::Moltenized {
-                    value: Box::new(Value::bytes(inner)),
+                    value: SealedCell::new(Value::bytes(inner)),
                     reveal_type: "Bytes".to_string(),
                     policy: "Secret".to_string(),
                 };

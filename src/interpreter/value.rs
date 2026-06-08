@@ -7,6 +7,8 @@ use std::fmt;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use zeroize::Zeroize;
+
 use crate::parser::{FieldDef, Param, Statement};
 
 use super::runtime::str_rope::GapBuffer;
@@ -178,6 +180,23 @@ impl StrValue {
     #[inline]
     pub fn is_rope(&self) -> bool {
         matches!(self.data, StrRepr::Rope(_))
+    }
+
+    /// F56 Phase 3 (Level 1 — ZeroizedBuffer): scrub the UTF-8 payload with the
+    /// `zeroize` crate's volatile writes, then reset the char-index cache. Used
+    /// by [`SealedCell`]'s drop path so a freed `Secret[Str]` does not linger as
+    /// plaintext in reused allocations / core dumps.
+    ///
+    /// Secrets never take the rope path (`+`/concat is a compile-time sink, so a
+    /// `Secret` can never be concatenated into a `Rope`); the rope branch is a
+    /// best-effort fallback that drops the segments by replacing them with an
+    /// empty flat payload.
+    pub fn zeroize_in_place(&mut self) {
+        match &mut self.data {
+            StrRepr::Flat(s) => s.zeroize(),
+            StrRepr::Rope(_) => self.data = StrRepr::Flat(String::new()),
+        }
+        self.char_offsets = OnceLock::new();
     }
 
     /// concatenate with `other` and decide whether
@@ -483,6 +502,21 @@ impl BytesValue {
         &self.buf[self.offset..self.offset + self.len]
     }
 
+    /// F56 Phase 3 (Level 1 — ZeroizedBuffer): scrub the underlying buffer with
+    /// the `zeroize` crate's volatile writes and collapse the view. Used by
+    /// [`SealedCell`]'s drop path for a freed `Secret[Bytes]`.
+    ///
+    /// The buffer is shared via `Arc::clone` across views, so the scrub only
+    /// fires when this view uniquely owns `buf` (the case for source-produced
+    /// secrets — `MoltenizeSecretFromFile` builds a fresh, refcount-1 buffer).
+    pub fn zeroize_in_place(&mut self) {
+        if let Some(buf) = Arc::get_mut(&mut self.buf) {
+            buf.zeroize();
+        }
+        self.offset = 0;
+        self.len = 0;
+    }
+
     /// Length of the view (NOT the underlying buffer).
     #[inline]
     pub fn len(&self) -> usize {
@@ -720,11 +754,113 @@ pub enum Value {
     /// time; the runtime guards below are the fail-closed second layer so a
     /// value reaching a sink via `--no-check` or an `Unknown` hole still
     /// errors instead of leaking.
+    ///
+    /// F56 Phase 3 (Level 1 — ZeroizedBuffer): the inner plaintext lives behind
+    /// a shared [`SealedCell`] that scrubs it (via the `zeroize` crate) when the
+    /// last carrier clone is released. `reveal_type` / `policy` are non-secret
+    /// metadata kept as siblings.
     Moltenized {
-        value: Box<Value>,
+        value: SealedCell,
         reveal_type: String,
         policy: String,
     },
+}
+
+/// F56 Phase 3 (Level 1 — ZeroizedBuffer): shared, zeroize-on-drop storage for
+/// the sealed plaintext of a `Moltenized`/`Secret` carrier.
+///
+/// `Value` is `Clone`, and the tree-walking interpreter clones values freely.
+/// Holding the inner plaintext behind a private `Arc<SealedInner>` means a
+/// carrier clone shares this one cell (an `Arc` refcount bump) instead of
+/// deep-cloning the secret leaf — so exactly one plaintext buffer exists per
+/// logical secret (a strict improvement over the prior `Box<Value>`, which
+/// duplicated the plaintext on every carrier clone). When the last clone is
+/// released, [`SealedInner`]'s `Drop` scrubs that buffer with the `zeroize`
+/// crate's volatile writes, reducing allocator-reuse / core-dump exposure of
+/// *freed* secrets.
+///
+/// Guarantee scope (stated honestly): the scrub fires when the sealed leaf
+/// buffer is uniquely owned, which holds for source-produced secrets
+/// (`MoltenizeSecretFrom{Env,File,Input}` build fresh, refcount-1 buffers and
+/// the cell never shares the inner `Value` out). A value sealed from storage
+/// that still aliases a live reference is scrubbed only once that alias is
+/// gone. This is Level 1 (ZeroizedBuffer); it does **not** defend against an
+/// attacker able to read live process memory (explicitly out of the F56 threat
+/// model). Native / WASM / JS remain Level 0 — their memory models have no
+/// per-value drop hook (see the secure-memory design).
+#[derive(Clone)]
+pub struct SealedCell(Arc<SealedInner>);
+
+struct SealedInner {
+    value: Value,
+}
+
+impl SealedCell {
+    /// Seal `value` behind a shared zeroize-on-drop cell.
+    pub fn new(value: Value) -> Self {
+        SealedCell(Arc::new(SealedInner { value }))
+    }
+
+    /// Borrow the sealed plaintext. Crate-internal only — the Taida surface
+    /// never reaches this (the sink matrix plus the fail-closed runtime block
+    /// every display / serialize / compare path). Reserved for secret-aware
+    /// consumers (`Reveal` / `HmacSha256` / `ConstantTimeEq`, F56 Phase 4).
+    #[allow(dead_code)]
+    pub fn reveal(&self) -> &Value {
+        &self.0.value
+    }
+}
+
+impl Drop for SealedInner {
+    fn drop(&mut self) {
+        scrub_value(&mut self.value);
+    }
+}
+
+// Never render the sealed plaintext via `{:?}` — fail-closed `Debug`.
+impl fmt::Debug for SealedCell {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SealedCell(<sealed>)")
+    }
+}
+
+/// F56 Phase 3: recursively scrub the plaintext leaves of a sealed value.
+///
+/// Each leaf is reached through `Arc::get_mut`, so the scrub only mutates
+/// buffers this cell uniquely owns (it never corrupts an aliased buffer — a
+/// shared leaf is simply left for its own last owner to scrub). Scalars are
+/// overwritten in place; containers recurse; nested carriers scrub themselves
+/// when their own cell drops.
+fn scrub_value(v: &mut Value) {
+    match v {
+        Value::Str(arc) => {
+            if let Some(sv) = Arc::get_mut(arc) {
+                sv.zeroize_in_place();
+            }
+        }
+        Value::Bytes(arc) => {
+            if let Some(bv) = Arc::get_mut(arc) {
+                bv.zeroize_in_place();
+            }
+        }
+        Value::List(arc) => {
+            if let Some(items) = Arc::get_mut(arc) {
+                for it in items.iter_mut() {
+                    scrub_value(it);
+                }
+            }
+        }
+        Value::BuchiPack(arc) => {
+            if let Some(fields) = Arc::get_mut(arc) {
+                for (_, fv) in fields.iter_mut() {
+                    scrub_value(fv);
+                }
+            }
+        }
+        Value::Int(n) => *n = 0,
+        Value::Float(x) => *x = 0.0,
+        _ => {}
+    }
 }
 
 /// A function closure.
@@ -1714,5 +1850,143 @@ mod tests {
         });
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    // ── F56 Phase 3 (Level 1 — ZeroizedBuffer): scrub verification ──
+    //
+    // These tests prove the secret scrub actually overwrites the plaintext.
+    // Each reads the buffer through a raw pointer captured *before* scrubbing
+    // while the owning value is still alive — `zeroize_in_place` overwrites in
+    // place and never reallocates, so the allocation stays valid (no UAF).
+
+    #[test]
+    fn strvalue_zeroize_overwrites_buffer() {
+        let secret = "hunter2-API-KEY";
+        let mut sv = StrValue::new(secret.to_string());
+        let ptr = sv.as_str().as_ptr();
+        let len = secret.len();
+        // SAFETY: `sv` owns the live allocation; `ptr`/`len` cover its bytes.
+        let before = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert_eq!(before, secret.as_bytes(), "precondition: plaintext present");
+
+        sv.zeroize_in_place();
+
+        // SAFETY: `sv` is still alive and the buffer was overwritten in place.
+        let after = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert!(
+            after.iter().all(|&b| b == 0),
+            "plaintext not scrubbed: {after:?}"
+        );
+        assert!(sv.as_str().is_empty());
+    }
+
+    #[test]
+    fn bytesvalue_zeroize_overwrites_buffer() {
+        let secret: Vec<u8> = b"\x01\x02\x03super-secret-bytes".to_vec();
+        let len = secret.len();
+        let mut bv = BytesValue {
+            buf: Arc::new(secret.clone()),
+            offset: 0,
+            len,
+        };
+        let ptr = bv.as_slice().as_ptr();
+        // SAFETY: `bv` uniquely owns the live buffer.
+        let before = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert_eq!(before, secret.as_slice(), "precondition: plaintext present");
+
+        bv.zeroize_in_place();
+
+        // SAFETY: still alive; overwritten in place.
+        let after = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert!(
+            after.iter().all(|&b| b == 0),
+            "plaintext not scrubbed: {after:?}"
+        );
+        assert_eq!(bv.len(), 0);
+    }
+
+    #[test]
+    fn bytesvalue_zeroize_skips_aliased_buffer() {
+        // The scrub must never corrupt a buffer still aliased by another view.
+        let shared = Arc::new(b"shared-not-secret".to_vec());
+        let mut bv = BytesValue {
+            buf: Arc::clone(&shared),
+            offset: 0,
+            len: shared.len(),
+        };
+        bv.zeroize_in_place();
+        assert_eq!(
+            shared.as_slice(),
+            b"shared-not-secret",
+            "aliased buffer must be left intact (get_mut refused)"
+        );
+    }
+
+    #[test]
+    fn scrub_value_walks_list_and_pack() {
+        let leaf1 = "leaf-secret-one";
+        let leaf2 = "leaf-secret-two";
+        let mut v = Value::List(Arc::new(vec![
+            Value::str(leaf1.to_string()),
+            Value::BuchiPack(Arc::new(vec![(
+                "tok".to_string(),
+                Value::str(leaf2.to_string()),
+            )])),
+        ]));
+        // Capture leaf buffer pointers (the tree stays alive throughout).
+        let ((p1, l1), (p2, l2)) = match &v {
+            Value::List(items) => {
+                let a = match &items[0] {
+                    Value::Str(s) => (s.as_str().as_ptr(), leaf1.len()),
+                    _ => unreachable!(),
+                };
+                let b = match &items[1] {
+                    Value::BuchiPack(f) => match &f[0].1 {
+                        Value::Str(s) => (s.as_str().as_ptr(), leaf2.len()),
+                        _ => unreachable!(),
+                    },
+                    _ => unreachable!(),
+                };
+                (a, b)
+            }
+            _ => unreachable!(),
+        };
+
+        scrub_value(&mut v);
+
+        // SAFETY: `v` is alive; the leaves were overwritten in place.
+        let a1 = unsafe { std::slice::from_raw_parts(p1, l1) };
+        let a2 = unsafe { std::slice::from_raw_parts(p2, l2) };
+        assert!(a1.iter().all(|&b| b == 0), "list leaf not scrubbed");
+        assert!(a2.iter().all(|&b| b == 0), "pack leaf not scrubbed");
+    }
+
+    #[test]
+    fn sealed_cell_clone_shares_one_buffer() {
+        // A carrier clone must share one SealedInner, not duplicate the
+        // plaintext — keeping the leaf Arc uniquely owned (scrubbable at the
+        // last drop). Pointer identity of the inner Arc<StrValue> proves it.
+        let cell = SealedCell::new(Value::str("shared-secret".to_string()));
+        let clone = cell.clone();
+        let p_orig = match cell.reveal() {
+            Value::Str(s) => Arc::as_ptr(s),
+            _ => unreachable!(),
+        };
+        let p_clone = match clone.reveal() {
+            Value::Str(s) => Arc::as_ptr(s),
+            _ => unreachable!(),
+        };
+        assert_eq!(p_orig, p_clone, "carrier clone duplicated the plaintext");
+    }
+
+    #[test]
+    fn sealed_cell_debug_does_not_leak() {
+        let cell = SealedCell::new(Value::str("never-print-me".to_string()));
+        let rendered = format!("{cell:?}");
+        assert!(
+            !rendered.contains("never-print-me"),
+            "Debug leaked plaintext"
+        );
+        assert_eq!(rendered, "SealedCell(<sealed>)");
     }
 }

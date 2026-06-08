@@ -105,6 +105,15 @@ libc = "0.2"
 # `linenoise` source (Native) to keep 3-backend parity.
 rustyline = { version = "14", default-features = false }
 
+# F56 Phase 3 (secure memory, Level 1 — ZeroizedBuffer): volatile-write
+# scrubbing of a sealed secret's plaintext when its carrier is released, so a
+# freed `Secret[T]` does not linger in reused allocations / core dumps. Already
+# present transitively (crypto deps); pinning it as a direct dependency makes
+# the Interpreter's `SealedCell` zeroize-on-drop explicit. `alloc` enables the
+# `Zeroize` impls for `String` / `Vec<u8>`. Native/WASM/JS stay Level 0 (their
+# memory models have no per-value drop hook — see the secure-memory design).
+zeroize = { version = "1.8", features = ["alloc"] }
+
 [dev-dependencies]
 # h3 crate: HTTP/3 framing + QPACK semantics (hyperium/h3 reference)
 # NB7-90: h3/h3-quinn are in dev-deps only — src/ implements hand-rolled
