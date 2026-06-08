@@ -42,7 +42,7 @@ pub mod manifest;
 // backend can consume the same `AddonFacadeSummary` shape without
 // re-deriving the recursive `>>>` walker or the reachability
 // expansion. The interpreter's addon-facade path
-// (`src/interpreter/module_eval.rs::load_addon_facade`) continues
+// (`src/interpreter/module.rs::load_addon_facade`) continues
 // to execute the facade dynamically — it runs as Taida's
 // reference implementation — but every codegen backend routes
 // through this module.

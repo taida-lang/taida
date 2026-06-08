@@ -5204,7 +5204,7 @@ fn stmts_contain_async_unmold(stmts: &[Statement]) -> bool {
 /// Compute relative path from `base` directory to `target` file.
 /// Walk up from `start_dir` looking for project-root markers
 /// (`packages.tdm`, `taida.toml`, `.git`). Mirrors the marker
-/// set used by `interpreter::module_eval::find_project_root` and
+/// set used by `interpreter::module::find_project_root` and
 /// `codegen::driver::find_project_root` so the JS path-traversal guard
 /// agrees with Native / Interpreter on what counts as the project
 /// boundary. Falls back to `start_dir` if no marker is found.

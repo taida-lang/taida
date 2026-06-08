@@ -1577,12 +1577,12 @@ impl Interpreter {
             // BuchiPack, dispatch to the regex engine; otherwise fall
             // back to the B11-4a fixed-string semantics.
             "replace" => {
-                if let Some((pat, flags)) = args.first().and_then(super::regex_eval::as_regex) {
+                if let Some((pat, flags)) = args.first().and_then(super::regex::as_regex) {
                     let replacement = args
                         .get(1)
                         .map(|v| v.to_display_string())
                         .unwrap_or_default();
-                    match super::regex_eval::replace_first(s.as_str(), &pat, &flags, &replacement) {
+                    match super::regex::replace_first(s.as_str(), &pat, &flags, &replacement) {
                         Ok(out) => return Ok(Signal::Value(Value::str(out))),
                         Err(msg) => return Err(RuntimeError { message: msg }),
                     }
@@ -1606,12 +1606,12 @@ impl Interpreter {
                 ))))
             }
             "replaceAll" => {
-                if let Some((pat, flags)) = args.first().and_then(super::regex_eval::as_regex) {
+                if let Some((pat, flags)) = args.first().and_then(super::regex::as_regex) {
                     let replacement = args
                         .get(1)
                         .map(|v| v.to_display_string())
                         .unwrap_or_default();
-                    match super::regex_eval::replace_all(s.as_str(), &pat, &flags, &replacement) {
+                    match super::regex::replace_all(s.as_str(), &pat, &flags, &replacement) {
                         Ok(out) => return Ok(Signal::Value(Value::str(out))),
                         Err(msg) => return Err(RuntimeError { message: msg }),
                     }
@@ -1631,8 +1631,8 @@ impl Interpreter {
                 Ok(Signal::Value(Value::str(s.replace(&target, &replacement))))
             }
             "split" => {
-                if let Some((pat, flags)) = args.first().and_then(super::regex_eval::as_regex) {
-                    match super::regex_eval::split(s.as_str(), &pat, &flags) {
+                if let Some((pat, flags)) = args.first().and_then(super::regex::as_regex) {
+                    match super::regex::split(s.as_str(), &pat, &flags) {
                         Ok(parts) => {
                             return Ok(Signal::Value(Value::list(
                                 parts.into_iter().map(Value::str).collect(),
@@ -1666,23 +1666,23 @@ impl Interpreter {
             "match" => {
                 let (pat, flags) = args
                     .first()
-                    .and_then(super::regex_eval::as_regex)
+                    .and_then(super::regex::as_regex)
                     .ok_or_else(|| RuntimeError {
                         message: "str.match(...) requires a Regex argument. Use Regex(\"pattern\") to construct one.".to_string(),
                     })?;
-                match super::regex_eval::match_first(s.as_str(), &pat, &flags) {
-                    Ok(m) => Ok(Signal::Value(super::regex_eval::build_match_value(m))),
+                match super::regex::match_first(s.as_str(), &pat, &flags) {
+                    Ok(m) => Ok(Signal::Value(super::regex::build_match_value(m))),
                     Err(msg) => Err(RuntimeError { message: msg }),
                 }
             }
             "search" => {
                 let (pat, flags) = args
                     .first()
-                    .and_then(super::regex_eval::as_regex)
+                    .and_then(super::regex::as_regex)
                     .ok_or_else(|| RuntimeError {
                         message: "str.search(...) requires a Regex argument. Use Regex(\"pattern\") to construct one.".to_string(),
                     })?;
-                match super::regex_eval::search_first(s.as_str(), &pat, &flags) {
+                match super::regex::search_first(s.as_str(), &pat, &flags) {
                     Ok(idx) => Ok(Signal::Value(Value::Int(idx))),
                     Err(msg) => Err(RuntimeError { message: msg }),
                 }
@@ -1692,11 +1692,11 @@ impl Interpreter {
             "searchLax" => {
                 let (pat, flags) = args
                     .first()
-                    .and_then(super::regex_eval::as_regex)
+                    .and_then(super::regex::as_regex)
                     .ok_or_else(|| RuntimeError {
                         message: "str.searchLax(...) requires a Regex argument. Use Regex(\"pattern\") to construct one.".to_string(),
                     })?;
-                match super::regex_eval::match_first(s.as_str(), &pat, &flags) {
+                match super::regex::match_first(s.as_str(), &pat, &flags) {
                     Ok(Some(m)) => Ok(Signal::Value(make_int_lax(Some(m.start)))),
                     Ok(None) => Ok(Signal::Value(make_int_lax(None))),
                     Err(msg) => Err(RuntimeError { message: msg }),

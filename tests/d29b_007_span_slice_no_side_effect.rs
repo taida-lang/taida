@@ -5,7 +5,7 @@
 //! `@(start: Int, len: Int)` purely from the input span pack and the integer
 //! bounds. The `raw` (2nd type-arg) is **not** read by the operation — its
 //! presence in the signature is a documentation-level type marker, not a
-//! value-level dependency. Pre-fix, `mold_eval.rs:3058` evaluated `raw` and
+//! value-level dependency. Pre-fix, `mold.rs:3058` evaluated `raw` and
 //! immediately dropped it (`let _raw = ...`), which silently fired any
 //! side-effects in the expression tree. That violated the "type-only check"
 //! contract documented at `docs/reference/net_api.md §4.4` and was promoted

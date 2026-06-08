@@ -18,7 +18,7 @@
 //!
 //! # Backend implementation
 //!
-//! - Interpreter: `src/interpreter/mold_eval.rs` (ByteAt / ByteSlice /
+//! - Interpreter: `src/interpreter/mold.rs` (ByteAt / ByteSlice /
 //!   ByteLength handlers)
 //! - JS: `src/js/runtime/core.rs` (`function ByteAt` / `ByteSlice` /
 //!   `ByteLength`, TextEncoder-backed)

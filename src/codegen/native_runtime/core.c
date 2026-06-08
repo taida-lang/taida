@@ -1166,7 +1166,7 @@ void taida_gorilla(void) { exit(1); }
 // C18B-005 fix: print a `RuntimeError: <msg>` line to stderr and exit
 // with status 1. Used by the native Ordinal[] lowering to reject
 // non-Enum arguments — mirrors the interpreter's
-// `mold_eval.rs::Ordinal` RuntimeError shape, and the JS runtime's
+// `mold.rs::Ordinal` RuntimeError shape, and the JS runtime's
 // `__taida_enumOrdinalStrict` throw path. Keeping stderr (not stdout)
 // matches how the interpreter prints RuntimeError messages so parity
 // tests can diff `.expected` against stdout only.
@@ -1675,7 +1675,7 @@ taida_val taida_molten_new(void) {
 
 // C25B-001: Stream[val]() — minimal wrapper matching the interpreter's
 // `Stream[val]()` semantics (wrap a single value as a single-item
-// completed stream; see `src/interpreter/mold_eval.rs:3127`). Phase 3
+// completed stream; see `src/interpreter/mold.rs:3127`). Phase 3
 // scope: string-form parity with `Str[Stream[...]]()` →
 // `Lax[Str]("Stream[completed: N items]")`. Full lazy-transform chain
 // (Map / Filter / Take / TakeWhile) remains interpreter-only until a
@@ -1959,7 +1959,7 @@ static inline taida_val taida_lax_tag_value_default(taida_val lax, taida_val tag
 // `taida_lax_to_string` / `__value` slot rendering goes through
 // `taida_float_to_str` (Rust-f64 parity: `.0`, `inf`/`-inf`/`NaN`).
 //
-// Division semantics mirror the interpreter (`src/interpreter/mold_eval.rs`
+// Division semantics mirror the interpreter (`src/interpreter/mold.rs`
 // `Div` branch Float/Float case): b == 0.0 → Lax empty with default 0.0
 // (no NaN / Inf coercion — Taida's Div is Lax-safe). For non-zero b we
 // let the hardware produce `a / b` directly so special cases like
@@ -4671,7 +4671,7 @@ taida_val taida_str_pad(const char* s, taida_val target_len, const char* pad_cha
 // Value representation: `Regex("pattern", "flags")` returns a
 // BuchiPack with 3 fields (pattern, flags, __type). The field hashes
 // used here are FNV-1a 64-bit of the field-name literals, matching
-// the Rust side of the interpreter (see `regex_eval::REGEX_TYPE_TAG`)
+// the Rust side of the interpreter (see `regex::REGEX_TYPE_TAG`)
 // and the JS runtime (`__taida_is_regex`).
 //
 // Philosophy: construction validates the pattern eagerly; on failure
@@ -5000,7 +5000,7 @@ static const regex_t *taida_regex_acquire(const char *pattern, const char *flags
 // layout matches the interpreter / JS representation.
 //
 // C12B-029: Validate fail-fast at construction time — mirror the
-// Interpreter (`src/interpreter/regex_eval.rs::build_regex_value`)
+// Interpreter (`src/interpreter/regex.rs::build_regex_value`)
 // and JS (`new RegExp(...)` throw) behaviour so the 3 backends share
 // the same failure mode:
 //   1. Reject unsupported flags (anything other than `i` / `m` / `s`).
@@ -6604,7 +6604,7 @@ taida_val taida_list_unique_by(taida_val list_ptr, taida_val fn_ptr) {
     if (!src_tagged) ((taida_val*)new_list)[3] = elem_tag;
     if (len == 0) return new_list;
     // F54B-016 (C2): dedup keys by STRUCTURE (was raw `==`), mirroring the
-    // interpreter Unique[](by) path (mold_eval.rs): a fingerprint seen-set while
+    // interpreter Unique[](by) path (mold.rs): a fingerprint seen-set while
     // keys are hashable, switching to a linear struct-eq scan once a
     // non-hashable key appears. `seen_keys` retains every emitted key so the
     // fallback scan still sees keys added during the hashable phase. Float/Bool

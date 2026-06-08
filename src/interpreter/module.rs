@@ -183,8 +183,8 @@ impl Interpreter {
         // The check uses the SAME package-directory resolution that
         // the source path uses (`resolve_package_module_versioned` /
         // `resolve_package_module`), so addon-backed and pure-source
-        // packages share the resolution order documented in
-        // `.dev/RC1_DESIGN.md` Phase 4 Lock.
+        // packages share the same resolution order
+        // (addon-backed lookups fall through to the source resolver).
         //
         // C25B-030: the interpreter is a first-class addon backend.
         // The `feature = "native"` gate here selects whether the
@@ -387,7 +387,7 @@ impl Interpreter {
                 };
 
                 if in_bundled("os") {
-                    for sym in super::os_eval::OS_SYMBOLS {
+                    for sym in super::os::OS_SYMBOLS {
                         self.env
                             .define_force(sym, Value::str(format!("__os_builtin_{}", sym)));
                     }
@@ -401,7 +401,7 @@ impl Interpreter {
                         }
                     }
                 } else if in_bundled("net") {
-                    for sym in super::net_eval::NET_SYMBOLS {
+                    for sym in super::net::eval::NET_SYMBOLS {
                         self.env
                             .define_force(sym, Value::str(format!("__net_builtin_{}", sym)));
                     }
@@ -422,7 +422,7 @@ impl Interpreter {
                     for sym in ["HostCall", "HostStep", "HostCapability"] {
                         self.env.define_force(sym, Value::str(sym.to_string()));
                     }
-                    for sym in super::abi_eval::abi_symbols() {
+                    for sym in super::abi::abi_symbols() {
                         self.env
                             .define_force(sym, Value::str(format!("__abi_builtin_{}", sym)));
                     }
@@ -846,7 +846,7 @@ impl Interpreter {
     /// 5. Binds each requested symbol into the current env. Facade
     /// exports are bound by value; addon functions are bound as
     /// sentinels `Value::str("__taida_addon_call::<pkg>::<fn>")` that
-    /// `try_addon_func` (in `addon_eval.rs`) routes through
+    /// `try_addon_func` (in `addon.rs`) routes through
     /// `LoadedAddon::call_function`.
     ///
     /// Returns `Ok(Some(Signal::Value(Unit)))` if the import was
@@ -872,7 +872,7 @@ impl Interpreter {
         // call `ensure_addon_supported` with `AddonBackend::Interpreter`
         // truthfully rather than masquerading as `Native`. The actual
         // dlopen dispatch is still gated on `feature = "native"` below
-        // (see `try_addon_func` in `addon_eval.rs`); the policy guard
+        // (see `try_addon_func` in `addon.rs`); the policy guard
         // only answers "is this backend allowed to consume addons?".
         crate::addon::ensure_addon_supported(crate::addon::AddonBackend::Interpreter, &import.path)
             .map_err(|e| RuntimeError {

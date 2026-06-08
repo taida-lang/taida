@@ -75,7 +75,7 @@
 //!
 //! `ValueKey<'a>` borrows from the underlying `Value`. The caller must
 //! keep the `Value` alive for the HashSet's lifetime. All uses in
-//! `methods.rs` / `mold_eval.rs` build the HashSet immediately from a
+//! `methods.rs` / `mold.rs` build the HashSet immediately from a
 //! borrow that lives for the scope of the operation, satisfying this.
 
 use super::value::Value;

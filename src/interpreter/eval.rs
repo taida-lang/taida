@@ -197,7 +197,7 @@ pub struct Interpreter {
     /// the connection's StreamingWriter state and TcpStream during handler execution.
     /// Safety: The interpreter is single-threaded (!Send). The raw pointers point to
     /// stack-local variables in dispatch_request that outlive the handler call.
-    pub(crate) active_streaming_writer: Option<super::net_eval::ActiveStreamingWriter>,
+    pub(crate) active_streaming_writer: Option<super::net::eval::ActiveStreamingWriter>,
     /// Context for the addon facade currently being loaded.
     ///
     /// When `load_addon_facade` is evaluating a `<pkg>/taida/<stem>.td` file,
@@ -1008,7 +1008,7 @@ impl Interpreter {
                 message: "[E1502] Empty argument slots are only valid inside function calls."
                     .to_string(),
             }),
-            // B11-6a: TypeLiteral is only valid inside TypeIs/TypeExtends — handled by mold_eval
+            // B11-6a: TypeLiteral is only valid inside TypeIs/TypeExtends — handled by mold
             Expr::TypeLiteral(name, variant, _) => {
                 if let Some(var) = variant {
                     Ok(Signal::Value(Value::str(format!("{}:{}", name, var))))

@@ -1,233 +1,138 @@
+use super::method_spec::{builtin_method_spec, builtin_recv_of, render_return_kind};
 use super::*;
 
 impl TypeChecker {
-    pub(super) fn check_method_args(
-        &mut self,
-        obj_type: &Type,
-        method: &str,
-        args: &[Expr],
-        span: &Span,
-    ) {
-        // Get method arity: (min_args, max_args, param_types)
-        // Only check for known methods with well-defined signatures.
-        let method_sig: Option<(usize, usize, Vec<Type>)> = match obj_type {
+    /// Static arity/signature table for builtin-type methods, split out of
+    /// `check_method_args` so the spec can be exercised directly by the
+    /// builtin-method spec tests. Pure factoring: body unchanged.
+    /// Argument types for a builtin method, keyed by receiver and name.
+    /// The spec table is argless (these depend on the receiver's element
+    /// types), so this is the one place arg types live; `builtin_method_signature`
+    /// pairs them with the table arity. Only methods the table lists need a
+    /// real entry — absent names are filtered out by the table first, so the
+    /// `_ => vec![]` arms (nullary receivers, state checks) are never observed
+    /// for a non-method name.
+    fn builtin_method_arg_types(obj_type: &Type, method: &str) -> Vec<Type> {
+        match obj_type {
             Type::Str => match method {
-                "length" | "toString" => Some((0, 0, vec![])),
-                "contains" | "startsWith" | "endsWith" => Some((1, 1, vec![Type::Str])),
-                "indexOf" | "lastIndexOf" => Some((1, 1, vec![Type::Str])),
-                "indexOfLax" | "lastIndexOfLax" => Some((1, 1, vec![Type::Str])),
-                "get" => Some((1, 1, vec![Type::Int])),
-                // `replace` / `replaceAll` / `split` accept either a fixed
-                // string or a Regex pack. The runtime dispatches by the value
-                // tag, so the checker keeps the slot intentionally open while
-                // still enforcing arity.
-                "replace" | "replaceAll" => Some((2, 2, vec![Type::Any, Type::Str])),
-                "split" => Some((1, 1, vec![Type::Any])),
-                // `match` / `search` are Regex-only APIs.
-                // The first argument must be a :Regex BuchiPack (the
-                // `Regex(...)` constructor's return value).
-                "match" | "search" => Some((1, 1, vec![Type::Named("Regex".to_string())])),
-                "searchLax" => Some((1, 1, vec![Type::Named("Regex".to_string())])),
-                _ => None,
-            },
-            Type::Int | Type::Float | Type::Num => match method {
-                "toString" => Some((0, 0, vec![])),
-                "isNaN" | "isInfinite" | "isFinite" | "isPositive" | "isNegative" | "isZero" => {
-                    Some((0, 0, vec![]))
-                }
-                _ => None,
-            },
-            Type::Bool => match method {
-                "toString" => Some((0, 0, vec![])),
-                _ => None,
+                "contains" | "startsWith" | "endsWith" | "indexOf" | "lastIndexOf"
+                | "indexOfLax" | "lastIndexOfLax" => vec![Type::Str],
+                "get" => vec![Type::Int],
+                "replace" | "replaceAll" => vec![Type::Any, Type::Str],
+                "split" => vec![Type::Any],
+                "match" | "search" | "searchLax" => vec![Type::Named("Regex".to_string())],
+                _ => vec![],
             },
             Type::Bytes => match method {
-                "length" => Some((0, 0, vec![])),
-                "get" => Some((1, 1, vec![Type::Int])),
-                "toString" => Some((0, 0, vec![])),
-                _ => None,
+                "get" => vec![Type::Int],
+                _ => vec![],
             },
             Type::List(inner) => match method {
-                "length" => Some((0, 0, vec![])),
-                "isEmpty" => Some((0, 0, vec![])),
-                "first" | "last" | "max" | "min" => Some((0, 0, vec![])),
-                "get" => Some((1, 1, vec![Type::Int])),
-                "contains" => Some((1, 1, vec![inner.as_ref().clone()])),
-                "indexOf" | "lastIndexOf" => Some((1, 1, vec![inner.as_ref().clone()])),
-                "indexOfLax" | "lastIndexOfLax" => Some((1, 1, vec![inner.as_ref().clone()])),
-                // Pin predicate / mapper parameter types to the list element
-                // type so higher-order method boundaries stay explicit.
-                "any" | "all" | "none" => Some((
-                    1,
-                    1,
-                    vec![Type::Function(
-                        vec![inner.as_ref().clone()],
-                        Box::new(Type::Bool),
-                    )],
-                )),
-                // `fold` / `reduce` callback type depends on arg0 (`init`)
-                // and is checked by the dedicated accumulator path below.
-                // The static method signature stays arity-only here so the
-                // generic param loop does not infer a weaker callback first.
-                "reduce" | "fold" => Some((2, 2, vec![Type::Any, Type::Any])),
-                "toString" => Some((0, 0, vec![])),
-                _ => None,
+                "get" => vec![Type::Int],
+                "contains" | "indexOf" | "lastIndexOf" | "indexOfLax" | "lastIndexOfLax" => {
+                    vec![inner.as_ref().clone()]
+                }
+                "any" | "all" | "none" => vec![Type::Function(
+                    vec![inner.as_ref().clone()],
+                    Box::new(Type::Bool),
+                )],
+                "reduce" | "fold" => vec![Type::Any, Type::Any],
+                _ => vec![],
             },
             Type::Named(name) if name == "HashMap" => match method {
-                "get" => Some((1, 1, vec![Type::Any])),
-                "set" => Some((2, 2, vec![Type::Any, Type::Any])),
-                "remove" => Some((1, 1, vec![Type::Any])),
-                "has" => Some((1, 1, vec![Type::Any])),
-                "keys" | "values" | "entries" => Some((0, 0, vec![])),
-                "size" | "isEmpty" => Some((0, 0, vec![])),
-                "merge" => Some((1, 1, vec![Type::Any])),
-                "toString" => Some((0, 0, vec![])),
-                _ => None,
+                "get" | "remove" | "has" | "merge" => vec![Type::Any],
+                "set" => vec![Type::Any, Type::Any],
+                _ => vec![],
             },
             Type::Generic(name, args) if name == "HashMap" => {
                 let key = args.first().cloned().unwrap_or(Type::Unknown);
                 let value = args.get(1).cloned().unwrap_or(Type::Unknown);
                 match method {
-                    "get" | "remove" | "has" => Some((1, 1, vec![key])),
-                    "set" => Some((2, 2, vec![key, value])),
-                    "keys" | "values" | "entries" => Some((0, 0, vec![])),
-                    "size" | "isEmpty" => Some((0, 0, vec![])),
-                    "merge" => Some((
-                        1,
-                        1,
-                        vec![Type::Generic(
-                            "HashMap".to_string(),
-                            vec![key.clone(), value.clone()],
-                        )],
-                    )),
-                    "toString" => Some((0, 0, vec![])),
-                    _ => None,
+                    "get" | "remove" | "has" => vec![key],
+                    "set" => vec![key, value],
+                    "merge" => vec![Type::Generic("HashMap".to_string(), vec![key, value])],
+                    _ => vec![],
                 }
             }
             Type::Named(name) if name == "Set" => match method {
-                "add" | "remove" => Some((1, 1, vec![Type::Any])),
-                "has" => Some((1, 1, vec![Type::Any])),
-                "union" | "intersect" | "diff" => Some((1, 1, vec![Type::Any])),
-                "toList" => Some((0, 0, vec![])),
-                "size" | "isEmpty" => Some((0, 0, vec![])),
-                "toString" => Some((0, 0, vec![])),
-                _ => None,
+                "add" | "remove" | "has" | "union" | "intersect" | "diff" => vec![Type::Any],
+                _ => vec![],
             },
             Type::Generic(name, args) if name == "Set" => {
                 let value = args.first().cloned().unwrap_or(Type::Unknown);
                 match method {
-                    "add" | "remove" | "has" => Some((1, 1, vec![value])),
-                    "union" | "intersect" | "diff" => Some((
-                        1,
-                        1,
-                        vec![Type::Generic("Set".to_string(), vec![value.clone()])],
-                    )),
-                    "toList" => Some((0, 0, vec![])),
-                    "size" | "isEmpty" => Some((0, 0, vec![])),
-                    "toString" => Some((0, 0, vec![])),
-                    _ => None,
+                    "add" | "remove" | "has" => vec![value],
+                    "union" | "intersect" | "diff" => {
+                        vec![Type::Generic("Set".to_string(), vec![value])]
+                    }
+                    _ => vec![],
                 }
             }
             Type::Generic(name, inner_args) if name == "Lax" => {
-                // The `default` arg of `getOrDefault` must match the Lax
-                // inner type T. PHILOSOPHY I forbids silent type drift.
-                // `getOrThrow` is Result-only on the runtime side; Lax does
-                // not currently surface it, so we leave the existing arity-only
-                // signature for Result below.
-                //
-                // map/flatMap signatures are pinned to `Function([T], U)` /
-                // `Function([T], Lax[U])` so argument-type and return-wrapper
-                // mismatch is caught at type-check time via [E1508].
                 let inner = inner_args.first().cloned().unwrap_or(Type::Unknown);
                 match method {
-                    "hasValue" | "isEmpty" => Some((0, 0, vec![])),
-                    "getOrDefault" => Some((1, 1, vec![inner.clone()])),
-                    "map" => Some((
-                        1,
-                        1,
-                        vec![Type::Function(vec![inner.clone()], Box::new(Type::Any))],
-                    )),
-                    "flatMap" => Some((
-                        1,
-                        1,
-                        vec![Type::Function(
-                            vec![inner.clone()],
-                            Box::new(Type::Generic("Lax".to_string(), vec![Type::Any])),
-                        )],
-                    )),
-                    "errorInfo" => Some((0, 0, vec![])),
-                    "unmold" => Some((0, 0, vec![])),
-                    "toString" => Some((0, 0, vec![])),
-                    _ => None,
+                    "getOrDefault" => vec![inner],
+                    "map" => vec![Type::Function(vec![inner], Box::new(Type::Any))],
+                    "flatMap" => vec![Type::Function(
+                        vec![inner],
+                        Box::new(Type::Generic("Lax".to_string(), vec![Type::Any])),
+                    )],
+                    _ => vec![],
                 }
             }
             Type::Generic(name, inner_args) if name == "Result" => {
-                // Match Lax/Result behaviour: both accumulators (success type
-                // at index 0) get strict `default` arg type checking.
-                //
-                //   map(fn: T -> U) -> Result[U, P]              (error type P を保存)
-                //   flatMap(fn: T -> Result[U, P]) -> Result[U, P]  (方針 A: error type 保存 strict)
-                //   mapError(fn: P -> Q) -> Result[T, Q]
                 let success_ty = inner_args.first().cloned().unwrap_or(Type::Unknown);
                 let error_ty = inner_args.get(1).cloned().unwrap_or(Type::Unknown);
                 match method {
-                    "isSuccess" | "isError" => Some((0, 0, vec![])),
-                    "map" => Some((
-                        1,
-                        1,
-                        vec![Type::Function(
-                            vec![success_ty.clone()],
-                            Box::new(Type::Any),
-                        )],
-                    )),
-                    // 方針 A: return Result の error type が receiver と一致必須
-                    "flatMap" => Some((
-                        1,
-                        1,
-                        vec![Type::Function(
-                            vec![success_ty.clone()],
-                            Box::new(Type::Generic(
-                                "Result".to_string(),
-                                vec![Type::Any, error_ty.clone()],
-                            )),
-                        )],
-                    )),
-                    "mapError" => Some((
-                        1,
-                        1,
-                        vec![Type::Function(vec![error_ty.clone()], Box::new(Type::Any))],
-                    )),
-                    "getOrDefault" => Some((1, 1, vec![success_ty])),
-                    "getOrThrow" => Some((0, 0, vec![])),
-                    "toString" => Some((0, 0, vec![])),
-                    _ => None,
+                    "map" => vec![Type::Function(vec![success_ty], Box::new(Type::Any))],
+                    "flatMap" => vec![Type::Function(
+                        vec![success_ty],
+                        Box::new(Type::Generic(
+                            "Result".to_string(),
+                            vec![Type::Any, error_ty],
+                        )),
+                    )],
+                    "mapError" => vec![Type::Function(vec![error_ty], Box::new(Type::Any))],
+                    "getOrDefault" => vec![success_ty],
+                    _ => vec![],
                 }
             }
             Type::Generic(name, inner_args) if name == "Async" => {
                 let inner = inner_args.first().cloned().unwrap_or(Type::Unknown);
                 match method {
-                    "isPending" | "isFulfilled" | "isRejected" => Some((0, 0, vec![])),
-                    "map" => Some((
-                        1,
-                        1,
-                        vec![Type::Function(vec![inner.clone()], Box::new(Type::Any))],
-                    )),
-                    "getOrDefault" => Some((1, 1, vec![inner])),
-                    "toString" => Some((0, 0, vec![])),
-                    _ => None,
+                    "map" => vec![Type::Function(vec![inner], Box::new(Type::Any))],
+                    "getOrDefault" => vec![inner],
+                    _ => vec![],
                 }
             }
-            Type::Generic(name, _) if name == "Gorillax" || name == "RelaxedGorillax" => {
-                match method {
-                    "hasValue" | "isEmpty" | "errorInfo" | "toString" => Some((0, 0, vec![])),
-                    "relax" if name == "Gorillax" => Some((0, 0, vec![])),
-                    _ => None,
-                }
+            // Num / Bool / Gorillax / RelaxedGorillax / Error builtin methods
+            // are all nullary.
+            _ => vec![],
+        }
+    }
+
+    pub(super) fn builtin_method_signature(
+        &mut self,
+        obj_type: &Type,
+        method: &str,
+    ) -> Option<(usize, usize, Vec<Type>)> {
+        // Statically enumerable receivers take their arity from the spec
+        // table (the SSOT the universe cross-test pins to this function);
+        // argument types, which depend on the receiver's element types,
+        // come from `builtin_method_arg_types`. A builtin receiver whose
+        // method the table omits has no signature here — except Error,
+        // whose unknown names resolve against user-defined members.
+        if let Some(recv) = builtin_recv_of(obj_type) {
+            if let Some(spec) = builtin_method_spec(recv, method) {
+                let args = Self::builtin_method_arg_types(obj_type, method);
+                return Some((spec.min_args, spec.max_args, args));
             }
-            Type::Error(error_name) => match method {
-                "errorInfo" | "throw" | "toString" => Some((0, 0, vec![])),
-                _ => self.named_method_signature(error_name, method),
-            },
+            if let Type::Error(error_name) = obj_type {
+                return self.named_method_signature(error_name, method);
+            }
+            return None;
+        }
+        match obj_type {
             // A function-valued pack field invoked via `pack.fn(arg)` is
             // syntactically a MethodCall, but the receiver is a BuchiPack
             // and the "method" is really a stored function value. Surface
@@ -239,11 +144,10 @@ impl TypeChecker {
                     .find(|(name, _)| name == method)
                     .and_then(|(_, ty)| match ty {
                         Type::Function(params, _) => {
-                            // `Unit => :T` is a zero-argument signature
-                            // marker. Treat the single Unit param as an
-                            // empty signature so callers can write
-                            // `pack.fn()` without the arity check
-                            // wrongly demanding one argument.
+                            // `Unit => :T` is a zero-argument signature marker.
+                            // Treat the single Unit param as an empty signature
+                            // so callers can write `pack.fn()` without the arity
+                            // check wrongly demanding one argument.
                             let effective = if params.len() == 1 && params[0] == Type::Unit {
                                 vec![]
                             } else {
@@ -258,14 +162,26 @@ impl TypeChecker {
             // must obey the same boundary discipline as a `BuchiPack` literal.
             Type::Named(type_name) => self.named_method_signature(type_name, method),
             _ => {
-                // For unknown/unresolved receiver types, generic receivers
-                // without method signatures, and user-defined Named types
-                // without function-valued fields, skip method argument
-                // checking. The checker cannot enumerate methods on types it
-                // does not fully know.
+                // Unknown/unresolved receivers, generic receivers without
+                // method signatures, and user Named types without
+                // function-valued fields: the checker cannot enumerate
+                // methods on types it does not fully know.
                 None
             }
-        };
+        }
+    }
+
+    pub(super) fn check_method_args(
+        &mut self,
+        obj_type: &Type,
+        method: &str,
+        args: &[Expr],
+        span: &Span,
+    ) {
+        // Get method arity: (min_args, max_args, param_types)
+        // Only check for known methods with well-defined signatures.
+        let method_sig: Option<(usize, usize, Vec<Type>)> =
+            self.builtin_method_signature(obj_type, method);
 
         // errorInfo intentionally uses an explicit allow-list. Accepting any
         // `(type, message)` shaped pack would reintroduce duck typing here.
@@ -912,194 +828,45 @@ impl TypeChecker {
     /// Updated for v0.7.0: operation methods are abolished (mold-ified).
     /// Only state check methods and toString remain.
     pub(super) fn infer_method_return_type(&self, obj_type: &Type, method: &str) -> Type {
-        match obj_type {
-            Type::Str => match method {
-                // State checks (v0.7.0 remaining methods)
-                "length" => Type::Int,
-                "contains" | "startsWith" | "endsWith" => Type::Bool,
-                "indexOf" | "lastIndexOf" => Type::Int,
-                "indexOfLax" | "lastIndexOfLax" => {
-                    Type::Generic("Lax".to_string(), vec![Type::Int])
-                }
-                "get" => Type::Generic("Lax".to_string(), vec![Type::Str]),
-                "toString" => Type::Str,
-                // replace / replaceAll / split accept fixed strings and Regex values.
-                "replace" | "replaceAll" => Type::Str,
-                "split" => Type::List(Box::new(Type::Str)),
-                // match returns a RegexMatch pack; search returns an Int
-                // character index. Typing `match` as Named("RegexMatch")
-                // preserves later field access lowering.
-                "match" => Type::Named("RegexMatch".to_string()),
-                "search" => Type::Int,
-                "searchLax" => Type::Generic("Lax".to_string(), vec![Type::Int]),
-                _ => Type::Unknown,
-            },
-            Type::Int | Type::Float | Type::Num => match method {
-                // State checks (v0.7.0 remaining methods)
-                "toString" => Type::Str,
-                "isNaN" | "isInfinite" | "isFinite" | "isPositive" | "isNegative" | "isZero" => {
-                    Type::Bool
-                }
-                _ => Type::Unknown,
-            },
-            Type::Bool => match method {
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            Type::Bytes => match method {
-                "length" => Type::Int,
-                "get" => Type::Generic("Lax".to_string(), vec![Type::Int]),
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            Type::List(inner) => match method {
-                // State checks (v0.7.0 remaining methods)
-                "length" => Type::Int,
-                "isEmpty" => Type::Bool,
-                "first" | "last" | "max" | "min" => {
-                    Type::Generic("Lax".to_string(), vec![*inner.clone()])
-                }
-                "get" => Type::Generic("Lax".to_string(), vec![*inner.clone()]),
-                "contains" => Type::Bool,
-                "indexOf" | "lastIndexOf" => Type::Int,
-                "indexOfLax" | "lastIndexOfLax" => {
-                    Type::Generic("Lax".to_string(), vec![Type::Int])
-                }
-                "any" | "all" | "none" => Type::Bool,
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            // JSON is an opaque primitive (molten iron) -- no methods allowed (v0.7.0)
-            Type::Json => Type::Unknown,
-            // Molten is an opaque primitive -- no methods allowed
-            Type::Molten => Type::Unknown,
-            // HashMap methods
-            Type::Named(name) if name == "HashMap" => match method {
-                "get" => Type::Generic("Lax".to_string(), vec![Type::Any]),
-                "set" | "remove" | "merge" => Type::Named("HashMap".to_string()),
-                "has" => Type::Bool,
-                "keys" => Type::List(Box::new(Type::Str)),
-                "values" => Type::List(Box::new(Type::Any)),
-                "entries" => Type::List(Box::new(Type::Any)),
-                "size" => Type::Int,
-                "isEmpty" => Type::Bool,
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            Type::Generic(name, args) if name == "HashMap" => {
-                let key = args.first().cloned().unwrap_or(Type::Unknown);
-                let value = args.get(1).cloned().unwrap_or(Type::Unknown);
-                match method {
-                    "get" => Type::Generic("Lax".to_string(), vec![value.clone()]),
-                    "set" | "remove" | "merge" => obj_type.clone(),
-                    "has" | "isEmpty" => Type::Bool,
-                    "keys" => Type::List(Box::new(key)),
-                    "values" => Type::List(Box::new(value)),
-                    "entries" => Type::List(Box::new(Type::Unknown)),
-                    "size" => Type::Int,
-                    "toString" => Type::Str,
-                    _ => Type::Unknown,
-                }
+        // Statically enumerable receivers read their argless return type
+        // straight from the spec table (the SSOT the universe cross-test
+        // pins to this function). A builtin receiver whose method the
+        // table omits returns Unknown — except Error, which falls back to
+        // user-defined members. Receivers the table does not model at all
+        // (Json/Molten/Stream/user Named/other) drop to the tail below.
+        if let Some(recv) = builtin_recv_of(obj_type) {
+            if let Some(spec) = builtin_method_spec(recv, method) {
+                return render_return_kind(spec.ret, obj_type);
             }
-            // Set methods
-            Type::Named(name) if name == "Set" => match method {
-                "add" | "remove" | "union" | "intersect" | "diff" => Type::Named("Set".to_string()),
-                "has" => Type::Bool,
-                "toList" => Type::List(Box::new(Type::Unknown)),
-                "size" => Type::Int,
-                "isEmpty" => Type::Bool,
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            Type::Generic(name, args) if name == "Set" => {
-                let value = args.first().cloned().unwrap_or(Type::Unknown);
-                match method {
-                    "add" | "remove" | "union" | "intersect" | "diff" => obj_type.clone(),
-                    "has" | "isEmpty" => Type::Bool,
-                    "toList" => Type::List(Box::new(value)),
-                    "size" => Type::Int,
-                    "toString" => Type::Str,
-                    _ => Type::Unknown,
-                }
-            }
-            // Lax methods
-            Type::Generic(name, args) if name == "Lax" => match method {
-                "hasValue" | "isEmpty" => Type::Bool,
-                "getOrDefault" => args.first().cloned().unwrap_or(Type::Unknown),
-                "map" | "flatMap" => obj_type.clone(),
-                "errorInfo" => Type::Generic(
-                    "Lax".to_string(),
-                    vec![Type::Named("ErrorInfo".to_string())],
-                ),
-                "unmold" => args.first().cloned().unwrap_or(Type::Unknown),
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            // Result methods
-            Type::Generic(name, args) if name == "Result" => match method {
-                "isSuccess" | "isError" => Type::Bool,
-                "map" | "flatMap" | "mapError" => obj_type.clone(),
-                "getOrDefault" => args.first().cloned().unwrap_or(Type::Unknown),
-                "getOrThrow" => args.first().cloned().unwrap_or(Type::Unknown),
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            Type::Generic(name, args) if name == "Gorillax" => match method {
-                "hasValue" | "isEmpty" => Type::Bool,
-                "relax" => Type::Generic("RelaxedGorillax".to_string(), args.clone()),
-                "errorInfo" => Type::Generic(
-                    "Lax".to_string(),
-                    vec![Type::Named("ErrorInfo".to_string())],
-                ),
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            Type::Generic(name, _) if name == "RelaxedGorillax" => match method {
-                "hasValue" | "isEmpty" => Type::Bool,
-                "errorInfo" => Type::Generic(
-                    "Lax".to_string(),
-                    vec![Type::Named("ErrorInfo".to_string())],
-                ),
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            Type::Error(error_name) => match method {
-                "errorInfo" => Type::Generic(
-                    "Lax".to_string(),
-                    vec![Type::Named("ErrorInfo".to_string())],
-                ),
-                "throw" => Type::Unknown,
-                "toString" => Type::Str,
-                _ => self
+            if let Type::Error(error_name) = obj_type {
+                return self
                     .named_method_return_type(error_name, method)
-                    .unwrap_or(Type::Unknown),
-            },
-            // Async methods
-            Type::Generic(name, args) if name == "Async" => match method {
-                "isPending" | "isFulfilled" | "isRejected" => Type::Bool,
-                "map" => obj_type.clone(),
-                "getOrDefault" => args.first().cloned().unwrap_or(Type::Unknown),
-                "toString" => Type::Str,
-                _ => Type::Unknown,
-            },
-            // Stream methods
-            Type::Generic(name, _args) if name == "Stream" => match method {
+                    .unwrap_or(Type::Unknown);
+            }
+            return Type::Unknown;
+        }
+        match obj_type {
+            // Opaque primitives expose no methods — not even toString.
+            Type::Json | Type::Molten => Type::Unknown,
+            // Stream is a return-path-only receiver (no arity entry).
+            Type::Generic(name, _) if name == "Stream" => match method {
                 "length" => Type::Int,
                 "isEmpty" => Type::Bool,
                 "toString" => Type::Str,
                 _ => Type::Unknown,
             },
-            // For named types, check if they have known fields/methods
+            // User-defined Named types: declared members, else the
+            // universal toString helper.
             Type::Named(type_name) => {
                 if let Some(ret) = self.named_method_return_type(type_name, method) {
-                    return ret;
-                }
-                if method == "toString" {
+                    ret
+                } else if method == "toString" {
                     Type::Str
                 } else {
                     Type::Unknown
                 }
             }
+            // Everything else gets the universal toString helper only.
             _ => {
                 if method == "toString" {
                     Type::Str

@@ -1,20 +1,15 @@
-mod abi_eval;
+mod abi;
 #[cfg(feature = "native")]
-mod addon_eval;
+mod addon;
 mod control_flow;
 pub mod env;
 pub mod eval;
 pub(crate) mod json;
 mod methods;
-mod module_eval;
-mod mold_eval;
-mod net_eval;
-mod net_h2;
-#[allow(dead_code)] // Phase 3: protocol layer ready, QUIC transport gated
-mod net_h3;
-#[allow(dead_code)] // Phase 1 defines interfaces consumed in Phase 2+
-mod net_transport;
-mod os_eval;
+mod module;
+mod mold;
+mod net;
+mod os;
 mod prelude;
 // D29B-016 / Phase 10-B: gap-buffer rope path for `Value::Str` mutation hot
 // paths (Lock-K verdict V-1/V-2/V-3, transparent promotion at 1024-byte
@@ -22,7 +17,7 @@ mod prelude;
 pub(crate) mod runtime;
 // C12 Phase 6 (FB-5): Regex value helpers shared between prelude
 // constructor, Str method overloads, and checker-level type inference.
-pub(crate) mod regex_eval;
+pub(crate) mod regex;
 #[cfg(test)]
 mod tests_eval;
 #[cfg(test)]

@@ -4,7 +4,7 @@
 //! underlying `BytesValue::buf` Arc is the SAME Arc as the source — i.e.
 //! the slice is a zero-copy view, not a deep copy.
 //!
-//! Pre-fix behavior (`mold_eval.rs:481`): `bytes[clamped_start..clamped_end].to_vec()`
+//! Pre-fix behavior (`mold.rs:481`): `bytes[clamped_start..clamped_end].to_vec()`
 //! followed by `Value::bytes(result)` allocated a fresh `Vec<u8>` per call,
 //! causing a full memcpy of the slice range on every `Slice[req.raw, ...]`
 //! invocation — typically 1 alloc + memcpy of body size per request in
@@ -142,7 +142,7 @@ fn bytes_value_eq_compares_content() {
 /// **The hot-path test**: `Slice[bytes]` invoked through the interpreter
 /// returns a view sharing the source's buf Arc.
 ///
-/// This is the primary acceptance: pre-fix, `mold_eval.rs:481`
+/// This is the primary acceptance: pre-fix, `mold.rs:481`
 /// allocated a fresh `Vec<u8>` per call; post-fix, it returns
 /// `Value::bytes_view` sharing the source buf Arc.
 #[test]

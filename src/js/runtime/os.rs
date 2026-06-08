@@ -225,7 +225,7 @@ function __taida_os_readBytes_error(kind) {
 }
 
 // C26B-020 柱 1: chunked / large-file bytes read.
-// Mirrors the Interpreter semantics from os_eval.rs:
+// Mirrors the Interpreter semantics from os.rs:
 //   - negative offset/len   → Lax failure (default Bytes[])
 //   - len > 64 MB ceiling   → Lax failure (default Bytes[])
 //   - len == 0              → Lax success with empty Bytes

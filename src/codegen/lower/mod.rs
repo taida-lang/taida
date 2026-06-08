@@ -9,8 +9,7 @@
 // `InheritanceChainFields`), the helper constants, the free function
 // `simple_hash`, and the trivial `impl Display` / `impl Default` blocks.
 // The `impl Lowering` method set is distributed across the submodules
-// listed below per placement table §2 of
-// `.dev/taida-logs/docs/design/file_boundaries.md`.
+// listed below per the lower/ split's placement table.
 
 //! AST → Taida IR 変換（Lowering）
 //!
@@ -363,7 +362,10 @@ mod core;
 mod expr;
 mod imports;
 mod infer;
+mod json;
+mod methods;
 mod molds;
+mod molds_inst;
 mod net;
 mod os;
 mod stdlib;

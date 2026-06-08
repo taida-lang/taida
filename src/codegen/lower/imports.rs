@@ -1,8 +1,8 @@
 // C12B-024: src/codegen/lower.rs mechanical split (FB-21 / C12-9 Step 2).
 //
 // Semantics-preserving split of the former monolithic `lower.rs`. This file
-// groups imports methods of the `Lowering` struct (placement table §2 of
-// `.dev/taida-logs/docs/design/file_boundaries.md`). All methods keep their
+// groups imports methods of the `Lowering` struct (per the lower/ split's
+// placement table). All methods keep their
 // original signatures, bodies, and privacy; only the enclosing file changes.
 
 use super::{
@@ -243,7 +243,7 @@ impl Lowering {
         // uppercase / pure-Taida user-facing surface; without it we
         // fall back to the raw manifest `[functions]` table.
         //
-        // Facade semantics mirror `module_eval::load_addon_facade`:
+        // Facade semantics mirror `module::load_addon_facade`:
         //   - `Name <= lowercase_addon_fn` → alias the addon sentinel
         //     under the new name (facade alias).
         //   - `Name <= <pack expr>` → pure-Taida facade value; we
@@ -408,7 +408,7 @@ impl Lowering {
             let alias = sym.alias.clone().unwrap_or_else(|| sym.name.clone());
 
             // Lookup order (must match interpreter
-            // `module_eval::try_eval_addon_import`):
+            // `module::try_eval_addon_import`):
             //   1. facade exports (uppercase / pure-Taida surface)
             //   2. manifest `[functions]` entries (raw addon API)
             if let Some(facade) = &facade

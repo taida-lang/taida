@@ -18,7 +18,7 @@
 //!
 //! # Backend implementation
 //!
-//! - Interpreter: `src/interpreter/mold_eval.rs::StrOf`
+//! - Interpreter: `src/interpreter/mold.rs::StrOf`
 //! - JS: `src/js/runtime/net.rs::__taida_net_StrOf` + codegen rewrite
 //! - Native: `src/codegen/lower_molds.rs::StrOf` (IR composition using
 //!   existing `taida_pack_get` + `taida_slice_mold` +

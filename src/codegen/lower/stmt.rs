@@ -1,8 +1,8 @@
 // C12B-024: src/codegen/lower.rs mechanical split (FB-21 / C12-9 Step 2).
 //
 // Semantics-preserving split of the former monolithic `lower.rs`. This file
-// groups stmt methods of the `Lowering` struct (placement table §2 of
-// `.dev/taida-logs/docs/design/file_boundaries.md`). All methods keep their
+// groups stmt methods of the `Lowering` struct (per the lower/ split's
+// placement table). All methods keep their
 // original signatures, bodies, and privacy; only the enclosing file changes.
 
 use super::{ImportedSymbolKind, LowerError, Lowering, simple_hash};
@@ -676,7 +676,7 @@ impl Lowering {
             // (or scalar) assignments harvested from the addon's
             // `taida/<stem>.td` facade tree during
             // `lower_addon_import`; they are the native-backend
-            // equivalent of the `module_eval::load_addon_facade`
+            // equivalent of the `module::load_addon_facade`
             // path used by the interpreter.
             //
             // Each binding is emitted with both `DefVar` (so user
