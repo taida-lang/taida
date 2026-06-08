@@ -127,7 +127,10 @@ mod tests {
         // 2026-06-09 F56 final review: +273 bytes for the taida_list_contains
         //   carrier guard in 03_typeof_list.inc.c (closes the contains identity
         //   oracle). 457,588 -> 457,861.
-        const EXPECTED_TOTAL_LEN: usize = 457_861;
+        // 2026-06-09 F56 Phase 6+ review: +431 bytes for the sealed-receiver
+        //   guards in taida_polymorphic_contains / _index_of / _last_index_of
+        //   (01_core.inc.c). 457,861 -> 458,292.
+        const EXPECTED_TOTAL_LEN: usize = 458_292;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

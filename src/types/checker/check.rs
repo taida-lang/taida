@@ -476,11 +476,15 @@ impl TypeChecker {
                             err.span = span.clone();
                         }
                     }
-                    // F56: interpolating a sealed carrier (`` `${secret}` ``) is a
-                    // display sink. The interpolated parts are not in the AST
-                    // (TemplateLit holds the raw string), so check the freshly
-                    // parsed `${...}` expression here. Side-effect-free detection.
-                    if let Some(carrier) = self.first_direct_sealed_operand(&parsed_expr) {
+                    // F56: interpolating a sealed carrier (`` `${secret}` `` or a
+                    // `${@(token <= secret)}` literal) is a display sink. The
+                    // interpolated parts are not in the AST (TemplateLit holds the
+                    // raw string), so check the freshly parsed `${...}` expression
+                    // here — directly and one level into a literal. Side-effect-free.
+                    if let Some(carrier) = self
+                        .first_direct_sealed_operand(&parsed_expr)
+                        .or_else(|| self.first_nested_sealed_in_literal(&parsed_expr))
+                    {
                         self.errors.push(TypeError {
                             message: format!(
                                 "[E1533] string interpolation cannot display a sealed carrier \

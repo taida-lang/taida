@@ -1367,18 +1367,35 @@ impl TypeChecker {
 
             Expr::MethodCall(obj, method, args, span) => {
                 let obj_type = self.infer_expr_type(obj);
-                // F56: `.toString()` / `.toStr()` on a sealed carrier is a display
-                // sink — the same leak as `stdout(secret)`. The runtime renders the
-                // policy label, but reject it at compile time too (lock L0-4).
-                if matches!(method.as_str(), "toString" | "toStr")
-                    && matches!(&obj_type, Type::Generic(n, _) if n == "Secret" || n == "Moltenized")
-                {
+                // F56: a sealed carrier exposes *no* observable methods — the
+                // interpreter rejects every `.method()` on a `Moltenized`/`Secret`
+                // (see `interpreter/methods.rs`), so reject them at compile time
+                // too. Without this, a sealed *receiver* with a plain argument
+                // (`secret.contains("x")` / `secret.toString()`) slips past the
+                // arg-only guards and the Native polymorphic dispatcher misreads
+                // the carrier pack as a list. `.toString()` / `.toStr()` and the
+                // membership methods get their specific code; anything else is a
+                // display/observation attempt.
+                if matches!(&obj_type, Type::Generic(n, _) if n == "Secret" || n == "Moltenized") {
+                    let (code, hint) = if matches!(
+                        method.as_str(),
+                        "contains" | "indexOf" | "lastIndexOf"
+                    ) {
+                        (
+                            "E1536",
+                            "compare with `ConstantTimeEq[secret, candidate]()`",
+                        )
+                    } else {
+                        (
+                            "E1533",
+                            "use `Redact[secret]()` or a secret-aware consumer (`HmacSha256[]` / `ConstantTimeEq[]`)",
+                        )
+                    };
                     self.errors.push(TypeError {
                         message: format!(
-                            "[E1533] `.{}()` cannot stringify a sealed carrier ({}); the secret \
-                             value would be exposed. Hint: use `Redact[secret]()` for a masked \
-                             string, or a secret-aware consumer such as `HmacSha256[]`.",
-                            method, obj_type
+                            "[{}] `.{}()` cannot observe a sealed carrier ({}); the secret value \
+                             would be exposed. Hint: {}.",
+                            code, method, obj_type, hint
                         ),
                         span: span.clone(),
                     });

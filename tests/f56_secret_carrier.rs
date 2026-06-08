@@ -167,6 +167,38 @@ fn phase6_collection_membership_rejected() {
     );
 }
 
+#[test]
+fn sealed_receiver_method_rejected_and_safe() {
+    // Phase 6+ /so review: a sealed carrier exposes NO methods (the interpreter
+    // rejects them all). A sealed *receiver* with a plain argument
+    // (`secret.contains("x")`) slipped past the arg-only guard and made the
+    // Native polymorphic dispatcher misread the carrier pack as a list (OOB
+    // read). Now: a compile error on every backend, and the Native/WASM runtime
+    // is fail-closed (no crash / OOB / leak) under --no-check.
+    let p = format!("secret <= MoltenizeSecret[\"{CANARY}\"]()\n");
+    assert_code(
+        &format!("{p}stdout(secret.contains(\"x\"))\n"),
+        "[E1536]",
+        "recv-contains",
+    );
+    assert_code(
+        &format!("{p}stdout(secret.length().toString())\n"),
+        "[E1533]",
+        "recv-method",
+    );
+
+    // --no-check: the Native runtime must not crash / OOB / leak.
+    let dir = unique_temp_dir("f56-recv");
+    let src = format!("{p}stdout(secret.contains(\"x\").toString())\n");
+    if let Some(out) = build_and_run(&dir, &src, "native") {
+        assert!(
+            !out.contains(CANARY),
+            "native sealed-receiver method leaked:\n{out}"
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
 // ── Layer 2: runtime fail-closed on the interpreter (reference) ─────────────
 
 #[test]

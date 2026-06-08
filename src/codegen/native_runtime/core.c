@@ -8410,6 +8410,10 @@ taida_val taida_polymorphic_length(taida_val ptr) {
 // string type (e.g. field access inside lambda callbacks).
 taida_val taida_polymorphic_contains(taida_val obj, taida_val needle) {
     if (obj == 0 || obj < 4096) return 0;
+    // F56: a sealed carrier exposes no methods (the interpreter rejects them and
+    // the checker reports [E1533]/[E1536]). Guard the receiver here too so a
+    // `--no-check` `secret.contains(x)` cannot misread the carrier pack as a list.
+    if (taida_is_moltenized(obj)) return 0;
     // Check for non-string types first (list, pack, bytes, hashmap, etc.)
     if (taida_ptr_is_readable(obj, 8) && taida_has_magic_header(((taida_val*)obj)[0])) {
         return taida_list_contains(obj, needle);
@@ -8423,6 +8427,7 @@ taida_val taida_polymorphic_contains(taida_val obj, taida_val needle) {
 
 taida_val taida_polymorphic_index_of(taida_val obj, taida_val needle) {
     if (obj == 0 || obj < 4096) return -1;
+    if (taida_is_moltenized(obj)) return -1; // F56: sealed receiver — see contains.
     // Check for non-string types first (list, pack, bytes, hashmap, etc.)
     if (taida_ptr_is_readable(obj, 8) && taida_has_magic_header(((taida_val*)obj)[0])) {
         return taida_list_index_of(obj, needle);
@@ -8433,6 +8438,7 @@ taida_val taida_polymorphic_index_of(taida_val obj, taida_val needle) {
 
 taida_val taida_polymorphic_last_index_of(taida_val obj, taida_val needle) {
     if (obj == 0 || obj < 4096) return -1;
+    if (taida_is_moltenized(obj)) return -1; // F56: sealed receiver — see contains.
     if (taida_ptr_is_readable(obj, 8) && taida_has_magic_header(((taida_val*)obj)[0])) {
         return taida_list_last_index_of(obj, needle);
     }

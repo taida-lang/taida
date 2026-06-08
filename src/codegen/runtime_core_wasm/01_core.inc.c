@@ -4817,6 +4817,10 @@ int64_t taida_polymorphic_has_value(int64_t obj) {
 /* Polymorphic .contains() */
 int64_t taida_polymorphic_contains(int64_t obj, int64_t needle) {
     if (obj == 0) return 0;
+    /* F56: a sealed carrier has no methods (checker [E1533]/[E1536], interpreter
+       rejects); guard the receiver so a `--no-check` `secret.contains(x)` cannot
+       misread the carrier pack as a list. */
+    if (_wasm_carrier_kind(obj)) return 0;
     if (_is_wasm_hashmap(obj)) return taida_hashmap_has(obj, taida_value_hash(needle), needle);
     if (_is_wasm_set(obj)) return taida_set_has(obj, needle);
     if (_looks_like_list(obj)) return taida_list_contains(obj, needle);
@@ -4827,6 +4831,7 @@ int64_t taida_polymorphic_contains(int64_t obj, int64_t needle) {
 /* Polymorphic .indexOf() */
 int64_t taida_polymorphic_index_of(int64_t obj, int64_t needle) {
     if (obj == 0) return -1;
+    if (_wasm_carrier_kind(obj)) return -1; /* F56: sealed receiver — see contains. */
     if (_looks_like_list(obj)) return taida_list_index_of(obj, needle);
     if (_looks_like_string(obj)) return taida_str_index_of(obj, needle);
     return -1;
@@ -4835,6 +4840,7 @@ int64_t taida_polymorphic_index_of(int64_t obj, int64_t needle) {
 /* Polymorphic .lastIndexOf() */
 int64_t taida_polymorphic_last_index_of(int64_t obj, int64_t needle) {
     if (obj == 0) return -1;
+    if (_wasm_carrier_kind(obj)) return -1; /* F56: sealed receiver — see contains. */
     if (_looks_like_list(obj)) return taida_list_last_index_of(obj, needle);
     if (_looks_like_string(obj)) return taida_str_last_index_of(obj, needle);
     return -1;

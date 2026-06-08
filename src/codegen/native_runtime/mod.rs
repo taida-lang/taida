@@ -835,7 +835,11 @@ mod tests {
         //   secret producers taida_os_secret_from_file / _from_input
         //   (Async[Lax[Secret[_]]]). os.c is outside CORE_SECTION, so F1_LEN and
         //   the c13_4 boundary are unchanged. 1,293,522 -> 1,295,482.
-        const EXPECTED_TOTAL_LEN: usize = 1_295_482;
+        // 2026-06-09 F56 Phase 6+ review (core.c): +462 bytes for the sealed-
+        //   receiver guards in taida_polymorphic_contains / _index_of /
+        //   _last_index_of (close the `secret.contains(x)` OOB read found by the
+        //   Phase 6+ /so review; before the marker -> F1). 1,295,482 -> 1,295,944.
+        const EXPECTED_TOTAL_LEN: usize = 1_295_944;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1536,7 +1540,10 @@ mod tests {
         //   carrier prototypes): +160 bytes. F1_LEN 389,910 -> 390,070.
         // 2026-06-09 F56 final review: the taida_list_contains carrier guard is
         //   before the marker: +375 bytes. F1_LEN 390,070 -> 390,445.
-        const F1_LEN: usize = 390_445;
+        // 2026-06-09 F56 Phase 6+ review: the polymorphic contains/index_of/
+        //   last_index_of receiver guards are before the marker: +462 bytes.
+        //   F1_LEN 390,445 -> 390,907.
+        const F1_LEN: usize = 390_907;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
