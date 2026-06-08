@@ -111,7 +111,7 @@ rustyline = { version = "14", default-features = false }
 # present transitively (crypto deps); pinning it as a direct dependency makes
 # the Interpreter's `SealedCell` zeroize-on-drop explicit. `alloc` enables the
 # `Zeroize` impls for `String` / `Vec<u8>`. Native/WASM/JS stay Level 0 (their
-# memory models have no per-value drop hook — see the secure-memory design).
+# memory models have no per-value drop hook).
 zeroize = { version = "1.8", features = ["alloc"] }
 
 [dev-dependencies]

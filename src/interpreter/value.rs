@@ -184,17 +184,23 @@ impl StrValue {
 
     /// F56 Phase 3 (Level 1 — ZeroizedBuffer): scrub the UTF-8 payload with the
     /// `zeroize` crate's volatile writes, then reset the char-index cache. Used
-    /// by [`SealedCell`]'s drop path so a freed `Secret[Str]` does not linger as
-    /// plaintext in reused allocations / core dumps.
+    /// by [`seal_normalize`] (to scrub a uniquely-owned source transient) and by
+    /// [`SealedCell`]'s drop path, so a freed secret's plaintext does not linger
+    /// in reused allocations / core dumps.
     ///
-    /// Secrets never take the rope path (`+`/concat is a compile-time sink, so a
-    /// `Secret` can never be concatenated into a `Rope`); the rope branch is a
-    /// best-effort fallback that drops the segments by replacing them with an
-    /// empty flat payload.
+    /// Both representations are scrubbed: a `Flat` payload directly, and a `Rope`
+    /// via its gap buffer plus any cached flattened `String`. (Sealed values are
+    /// always `Flat` — `seal_normalize` flattens at seal time — but the rope arm
+    /// is real so the source-transient scrub covers a rope-backed source too.)
     pub fn zeroize_in_place(&mut self) {
         match &mut self.data {
             StrRepr::Flat(s) => s.zeroize(),
-            StrRepr::Rope(_) => self.data = StrRepr::Flat(String::new()),
+            StrRepr::Rope(rope) => {
+                rope.buf.zeroize();
+                if let Some(cached) = rope.flat_cache.get_mut() {
+                    cached.zeroize();
+                }
+            }
         }
         self.char_offsets = OnceLock::new();
     }
@@ -779,15 +785,30 @@ pub enum Value {
 /// crate's volatile writes, reducing allocator-reuse / core-dump exposure of
 /// *freed* secrets.
 ///
-/// Guarantee scope (stated honestly): the scrub fires when the sealed leaf
-/// buffer is uniquely owned, which holds for source-produced secrets
-/// (`MoltenizeSecretFrom{Env,File,Input}` build fresh, refcount-1 buffers and
-/// the cell never shares the inner `Value` out). A value sealed from storage
-/// that still aliases a live reference is scrubbed only once that alias is
-/// gone. This is Level 1 (ZeroizedBuffer); it does **not** defend against an
-/// attacker able to read live process memory (explicitly out of the F56 threat
-/// model). Native / WASM / JS remain Level 0 — their memory models have no
-/// per-value drop hook (see the secure-memory design).
+/// To make the scrub *reliable* (not best-effort), [`SealedCell::new`] runs the
+/// value through [`seal_normalize`] at seal time: `Str` / `Bytes` (and the
+/// `Str`/`Bytes` leaves of `List` / `BuchiPack`) are copied into fresh,
+/// uniquely-owned, contiguous buffers, so the drop-time `Arc::get_mut` always
+/// succeeds and the scrub always fires — even when the source aliased a live
+/// variable. Any `Rope` source is flattened into a `Flat` buffer, and a
+/// uniquely-owned source transient is scrubbed in place as it is copied.
+///
+/// Guarantee scope (stated honestly):
+/// - Plaintext held *inside the sealed value* — `Str`/`Bytes` and their
+///   container leaves — is scrubbed on drop. Scalars (`Int`/`Float`/`Bool`/
+///   `EnumVal`) and `Json` string nodes are overwritten too. Opaque payloads
+///   (`Error`/`Function`/`Async`/…) are held but not byte-scrubbed; they are not
+///   meaningful secret carriers.
+/// - Plaintext that existed *before* sealing — your own plain variables, or a
+///   **shared** source buffer still aliased by a live reference — is the
+///   caller's data and is left intact. Ingest via
+///   `MoltenizeSecretFrom{Env,File,Input}` (fresh OS buffers) to avoid ever
+///   materialising a plain copy.
+/// - This is Level 1 (ZeroizedBuffer); it does **not** defend against an
+///   attacker able to read *live* process memory (explicitly out of the F56
+///   threat model). Native / WASM / JS remain Level 0 — their memory models have
+///   no per-value drop hook. The full backend guarantee matrix and the deferred
+///   Level 2/3 work are tracked alongside the F56 design.
 #[derive(Clone)]
 pub struct SealedCell(Arc<SealedInner>);
 
@@ -796,9 +817,12 @@ struct SealedInner {
 }
 
 impl SealedCell {
-    /// Seal `value` behind a shared zeroize-on-drop cell.
+    /// Seal `value` behind a shared zeroize-on-drop cell, normalising it into a
+    /// freshly-owned, scrub-friendly form first (see [`seal_normalize`]).
     pub fn new(value: Value) -> Self {
-        SealedCell(Arc::new(SealedInner { value }))
+        SealedCell(Arc::new(SealedInner {
+            value: seal_normalize(value),
+        }))
     }
 
     /// Borrow the sealed plaintext. Crate-internal only — the Taida surface
@@ -808,6 +832,48 @@ impl SealedCell {
     #[allow(dead_code)]
     pub fn reveal(&self) -> &Value {
         &self.0.value
+    }
+}
+
+/// F56 Phase 3: normalise a value into a freshly-owned, scrub-friendly form at
+/// seal time.
+///
+/// `Str` / `Bytes` are deep-copied into fresh, uniquely-owned buffers (any
+/// `Rope` is flattened into a `Flat` buffer), and `List` / `BuchiPack` recurse
+/// so their leaves are normalised too. This guarantees the sealed buffers are
+/// uniquely owned, so the drop-time scrub's `Arc::get_mut` always succeeds —
+/// even when the source value aliased a live variable. When the source `Str` /
+/// `Bytes` `Arc` is itself uniquely owned (the common direct-seal transient,
+/// e.g. a concatenation result passed straight to `MoltenizeSecret`), it is
+/// scrubbed in place as it is copied, so that transient plaintext does not
+/// linger in a freed allocation either. A **shared** source is left intact (it
+/// is the caller's data). Other payloads are moved through unchanged.
+fn seal_normalize(v: Value) -> Value {
+    match v {
+        Value::Str(mut arc) => {
+            // Fresh, contiguous Flat copy (flattens a Rope source).
+            let fresh = Value::str(arc.as_str().to_owned());
+            if let Some(sv) = Arc::get_mut(&mut arc) {
+                sv.zeroize_in_place();
+            }
+            fresh
+        }
+        Value::Bytes(mut arc) => {
+            let fresh = Value::bytes(arc.as_slice().to_vec());
+            if let Some(bv) = Arc::get_mut(&mut arc) {
+                bv.zeroize_in_place();
+            }
+            fresh
+        }
+        Value::List(arc) => Value::List(Arc::new(
+            arc.iter().map(|e| seal_normalize(e.clone())).collect(),
+        )),
+        Value::BuchiPack(arc) => Value::BuchiPack(Arc::new(
+            arc.iter()
+                .map(|(k, val)| (k.clone(), seal_normalize(val.clone())))
+                .collect(),
+        )),
+        other => other,
     }
 }
 
@@ -826,11 +892,19 @@ impl fmt::Debug for SealedCell {
 
 /// F56 Phase 3: recursively scrub the plaintext leaves of a sealed value.
 ///
-/// Each leaf is reached through `Arc::get_mut`, so the scrub only mutates
-/// buffers this cell uniquely owns (it never corrupts an aliased buffer — a
-/// shared leaf is simply left for its own last owner to scrub). Scalars are
-/// overwritten in place; containers recurse; nested carriers scrub themselves
-/// when their own cell drops.
+/// `Str` / `Bytes` leaves are reached through `Arc::get_mut`, so the scrub only
+/// mutates buffers this cell uniquely owns — it never corrupts an aliased buffer
+/// (a shared leaf is left for its own last owner to scrub). For a `Bytes` leaf
+/// this is a *two-stage* unique-ownership gate: the outer `Arc<BytesValue>` here
+/// and the inner `Arc<Vec<u8>>` inside [`BytesValue::zeroize_in_place`] both
+/// have to be uniquely held (a zero-copy byte view sharing the inner buffer is
+/// therefore skipped). [`seal_normalize`] copies `Str`/`Bytes` into fresh,
+/// uniquely-owned buffers at seal time, so both gates pass for a sealed value.
+///
+/// Containers recurse; scalars (`Int`/`Float`/`Bool`/`EnumVal`) are overwritten;
+/// `Json` string nodes are zeroized via [`scrub_json`]; nested carriers scrub
+/// themselves when their own cell drops. Opaque payloads (`Error`/`Function`/
+/// `Async`/…) carry no byte-scrubbable secret and fall through.
 fn scrub_value(v: &mut Value) {
     match v {
         Value::Str(arc) => {
@@ -857,8 +931,30 @@ fn scrub_value(v: &mut Value) {
                 }
             }
         }
+        Value::Json(jv) => scrub_json(jv),
         Value::Int(n) => *n = 0,
         Value::Float(x) => *x = 0.0,
+        Value::Bool(b) => *b = false,
+        Value::EnumVal(_, ord) => *ord = 0,
+        _ => {}
+    }
+}
+
+/// F56 Phase 3: zeroize the `String` nodes of a `serde_json::Value` so a sealed
+/// `Json` secret does not leave plaintext strings in a freed allocation.
+fn scrub_json(jv: &mut serde_json::Value) {
+    match jv {
+        serde_json::Value::String(s) => s.zeroize(),
+        serde_json::Value::Array(arr) => {
+            for e in arr.iter_mut() {
+                scrub_json(e);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_, val) in map.iter_mut() {
+                scrub_json(val);
+            }
+        }
         _ => {}
     }
 }
@@ -1854,55 +1950,56 @@ mod tests {
 
     // ── F56 Phase 3 (Level 1 — ZeroizedBuffer): scrub verification ──
     //
-    // These tests prove the secret scrub actually overwrites the plaintext.
-    // Each reads the buffer through a raw pointer captured *before* scrubbing
-    // while the owning value is still alive — `zeroize_in_place` overwrites in
-    // place and never reallocates, so the allocation stays valid (no UAF).
+    // These tests prove the secret scrub actually overwrites the plaintext
+    // bytes. To observe the buffer they read it *after* the `&mut` scrub call,
+    // through a freshly created shared borrow — the pointer's provenance is
+    // therefore current, so there is no stale-tag aliasing violation (the read
+    // is Stacked/Tree Borrows clean) and no use-after-free (`zeroize` keeps the
+    // allocation; we read within the retained capacity).
 
     #[test]
-    fn strvalue_zeroize_overwrites_buffer() {
+    fn strvalue_zeroize_clears_payload() {
         let secret = "hunter2-API-KEY";
         let mut sv = StrValue::new(secret.to_string());
-        let ptr = sv.as_str().as_ptr();
-        let len = secret.len();
-        // SAFETY: `sv` owns the live allocation; `ptr`/`len` cover its bytes.
-        let before = unsafe { std::slice::from_raw_parts(ptr, len) };
-        assert_eq!(before, secret.as_bytes(), "precondition: plaintext present");
+        assert_eq!(sv.as_str(), secret, "precondition: plaintext present");
 
         sv.zeroize_in_place();
-
-        // SAFETY: `sv` is still alive and the buffer was overwritten in place.
-        let after = unsafe { std::slice::from_raw_parts(ptr, len) };
-        assert!(
-            after.iter().all(|&b| b == 0),
-            "plaintext not scrubbed: {after:?}"
-        );
-        assert!(sv.as_str().is_empty());
+        assert!(sv.as_str().is_empty(), "payload not cleared");
+        // The per-byte overwrite is proven by `bytesvalue_zeroize_overwrites_buffer`
+        // (StrValue and BytesValue scrub through the same `zeroize` mechanism on
+        // their underlying `String` / `Vec<u8>`).
     }
 
     #[test]
     fn bytesvalue_zeroize_overwrites_buffer() {
-        let secret: Vec<u8> = b"\x01\x02\x03super-secret-bytes".to_vec();
+        let secret: &[u8] = b"\x01\x02\x03super-secret-bytes";
         let len = secret.len();
         let mut bv = BytesValue {
-            buf: Arc::new(secret.clone()),
+            buf: Arc::new(secret.to_vec()),
             offset: 0,
             len,
         };
-        let ptr = bv.as_slice().as_ptr();
-        // SAFETY: `bv` uniquely owns the live buffer.
-        let before = unsafe { std::slice::from_raw_parts(ptr, len) };
-        assert_eq!(before, secret.as_slice(), "precondition: plaintext present");
+        assert_eq!(bv.as_slice(), secret, "precondition: plaintext present");
 
         bv.zeroize_in_place();
-
-        // SAFETY: still alive; overwritten in place.
-        let after = unsafe { std::slice::from_raw_parts(ptr, len) };
-        assert!(
-            after.iter().all(|&b| b == 0),
-            "plaintext not scrubbed: {after:?}"
-        );
         assert_eq!(bv.len(), 0);
+
+        // Prove the bytes (not just the length) were overwritten. After zeroize
+        // the Vec's len is 0, so the old plaintext sits in the retained spare
+        // capacity; `spare_capacity_mut` is the sanctioned, correctly-tagged way
+        // to inspect it (reading via a pointer captured before the scrub would be
+        // an aliasing violation — that is the bug Miri flagged in the first cut).
+        let vec = Arc::get_mut(&mut bv.buf).expect("uniquely owned after scrub");
+        assert!(vec.capacity() >= len, "zeroize must keep capacity");
+        let spare = vec.spare_capacity_mut();
+        // SAFETY: zeroize wrote 0 over the first `len` bytes (the live plaintext)
+        // before clearing the length, so they are initialised; we read within the
+        // spare slice's bounds through its own fresh tag.
+        let scrubbed = unsafe { std::slice::from_raw_parts(spare.as_ptr().cast::<u8>(), len) };
+        assert!(
+            scrubbed.iter().all(|&b| b == 0),
+            "not scrubbed: {scrubbed:?}"
+        );
     }
 
     #[test]
@@ -1924,41 +2021,114 @@ mod tests {
 
     #[test]
     fn scrub_value_walks_list_and_pack() {
-        let leaf1 = "leaf-secret-one";
-        let leaf2 = "leaf-secret-two";
+        // scrub_value must reach the Str leaves of a list and a nested pack.
         let mut v = Value::List(Arc::new(vec![
-            Value::str(leaf1.to_string()),
+            Value::str("leaf-secret-one".to_string()),
             Value::BuchiPack(Arc::new(vec![(
                 "tok".to_string(),
-                Value::str(leaf2.to_string()),
+                Value::str("leaf-secret-two".to_string()),
             )])),
         ]));
-        // Capture leaf buffer pointers (the tree stays alive throughout).
-        let ((p1, l1), (p2, l2)) = match &v {
-            Value::List(items) => {
-                let a = match &items[0] {
-                    Value::Str(s) => (s.as_str().as_ptr(), leaf1.len()),
-                    _ => unreachable!(),
-                };
-                let b = match &items[1] {
-                    Value::BuchiPack(f) => match &f[0].1 {
-                        Value::Str(s) => (s.as_str().as_ptr(), leaf2.len()),
-                        _ => unreachable!(),
-                    },
-                    _ => unreachable!(),
-                };
-                (a, b)
-            }
-            _ => unreachable!(),
-        };
 
         scrub_value(&mut v);
 
-        // SAFETY: `v` is alive; the leaves were overwritten in place.
-        let a1 = unsafe { std::slice::from_raw_parts(p1, l1) };
-        let a2 = unsafe { std::slice::from_raw_parts(p2, l2) };
-        assert!(a1.iter().all(|&b| b == 0), "list leaf not scrubbed");
-        assert!(a2.iter().all(|&b| b == 0), "pack leaf not scrubbed");
+        // The leaves are emptied (proves the recursion reached them); per-byte
+        // zeroing is proven by the leaf tests above.
+        match &v {
+            Value::List(items) => {
+                match &items[0] {
+                    Value::Str(s) => assert!(s.as_str().is_empty(), "list leaf"),
+                    _ => unreachable!(),
+                }
+                match &items[1] {
+                    Value::BuchiPack(f) => match &f[0].1 {
+                        Value::Str(s) => assert!(s.as_str().is_empty(), "pack leaf"),
+                        _ => unreachable!(),
+                    },
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn scrub_value_covers_scalars_and_json() {
+        let mut b = Value::Bool(true);
+        scrub_value(&mut b);
+        assert_eq!(b, Value::Bool(false));
+
+        let mut e = Value::EnumVal("Status".to_string(), 7);
+        scrub_value(&mut e);
+        assert_eq!(e, Value::EnumVal("Status".to_string(), 0));
+
+        let mut j = Value::Json(serde_json::json!({"tok": "json-secret", "n": 1}));
+        scrub_value(&mut j);
+        match &j {
+            Value::Json(serde_json::Value::Object(map)) => {
+                assert_eq!(
+                    map["tok"],
+                    serde_json::Value::String(String::new()),
+                    "json string node not scrubbed"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn seal_normalize_copies_aliased_source() {
+        // Sealing a value that still aliases a live variable must copy (not
+        // share) it, so the sealed buffer is uniquely owned and scrubbable.
+        let live = Value::str("aliased-secret".to_string());
+        let alias = live.clone(); // shares the Arc<StrValue>
+        let cell = SealedCell::new(live);
+
+        let sealed_ptr = match cell.reveal() {
+            Value::Str(s) => Arc::as_ptr(s),
+            _ => unreachable!(),
+        };
+        let alias_ptr = match &alias {
+            Value::Str(s) => Arc::as_ptr(s),
+            _ => unreachable!(),
+        };
+        assert_ne!(sealed_ptr, alias_ptr, "seal must copy a shared source");
+        match cell.reveal() {
+            Value::Str(s) => assert_eq!(s.as_str(), "aliased-secret"),
+            _ => unreachable!(),
+        }
+        // The still-live alias is the caller's data — left intact.
+        match &alias {
+            Value::Str(s) => assert_eq!(s.as_str(), "aliased-secret"),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn seal_normalize_flattens_rope_source() {
+        // A rope-backed source must be sealed as a Flat (scrubbable) buffer.
+        let big = "S".repeat(STR_ROPE_PROMOTION_THRESHOLD * 2);
+        let rope = StrValue::from_rope(RopeBuffer::from_str(&big));
+        assert!(rope.is_rope(), "precondition: source is a rope");
+
+        let cell = SealedCell::new(Value::Str(Arc::new(rope)));
+        match cell.reveal() {
+            Value::Str(s) => {
+                assert!(!s.is_rope(), "sealed value must be flattened");
+                assert_eq!(s.as_str().len(), big.len());
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn strvalue_zeroize_scrubs_rope() {
+        // zeroize_in_place must clear a rope (gap buffer + flat cache), not just
+        // swap the data pointer.
+        let mut rope = StrValue::from_rope(RopeBuffer::from_str("rope-secret-xyz"));
+        let _ = rope.as_str(); // populate the flat cache with plaintext
+        rope.zeroize_in_place();
+        assert!(rope.as_str().is_empty(), "rope not cleared");
     }
 
     #[test]

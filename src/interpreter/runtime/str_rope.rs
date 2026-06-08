@@ -23,6 +23,8 @@
 
 use std::cmp;
 
+use zeroize::Zeroize;
+
 /// Default initial gap size when constructing a fresh `GapBuffer` from a
 /// non-empty seed. Sized to absorb a typical short edit burst (~2 KiB worth
 /// of keystrokes) before requiring a buffer growth.
@@ -86,6 +88,16 @@ impl GapBuffer {
             gap_start: initial_bytes.len(),
             gap_end: total,
         }
+    }
+
+    /// F56 Phase 3 (Level 1 — ZeroizedBuffer): scrub the whole backing buffer
+    /// (text region and gap alike) with the `zeroize` crate's volatile writes
+    /// and collapse the gap. Used when a sealed secret's source value was on the
+    /// rope path, so its plaintext bytes do not linger in a freed allocation.
+    pub fn zeroize(&mut self) {
+        self.buf.zeroize();
+        self.gap_start = 0;
+        self.gap_end = self.buf.len();
     }
 
     /// Effective byte length (excludes the gap).
