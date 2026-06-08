@@ -11,7 +11,7 @@
 //! Fix:
 //! * `src/codegen/lower_molds.rs::Slice` — prefer `type_args[1]` /
 //!   `type_args[2]` over named `fields` (matches interpreter dispatch
-//!   in `src/interpreter/mold_eval.rs:343`).
+//!   in `src/interpreter/mold.rs:343`).
 //! * `src/js/runtime/core.rs::Slice` — accept `(val, start, end)`
 //!   positional form in addition to `(val, {start, end})` named form.
 //!

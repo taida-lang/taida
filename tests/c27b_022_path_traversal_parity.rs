@@ -33,7 +33,7 @@
 //! # 3-backend parity contract
 //!
 //! - Interpreter rejection comes from
-//!   `src/interpreter/module_eval.rs::resolve_import_path` (RCB-303
+//!   `src/interpreter/module.rs::resolve_import_path` (RCB-303
 //!   + SEC-003).
 //! - Native rejection comes from
 //!   `src/codegen/driver.rs::resolve_module_path` (RCB-303 +
@@ -478,7 +478,7 @@ fn extract_canonical(combined: &str) -> Option<(String, String)> {
 /// Build the byte-exact canonical sentence that every backend
 /// MUST emit for a given offending import path. Mirrors the
 /// `format!(...)` calls in:
-/// - `src/interpreter/module_eval.rs::resolve_import_path`
+/// - `src/interpreter/module.rs::resolve_import_path`
 /// - `src/js/codegen.rs::resolve_local_import_js_path`
 /// - `src/codegen/driver.rs::resolve_module_path` (and the
 ///   secondary site at `:1252`).

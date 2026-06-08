@@ -21,7 +21,7 @@
 //!
 //! # Backend implementation
 //!
-//! - Interpreter: `src/interpreter/mold_eval.rs::StringRepeatJoin`
+//! - Interpreter: `src/interpreter/mold.rs::StringRepeatJoin`
 //! - JS: `src/js/runtime/core.rs::StringRepeatJoin`
 //!   (uses `String#repeat` when sep is empty,
 //!   `Array(n).fill(str).join(sep)` otherwise)

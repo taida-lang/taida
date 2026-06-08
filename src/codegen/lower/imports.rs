@@ -243,7 +243,7 @@ impl Lowering {
         // uppercase / pure-Taida user-facing surface; without it we
         // fall back to the raw manifest `[functions]` table.
         //
-        // Facade semantics mirror `module_eval::load_addon_facade`:
+        // Facade semantics mirror `module::load_addon_facade`:
         //   - `Name <= lowercase_addon_fn` → alias the addon sentinel
         //     under the new name (facade alias).
         //   - `Name <= <pack expr>` → pure-Taida facade value; we
@@ -408,7 +408,7 @@ impl Lowering {
             let alias = sym.alias.clone().unwrap_or_else(|| sym.name.clone());
 
             // Lookup order (must match interpreter
-            // `module_eval::try_eval_addon_import`):
+            // `module::try_eval_addon_import`):
             //   1. facade exports (uppercase / pure-Taida surface)
             //   2. manifest `[functions]` entries (raw addon API)
             if let Some(facade) = &facade

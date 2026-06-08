@@ -23,7 +23,7 @@
 /// block — Rust allows the same type to be extended across multiple
 /// `impl` blocks in the same crate, so `Self:` / associated-item lookup
 /// still resolves uniformly. The `try_net_func` dispatcher below is the
-/// sole public-ish surface referenced by `module_eval.rs` / `eval.rs`.
+/// sole public-ish surface referenced by `module.rs` / `eval.rs`.
 ///
 /// - stream.rs — v3 streaming (startResponse/writeChunk/endResponse/sseEvent)
 /// + v4 body streaming (readBodyChunk/readBodyAll) and their
@@ -52,7 +52,7 @@ pub(crate) mod ws;
 mod tests;
 
 // Re-exports to preserve the path `super::net_eval::ActiveStreamingWriter` /
-// `super::net_eval::NET_SYMBOLS` used by sibling modules (eval.rs, module_eval.rs).
+// `super::net_eval::NET_SYMBOLS` used by sibling modules (eval.rs, module.rs).
 pub(crate) use types::{ActiveStreamingWriter, NET_SYMBOLS};
 
 use crate::interpreter::eval::{Interpreter, RuntimeError, Signal};

@@ -89,7 +89,10 @@ mod tests {
         // length fold dropped bits 24-31 / 40-63 of the length XOR;
         // replaced with a direct `(a_len != b_len)` seed in
         // 02_containers.inc.c: -86 bytes. Total 449,171 -> 449,085.
-        const EXPECTED_TOTAL_LEN: usize = 449_085;
+        // 2026-06-08 interpreter module rename (C8): -5 bytes from updating a
+        //   stale `mold_eval.rs` path reference in an 02_containers.inc.c
+        //   comment to `mold.rs`. Comment-only. Total 449,085 -> 449,080.
+        const EXPECTED_TOTAL_LEN: usize = 449_080;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

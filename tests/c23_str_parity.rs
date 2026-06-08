@@ -25,7 +25,7 @@
 //!     as `@()`.
 //!
 //! Each fixture under `examples/quality/c23b_str_parity/` pins one branch
-//! of the dispatch. Interpreter is the reference (`src/interpreter/mold_eval.rs`
+//! of the dispatch. Interpreter is the reference (`src/interpreter/mold.rs`
 //! `Str` arm → `format!("{}", other)` for non-primitive values). JS / Native
 //! / WASM-wasi must match the interpreter byte-for-byte.
 //!
@@ -397,7 +397,7 @@ fn fixture_expected(name: &str) -> String {
 
 // ---------------------------------------------------------------------------
 // Interpreter reference — must pin first, so the `.expected` files never
-// drift away from the source of truth (`src/interpreter/mold_eval.rs` `Str`).
+// drift away from the source of truth (`src/interpreter/mold.rs` `Str`).
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

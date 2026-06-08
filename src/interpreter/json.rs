@@ -402,7 +402,7 @@ fn field_missing_default(schema: &JsonSchema) -> Value {
 
 /// Lax[Enum] shape for JSON mold Enum validation failure.
 ///
-/// Kept identical to `mold_eval::make_lax_value(false, Int(0), Int(0))` so that
+/// Kept identical to `mold::make_lax_value(false, Int(0), Int(0))` so that
 /// the 3-backend parity can be verified structurally:
 /// @(has_value=false, __value=Int(0), __default=Int(0), __type="Lax")
 ///

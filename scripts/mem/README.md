@@ -68,7 +68,7 @@ fails hard. The hot-path investigation order is:
 
 1. Check `target/mem-smoke/<fixture>.valgrind.log` for the originating
    stack. The top frame is almost always in `src/interpreter/value.rs`
-   (Value drop), `src/interpreter/mold_eval.rs` (mold cache), or
+   (Value drop), `src/interpreter/mold.rs` (mold cache), or
    `src/interpreter/net/eval/` (span lifetime).
 2. Bisect against the last green main commit using
    `target/release/taida` + `scripts/mem/run_valgrind_smoke.sh`.

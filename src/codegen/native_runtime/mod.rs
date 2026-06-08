@@ -798,7 +798,12 @@ mod tests {
         //   2-arg streaming-handler comments to self-contained wording
         //   (no internal design-document paths). Comment-only; code bytes
         //   untouched. Total 1,284,640 -> 1,284,595.
-        const EXPECTED_TOTAL_LEN: usize = 1_284_595;
+        // 2026-06-08 interpreter module rename (C8): -40 bytes (core.c -30
+        //   = mold_eval->mold ×4 + regex_eval->regex ×2; net_h3_quic.c -10
+        //   = addon_eval->addon ×2) from updating stale `*_eval.rs` path
+        //   references in comments to the renamed bare modules. Comment-only;
+        //   code bytes untouched. Total 1,284,595 -> 1,284,555.
+        const EXPECTED_TOTAL_LEN: usize = 1_284_555;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1479,7 +1484,10 @@ mod tests {
         // `#include <sys/random.h>` guard (getentropy for randomBytes),
         // inserted in the top-of-file include block before the "Error
         // ceiling" marker. F1_LEN 384,554 -> 384,723.
-        const F1_LEN: usize = 384_723;
+        // 2026-06-08 interpreter module rename (C8): F1 comments lost -30
+        //   bytes (mold_eval->mold ×4, regex_eval->regex ×2, all before the
+        //   Error-ceiling marker). F1_LEN 384,723 -> 384,693.
+        const F1_LEN: usize = 384_693;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

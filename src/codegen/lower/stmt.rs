@@ -676,7 +676,7 @@ impl Lowering {
             // (or scalar) assignments harvested from the addon's
             // `taida/<stem>.td` facade tree during
             // `lower_addon_import`; they are the native-backend
-            // equivalent of the `module_eval::load_addon_facade`
+            // equivalent of the `module::load_addon_facade`
             // path used by the interpreter.
             //
             // Each binding is emitted with both `DefVar` (so user

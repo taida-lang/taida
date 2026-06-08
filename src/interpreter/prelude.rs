@@ -210,8 +210,8 @@ impl Interpreter {
                     crypto::base64_decode(&input)
                 };
                 let lax = match decoded {
-                    Some(bytes) => super::os_eval::make_lax_success_pub(Value::bytes(bytes)),
-                    None => super::os_eval::make_lax_failure_pub(Value::bytes(Vec::new())),
+                    Some(bytes) => super::os::make_lax_success_pub(Value::bytes(bytes)),
+                    None => super::os::make_lax_failure_pub(Value::bytes(Vec::new())),
                 };
                 Ok(Signal::Value(lax))
             }
@@ -425,12 +425,12 @@ impl Interpreter {
                 };
                 let inner = match DefaultEditor::new() {
                     Ok(mut rl) => match rl.readline(&prompt) {
-                        Ok(line) => super::os_eval::make_lax_success_pub(Value::str(line)),
+                        Ok(line) => super::os::make_lax_success_pub(Value::str(line)),
                         Err(ReadlineError::Eof)
                         | Err(ReadlineError::Interrupted)
-                        | Err(_) => super::os_eval::make_lax_failure_pub(Value::str(String::new())),
+                        | Err(_) => super::os::make_lax_failure_pub(Value::str(String::new())),
                     },
-                    Err(_) => super::os_eval::make_lax_failure_pub(Value::str(String::new())),
+                    Err(_) => super::os::make_lax_failure_pub(Value::str(String::new())),
                 };
                 Ok(Some(Signal::Value(Value::Async(AsyncValue {
                     status: AsyncStatus::Fulfilled,
@@ -730,7 +730,7 @@ impl Interpreter {
                 } else {
                     String::new()
                 };
-                match super::regex_eval::build_regex_value(&pattern, &flags) {
+                match super::regex::build_regex_value(&pattern, &flags) {
                     Ok(v) => Ok(Some(Signal::Value(v))),
                     Err(msg) => Ok(Some(Signal::Throw(Value::Error(
                         super::value::ErrorValue {
@@ -970,14 +970,14 @@ impl Interpreter {
             // ── D28B-015: `strOf(span, raw)` lowercase function-form ──
             // Cold-path span → owned Str materialization, the function-form
             // counterpart of the existing `StrOf[span, raw]()` mold (registered
-            // in `mold_eval.rs::lookup_mold_call`).
+            // in `mold.rs::lookup_mold_call`).
             //
             // The 2026-04-26 D28B-001 naming-rules Lock justifies the
             // co-existence: `Str` / `StrOf` are mold/PascalCase, `strOf` is the
             // function/camelCase entry. They produce identical results in all
             // 4 backends (interpreter / JS / native / wasm-full).
             //
-            // Semantics (matching `StrOf` mold, `mold_eval.rs:3004`):
+            // Semantics (matching `StrOf` mold, `mold.rs:3004`):
             //   - extract `(start, len)` from span pack
             //   - clamp `end = start + len` against `raw.len()`
             //   - try UTF-8 decode the slice; invalid UTF-8 → empty Str
@@ -1000,8 +1000,8 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let result = match (
-                    super::mold_eval::extract_span_pack(&span),
-                    super::mold_eval::raw_as_bytes(&raw),
+                    super::mold::extract_span_pack(&span),
+                    super::mold::raw_as_bytes(&raw),
                 ) {
                     (Some((start, len)), Some(bytes)) => {
                         let end = start.saturating_add(len);

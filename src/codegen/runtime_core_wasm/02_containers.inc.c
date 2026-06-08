@@ -1143,7 +1143,7 @@ int64_t taida_str_mold_int(int64_t v) {
    valued floats (`"3"` / `"-5"` / `"0"`). This local helper mirrors that
    contract by dropping the `.0` suffix produced by `fmt_g` on integer-valued
    floats, while keeping fractional / NaN / inf / exponential forms intact.
-   See `src/interpreter/mold_eval.rs:2057` for the reference. */
+   See `src/interpreter/mold.rs:2057` for the reference. */
 static int64_t _taida_float_to_str_mold(int64_t val) {
     int64_t raw = taida_float_to_str(val);
     const char *s = (const char *)(intptr_t)raw;

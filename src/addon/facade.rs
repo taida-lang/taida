@@ -17,7 +17,7 @@
 //! `_`-prefixed helpers that reachable exports reference.
 //!
 //! The interpreter's addon facade path
-//! (`src/interpreter/module_eval.rs::load_addon_facade`) still
+//! (`src/interpreter/module.rs::load_addon_facade`) still
 //! executes the facade as a dynamic module so it can exchange
 //! runtime values with user code; that path is deliberately left
 //! alone because the interpreter is Taida's reference

@@ -4232,7 +4232,7 @@ static void taida_addon_fail(const char *pkg, const char *detail) {
  * Error` (catch-all) just like any other Taida runtime error.
  *
  * The pack shape mirrors what the interpreter produces in
- * `src/interpreter/addon_eval.rs::try_addon_func` so backend parity
+ * `src/interpreter/addon.rs::try_addon_func` so backend parity
  * holds (RC2.5-4b will pin this byte-for-byte).
  *
  * Never returns (taida_throw longjmps to the nearest error ceiling, or
@@ -4648,7 +4648,7 @@ int64_t taida_addon_call(
 
     /* RC2.5-3a: Status::Error with an out_error → catchable Taida
      * AddonError variant. Mirrors the interpreter's behaviour in
-     * `src/interpreter/addon_eval.rs::try_addon_func`, which wraps an
+     * `src/interpreter/addon.rs::try_addon_func`, which wraps an
      * `AddonCallError::AddonError { code, message }` into a
      * `Signal::Throw(Value::Error(ErrorValue { error_type:
      * "AddonError", ... }))`.

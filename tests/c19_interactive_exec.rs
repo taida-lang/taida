@@ -5,7 +5,7 @@
 //! identical stdout against the canonical `.expected` files.
 //!
 //! Red test ゼロ容認 — any backend divergence is a C19 regression. The
-//! unit tests in `src/interpreter/os_eval.rs` already pin the interpreter
+//! unit tests in `src/interpreter/os.rs` already pin the interpreter
 //! contract (exit codes + Gorillax inner shape + IoError kind); this
 //! harness pins the runtime parity across the three backends.
 //!

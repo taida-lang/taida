@@ -1008,7 +1008,7 @@ impl Interpreter {
                 message: "[E1502] Empty argument slots are only valid inside function calls."
                     .to_string(),
             }),
-            // B11-6a: TypeLiteral is only valid inside TypeIs/TypeExtends — handled by mold_eval
+            // B11-6a: TypeLiteral is only valid inside TypeIs/TypeExtends — handled by mold
             Expr::TypeLiteral(name, variant, _) => {
                 if let Some(var) = variant {
                     Ok(Signal::Value(Value::str(format!("{}:{}", name, var))))

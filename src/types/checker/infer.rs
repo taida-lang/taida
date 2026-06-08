@@ -1554,7 +1554,7 @@ impl TypeChecker {
                     // dedicated return-type pin, so `All[xs, extra]()` and
                     // `Timeout[async]()` (missing ms) silently passed type
                     // checking. Pin the signatures here to align with
-                    // `src/interpreter/mold_eval.rs` (4-backend parity).
+                    // `src/interpreter/mold.rs` (4-backend parity).
                     //
                     // Runtime contracts:
                     //   All[asyncList]() -> Async[List[T]]    (1 arg)

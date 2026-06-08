@@ -753,7 +753,7 @@ int64_t taida_os_exists(int64_t path_ptr) {
  * wasm-wasi / wasm-full lowering for the chunked-read API landed as
  * `readBytesAt` on Interpreter / JS / Native in Round 1 wD.  Semantics
  * mirror `src/codegen/native_runtime/os.c::taida_os_read_bytes_at`
- * and `src/interpreter/os_eval.rs::readBytesAt` byte-for-byte:
+ * and `src/interpreter/os.rs::readBytesAt` byte-for-byte:
  *   - offset < 0 or len < 0        → Lax failure (default empty Bytes)
  *   - len == 0                     → Lax success (empty Bytes)
  *   - len > 64 MB chunk ceiling    → Lax failure

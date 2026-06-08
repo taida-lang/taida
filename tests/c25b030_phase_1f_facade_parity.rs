@@ -4,7 +4,7 @@
 //! Background: Phase 1A-1E lifted the facade loader in
 //! `src/codegen/lower/imports.rs::load_addon_facade_for_lower` to
 //! the same surface area as the interpreter-side
-//! `src/interpreter/module_eval.rs::load_addon_facade` (aliases /
+//! `src/interpreter/module.rs::load_addon_facade` (aliases /
 //! pack literals / FuncDefs / private `_`-prefixed helpers / relative
 //! `>>>` child imports). Phase 1F pins the **parity contract** between
 //! the two loaders: the same facade ingest must produce the same

@@ -27,7 +27,7 @@ DOC_PATHS = [
 ]
 RUNTIME_PATHS = [
     Path("src/codegen/lower/molds_inst.rs"),
-    Path("src/interpreter/mold_eval.rs"),
+    Path("src/interpreter/mold.rs"),
 ]
 REGISTRY_PATH = Path("src/types/mold_specs.rs")
 

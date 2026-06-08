@@ -705,7 +705,7 @@ function __taida_enumOrdinal(v) {
 
 // C18B-005 fix: strict ordinal extractor for the `Ordinal[]` mold.
 // Mirrors the interpreter contract at
-// `src/interpreter/mold_eval.rs:3373-3394`: rejects non-Enum inputs
+// `src/interpreter/mold.rs:3373-3394`: rejects non-Enum inputs
 // so `--no-check` cannot silently erase misuse. The companion Native
 // check lives in `taida_ordinal_strict` in `core.c`.
 function __taida_enumOrdinalStrict(v) {
@@ -1356,7 +1356,7 @@ function Mod_mold(a, b, opts) {
 //       method source bodies or stripped the `__`-prefixed data the
 //       interpreter actually carries in those pack shapes). See
 //       `src/interpreter/prelude.rs` (hashMap / setOf) and
-//       `src/interpreter/mold_eval.rs` (TODO / Gorillax).
+//       `src/interpreter/mold.rs` (TODO / Gorillax).
 //   Stream       → `Stream[completed: N items]` / `Stream[active]`
 //       (`src/interpreter/value.rs:378-381`; interpreter-only type —
 //       native/wasm don't support Stream lowering yet).
@@ -1457,7 +1457,7 @@ function __taida_display_string(v) {
     }
     // C23B-003 reopen — TODO mold: interpreter `BuchiPack` with fields
     // `id / task / sol / unm / __value / __default / __type`
-    // (`src/interpreter/mold_eval.rs:1793-1801`).
+    // (`src/interpreter/mold.rs:1793-1801`).
     if (v.__type === 'TODO') {
       return '@(id <= ' + __taida_format(v.id)
         + ', task <= ' + __taida_format(v.task)
@@ -1469,7 +1469,7 @@ function __taida_display_string(v) {
     }
     // C23B-003 reopen — Gorillax / RelaxedGorillax: interpreter
     // `BuchiPack(has_value, __value, __error, __type)`
-    // (`src/interpreter/mold_eval.rs:1824-1829`). The interpreter always
+    // (`src/interpreter/mold.rs:1824-1829`). The interpreter always
     // emits `__error`; a missing error is `@()` (Value::Unit) — not `null`.
     if (v.__type === 'Gorillax' || v.__type === 'RelaxedGorillax') {
       const hv = v.has_value;
@@ -1954,7 +1954,7 @@ function __taida_str_split(s, sep) {
 function __taida_regex(pattern, flags) {
   const p = typeof pattern === 'string' ? pattern : '';
   const f = typeof flags === 'string' ? flags : '';
-  // Validate flags (match the interpreter's `regex_eval::validate_flags`).
+  // Validate flags (match the interpreter's `regex::validate_flags`).
   // C12B-029: Use globalThis.Error rather than the local Taida `Error`
   // (which is shadowed by the prelude at the top of runtime/core.rs and
   // is frozen, so assigning __taida_error_type fails).
