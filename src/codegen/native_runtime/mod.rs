@@ -866,7 +866,9 @@ mod tests {
         //   (hidden header) instead of raw malloc before entering the
         //   response pack's `body` field. 1,300,853 -> 1,301,012. Same fix
         //   on the plaintext-HTTP response path: 1,301,012 -> 1,301,087.
-        const EXPECTED_TOTAL_LEN: usize = 1_301_087;
+        // 2026-06-10 F58 P2-1 (core.c): guard fast path — see the F1/F2
+        //   notes above. 1,301,087 -> 1,305,437.
+        const EXPECTED_TOTAL_LEN: usize = 1_305_437;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1590,7 +1592,13 @@ mod tests {
         //   (malloc'd builder buffer -> header-carrying Str) lands next to
         //   taida_str_new_copy, before the marker. +581 bytes:
         //   394,396 -> 394,977.
-        const F1_LEN: usize = 394_977;
+        // 2026-06-10 F58 P2-1 guard fast path: perf counters
+        //   (ptr_readable_calls / arena_contains_calls), arena bounding box
+        //   (taida_arena_lo/hi + bounds_add/recompute + active-chunk-first
+        //   contains), molten/moltenized type-slot matchers shared with the
+        //   single-probe unmold dispatch. All before the marker.
+        //   394,977 -> 397,931.
+        const F1_LEN: usize = 397_931;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1624,7 +1632,10 @@ mod tests {
             // through taida_str_new_copy / taida_str_adopt_buf instead of
             // raw malloc'd buffers (after the marker): -437 bytes.
             // F2 226,148 -> 225,711.
-            F1_LEN + 225_711,
+            // F58 P2-1: taida_generic_unmold single-probe dispatch +
+            // gorillax type-slot classifier split (after the marker).
+            // F2 225,711 -> 227,107.
+            F1_LEN + 227_107,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

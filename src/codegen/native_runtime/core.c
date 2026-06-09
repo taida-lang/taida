@@ -33,6 +33,8 @@ static unsigned long long taida_perf_malloc_calls;
 static unsigned long long taida_perf_malloc_bytes;
 static unsigned long long taida_perf_freelist_hits;
 static unsigned long long taida_perf_arena_resets;
+static unsigned long long taida_perf_ptr_readable_calls;
+static unsigned long long taida_perf_arena_contains_calls;
 #define TAIDA_PERF_INC(c) __atomic_fetch_add(&(c), 1ULL, __ATOMIC_RELAXED)
 #define TAIDA_PERF_ADD(c, n) \
     __atomic_fetch_add(&(c), (unsigned long long)(n), __ATOMIC_RELAXED)
@@ -40,13 +42,16 @@ __attribute__((destructor)) static void taida_perf_dump(void) {
     fprintf(stderr,
             "TAIDA_PERF native arena_calls=%llu arena_bytes=%llu "
             "malloc_calls=%llu malloc_bytes=%llu freelist_hits=%llu "
-            "arena_resets=%llu\n",
+            "arena_resets=%llu ptr_readable_calls=%llu "
+            "arena_contains_calls=%llu\n",
             __atomic_load_n(&taida_perf_arena_calls, __ATOMIC_RELAXED),
             __atomic_load_n(&taida_perf_arena_bytes, __ATOMIC_RELAXED),
             __atomic_load_n(&taida_perf_malloc_calls, __ATOMIC_RELAXED),
             __atomic_load_n(&taida_perf_malloc_bytes, __ATOMIC_RELAXED),
             __atomic_load_n(&taida_perf_freelist_hits, __ATOMIC_RELAXED),
-            __atomic_load_n(&taida_perf_arena_resets, __ATOMIC_RELAXED));
+            __atomic_load_n(&taida_perf_arena_resets, __ATOMIC_RELAXED),
+            __atomic_load_n(&taida_perf_ptr_readable_calls, __ATOMIC_RELAXED),
+            __atomic_load_n(&taida_perf_arena_contains_calls, __ATOMIC_RELAXED));
 }
 #else
 #define TAIDA_PERF_INC(c) ((void)0)
@@ -680,12 +685,50 @@ typedef struct taida_arena_chunk {
 static __thread taida_arena_chunk_t taida_arena_chunks[TAIDA_ARENA_MAX_CHUNKS];
 static __thread int taida_arena_chunk_count = 0;
 static __thread int taida_arena_active_chunk = -1;
+// F58 P2-1: bounding box over all chunks. Chunks come from malloc with no
+// address-order guarantee, so containment still needs a per-chunk check —
+// but the vast majority of probes are for non-arena pointers (string
+// literals, malloc'd objects, scalars that look like pointers), and those
+// are rejected here in O(1) instead of walking up to 128 chunks. The box
+// is widened on chunk allocation and recomputed on reset.
+static __thread uintptr_t taida_arena_lo = UINTPTR_MAX;
+static __thread uintptr_t taida_arena_hi = 0;
+
+static inline void taida_arena_bounds_add(unsigned char *base, size_t size) {
+    uintptr_t b = (uintptr_t)base;
+    if (b < taida_arena_lo) taida_arena_lo = b;
+    if (b + size > taida_arena_hi) taida_arena_hi = b + size;
+}
+
+static inline void taida_arena_bounds_recompute(void) {
+    taida_arena_lo = UINTPTR_MAX;
+    taida_arena_hi = 0;
+    for (int i = 0; i < taida_arena_chunk_count; i++) {
+        taida_arena_bounds_add(taida_arena_chunks[i].base,
+                               taida_arena_chunks[i].size);
+    }
+}
 
 static inline int taida_arena_contains(void *ptr) {
-    unsigned char *p = (unsigned char *)ptr;
+    TAIDA_PERF_INC(taida_perf_arena_contains_calls);
+    uintptr_t p = (uintptr_t)ptr;
+    // O(1) reject for pointers outside the arena bounding box (the common
+    // case on type-judgment paths).
+    if (p < taida_arena_lo || p >= taida_arena_hi) return 0;
+    // Active chunk first: recent allocations dominate containment hits.
+    int ai = taida_arena_active_chunk;
+    if (ai >= 0) {
+        unsigned char *base = taida_arena_chunks[ai].base;
+        if ((unsigned char *)ptr >= base
+            && (unsigned char *)ptr < base + taida_arena_chunks[ai].size)
+            return 1;
+    }
     for (int i = 0; i < taida_arena_chunk_count; i++) {
+        if (i == ai) continue;
         unsigned char *base = taida_arena_chunks[i].base;
-        if (p >= base && p < base + taida_arena_chunks[i].size) return 1;
+        if ((unsigned char *)ptr >= base
+            && (unsigned char *)ptr < base + taida_arena_chunks[i].size)
+            return 1;
     }
     return 0;
 }
@@ -714,6 +757,7 @@ static void *taida_arena_alloc(size_t size) {
     c->size = TAIDA_ARENA_CHUNK_SIZE;
     taida_arena_active_chunk = taida_arena_chunk_count;
     taida_arena_chunk_count++;
+    taida_arena_bounds_add(base, TAIDA_ARENA_CHUNK_SIZE);
     TAIDA_PERF_INC(taida_perf_arena_calls);
     TAIDA_PERF_ADD(taida_perf_arena_bytes, aligned);
     return base;
@@ -815,6 +859,7 @@ static void taida_arena_request_reset(void) {
         }
         taida_arena_chunk_count = 1;
     }
+    taida_arena_bounds_recompute();
     if (taida_arena_chunk_count == 1 && taida_arena_chunks[0].base) {
         taida_arena_chunks[0].offset = 0;
         taida_arena_active_chunk = 0;
@@ -1850,19 +1895,37 @@ taida_val taida_todo_new(taida_val id, taida_val task, taida_val sol, taida_val 
     return pack;
 }
 
-static int taida_is_molten(taida_val ptr) {
-    if (!TAIDA_IS_PACK(ptr)) return 0;
-    if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 5)) return 0;
-    taida_val *obj = (taida_val*)ptr;
-    if (obj[1] != 1) return 0;
-    if (obj[2] != (taida_val)HASH___TYPE) return 0;  // hash at stride-3 offset 0
-    taida_val type_ptr = obj[4];  // value at stride-3 offset 2
+// F58 P2-1: type-slot matchers shared by taida_is_molten /
+// taida_is_moltenized / taida_detect_gorillax_type and the single-probe
+// dispatch inside taida_generic_unmold. The caller must have validated
+// the enclosing pack header (magic) before reading the slot.
+static int taida_molten_type_slot_matches(taida_val type_ptr) {
     if (type_ptr == (taida_val)__molten_type_str) return 1;
     if (!taida_ptr_is_readable(type_ptr, 1)) return 0;
     const char *type_str = (const char*)type_ptr;
     size_t len = 0;
     if (!taida_read_cstr_len_safe(type_str, 32, &len)) return 0;
     return len == 6 && memcmp(type_str, "Molten", 6) == 0;
+}
+
+static int taida_moltenized_type_slot_matches(taida_val type_ptr) {
+    if (type_ptr == (taida_val)__moltenized_type_str) return 1;
+    if (type_ptr == (taida_val)__secret_type_str) return 1;
+    if (!taida_ptr_is_readable(type_ptr, 1)) return 0;
+    const char *type_str = (const char*)type_ptr;
+    size_t len = 0;
+    if (!taida_read_cstr_len_safe(type_str, 32, &len)) return 0;
+    return (len == 10 && memcmp(type_str, "Moltenized", 10) == 0)
+        || (len == 6 && memcmp(type_str, "Secret", 6) == 0);
+}
+
+static int taida_is_molten(taida_val ptr) {
+    if (!TAIDA_IS_PACK(ptr)) return 0;
+    if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 5)) return 0;
+    taida_val *obj = (taida_val*)ptr;
+    if (obj[1] != 1) return 0;
+    if (obj[2] != (taida_val)HASH___TYPE) return 0;  // hash at stride-3 offset 0
+    return taida_molten_type_slot_matches(obj[4]);  // value at stride-3 offset 2
 }
 
 // F56: detect a Moltenized/Secret carrier pack (fc=2, __type = "Moltenized"
@@ -1873,15 +1936,7 @@ static int taida_is_moltenized(taida_val ptr) {
     taida_val *obj = (taida_val*)ptr;
     if (obj[1] != 2) return 0;
     if (obj[2] != (taida_val)HASH___TYPE) return 0;
-    taida_val type_ptr = obj[4];
-    if (type_ptr == (taida_val)__moltenized_type_str) return 1;
-    if (type_ptr == (taida_val)__secret_type_str) return 1;
-    if (!taida_ptr_is_readable(type_ptr, 1)) return 0;
-    const char *type_str = (const char*)type_ptr;
-    size_t len = 0;
-    if (!taida_read_cstr_len_safe(type_str, 32, &len)) return 0;
-    return (len == 10 && memcmp(type_str, "Moltenized", 10) == 0)
-        || (len == 6 && memcmp(type_str, "Secret", 6) == 0);
+    return taida_moltenized_type_slot_matches(obj[4]);
 }
 
 // F56: render a sealed carrier as "<Secret>" / "<Moltenized>" (policy label
@@ -2030,9 +2085,11 @@ taida_val taida_relaxed_gorillax_to_string(taida_val ptr) {
 
 // Helper: check __type field of fc=4 BuchiPack for Gorillax/RelaxedGorillax
 // Returns: 0 = Lax, 1 = Gorillax, 2 = RelaxedGorillax
-static int taida_detect_gorillax_type(taida_val ptr) {
-    if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 10)) return 0;
-    taida_val type_ptr = taida_pack_get_idx(ptr, 3);  // __type field
+// F58 P2-1: __type-slot classifier shared by taida_detect_gorillax_type
+// and the single-probe dispatch in taida_generic_unmold. Returns
+// 1=Gorillax / 2=RelaxedGorillax / 0=Lax. The caller must have validated
+// the enclosing pack header.
+static int taida_gorillax_type_from_slot(taida_val type_ptr) {
     if (type_ptr == 0 || type_ptr < 4096) return 0;
     if (type_ptr == (taida_val)__gorillax_type_str) return 1;
     if (type_ptr == (taida_val)__relaxed_gorillax_type_str) return 2;
@@ -2042,6 +2099,11 @@ static int taida_detect_gorillax_type(taida_val ptr) {
     if (len == 8 && memcmp(type_str, "Gorillax", 8) == 0) return 1;
     if (len == 15 && memcmp(type_str, "RelaxedGorillax", 15) == 0) return 2;
     return 0;  // Lax
+}
+
+static int taida_detect_gorillax_type(taida_val ptr) {
+    if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 10)) return 0;
+    return taida_gorillax_type_from_slot(taida_pack_get_idx(ptr, 3));  // __type field
 }
 
 // taida_int_div and taida_int_mod removed — use Div/Mod molds
@@ -7148,6 +7210,7 @@ static taida_val taida_is_hashmap(taida_val ptr) {
 }
 
 static int taida_ptr_is_readable(taida_val ptr, size_t bytes) {
+    TAIDA_PERF_INC(taida_perf_ptr_readable_calls);
     if (ptr == 0 || ptr < 4096) return 0;
     // Taida heap objects are always 8-byte aligned.
     if (ptr & 0x7) return 0;
@@ -10719,27 +10782,44 @@ taida_val taida_async_race(taida_val list_ptr) {
 taida_val taida_generic_unmold(taida_val ptr) {
     if (ptr == 0) return 0;
 
-    if (taida_is_molten(ptr)) {
-        taida_val error = taida_make_error(
-            "TypeError",
-            "Cannot unmold Molten directly. Molten can only be used inside Cage."
-        );
-        return taida_throw(error);
-    }
-    // F56: a sealed carrier (Moltenized/Secret) cannot be unmolded directly.
-    if (taida_is_moltenized(ptr)) {
-        taida_val error = taida_make_error(
-            "TypeError",
-            "Cannot unmold a sealed carrier (Moltenized/Secret) directly. Use a secret-aware consumer."
-        );
-        return taida_throw(error);
-    }
+    // F58 P2-1: one readability probe + one magic load for the whole
+    // dispatch. The previous structure re-probed the same pointer through
+    // taida_is_molten / taida_is_moltenized / TAIDA_IS_PACK /
+    // taida_detect_gorillax_type — at least six arena/heap-range/mincore
+    // walks per unmold, the dominant cost of the mold-unmold hot loop.
+    // A matching 64-bit magic is the ABI proof of a well-formed object,
+    // so after probing the two header words the field slots are read
+    // directly (same trust rule the probe helper documents: "callers
+    // later validate the magic-header tag").
+    if (ptr < 4096 || (ptr & 0x7) != 0) return ptr;
+    if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 2)) return ptr;
+    taida_val unmold_magic = ((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK;
 
     // Check for BuchiPack (monadic types) using magic
-    if (TAIDA_IS_PACK(ptr)) {
+    if (unmold_magic == TAIDA_PACK_MAGIC) {
         taida_val *obj = (taida_val*)ptr;
         taida_val field_count = obj[1];
         taida_val hash0 = obj[2];
+
+        // Molten (fc=1, sole field __type): only usable inside Cage.
+        if (field_count == 1 && hash0 == (taida_val)HASH___TYPE
+            && taida_molten_type_slot_matches(obj[4])) {
+            taida_val error = taida_make_error(
+                "TypeError",
+                "Cannot unmold Molten directly. Molten can only be used inside Cage."
+            );
+            return taida_throw(error);
+        }
+        // F56: a sealed carrier (fc=2, first field __type = Moltenized /
+        // Secret) cannot be unmolded directly.
+        if (field_count == 2 && hash0 == (taida_val)HASH___TYPE
+            && taida_moltenized_type_slot_matches(obj[4])) {
+            taida_val error = taida_make_error(
+                "TypeError",
+                "Cannot unmold a sealed carrier (Moltenized/Secret) directly. Use a secret-aware consumer."
+            );
+            return taida_throw(error);
+        }
 
         // Result (fc=4, hash0=HASH_RES___VALUE): evaluate predicate + check throw.
         if (field_count == 4 && hash0 == (taida_val)HASH_RES___VALUE) {
@@ -10779,9 +10859,12 @@ taida_val taida_generic_unmold(taida_val ptr) {
             return value;
         }
 
-    // Lax/Gorillax/RelaxedGorillax (fc=4, hash0=HASH_HAS_VALUE)
+    // Lax/Gorillax/RelaxedGorillax (fc=4, hash0=HASH_HAS_VALUE).
+    // F58 P2-1: the pack header is already validated, so classify via the
+    // __type slot directly instead of taida_detect_gorillax_type (which
+    // re-probes 80 bytes of readability).
     if ((field_count == 4 || field_count == 5) && hash0 == (taida_val)HASH_HAS_VALUE) {
-        int gtype = taida_detect_gorillax_type(ptr);
+        int gtype = taida_gorillax_type_from_slot(taida_pack_get_idx(ptr, 3));
         if (gtype == 1) return taida_gorillax_unmold(ptr);
         if (gtype == 2) return taida_relaxed_gorillax_unmold(ptr);
         return taida_lax_unmold(ptr);
@@ -10828,7 +10911,7 @@ taida_val taida_generic_unmold(taida_val ptr) {
     }
 
     // Check if this is an Async: [ASYNC_MAGIC, status, value, error, thread_handle, value_tag, error_tag]
-    if (TAIDA_IS_ASYNC(ptr)) {
+    if (unmold_magic == TAIDA_ASYNC_MAGIC) {
         return taida_async_unmold(ptr);
     }
     // Not a monadic type or Async — return as-is (e.g., list, string, plain value)
