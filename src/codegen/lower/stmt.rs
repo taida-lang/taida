@@ -2060,9 +2060,9 @@ impl Lowering {
             // (same logic as `src/codegen/lower/expr.rs::
             // lower_template_lit`) and re-parses each interpolation
             // as a standalone expression so the normal free-var
-            // walker runs over it. Parse failures fall back to a
-            // bare-identifier capture, mirroring the real
-            // lowering's behaviour.
+            // walker runs over it. A non-expression or parser-rejected
+            // body lowers to a `ConstStr` (empty or raw text) and
+            // captures nothing, mirroring the real lowering.
             Expr::TemplateLit(template, _) => {
                 Self::collect_free_vars_in_template(template, bound, free, seen);
             }
@@ -2111,13 +2111,14 @@ impl Lowering {
                     && let Statement::Expr(ref parsed_expr) = program.statements[0]
                 {
                     Self::collect_free_vars_in_parsed_expr(parsed_expr, bound, free, seen);
-                } else if !trimmed.is_empty() && !bound.contains(trimmed) && !seen.contains(trimmed)
-                {
-                    // `lower_template_lit`'s fallback path: treat
-                    // the trimmed string as a bare identifier.
-                    seen.insert(trimmed.to_string());
-                    free.push(trimmed.to_string());
                 }
+                // Otherwise the body lowers to a `ConstStr` in
+                // `lower_template_lit` (a non-expression statement → ""; a
+                // parser-rejected / empty body → raw text), reading no variable,
+                // so collect no free var here. This keeps the capture walker in
+                // step with the ConstStr fallback (F56-FB-006 follow-up;
+                // previously this path captured the trimmed body as a bare
+                // identifier, matching the old bare-variable lowering).
                 if i < chars.len() {
                     i += 1;
                 }

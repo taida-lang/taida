@@ -877,3 +877,111 @@ impl TypeChecker {
         }
     }
 }
+
+#[cfg(test)]
+mod arg_types_tests {
+    use super::*;
+
+    // REFACTOR-FB-002: pin the element-type dependence of
+    // `builtin_method_arg_types`. The arity table (`BUILTIN_METHOD_SPECS`) is
+    // argless, so the *content* of the argument types — which element type
+    // flows into which position, that key↔value and success↔error are not
+    // swapped, and the function-argument signatures — is only verified here.
+    // This lifts the off-table-receiver equivalence off visual inspection
+    // (/so #9 recommended condition 3).
+    fn arg_types(obj: Type, method: &str) -> Vec<Type> {
+        TypeChecker::builtin_method_arg_types(&obj, method)
+    }
+
+    #[test]
+    fn list_element_type_flows_into_arg_positions() {
+        let li = Type::List(Box::new(Type::Int));
+        assert_eq!(arg_types(li.clone(), "contains"), vec![Type::Int]);
+        assert_eq!(arg_types(li.clone(), "indexOf"), vec![Type::Int]);
+        assert_eq!(arg_types(li.clone(), "lastIndexOfLax"), vec![Type::Int]);
+        assert_eq!(
+            arg_types(li.clone(), "any"),
+            vec![Type::Function(vec![Type::Int], Box::new(Type::Bool))]
+        );
+        assert_eq!(arg_types(li, "reduce"), vec![Type::Any, Type::Any]);
+    }
+
+    #[test]
+    fn hashmap_key_and_value_keep_their_positions() {
+        let m = Type::Generic("HashMap".to_string(), vec![Type::Str, Type::Int]);
+        // key-typed lookups
+        assert_eq!(arg_types(m.clone(), "get"), vec![Type::Str]);
+        assert_eq!(arg_types(m.clone(), "has"), vec![Type::Str]);
+        assert_eq!(arg_types(m.clone(), "remove"), vec![Type::Str]);
+        // set takes (key, value) — the order must not swap
+        assert_eq!(arg_types(m.clone(), "set"), vec![Type::Str, Type::Int]);
+        // merge takes another HashMap[key, value]
+        assert_eq!(
+            arg_types(m, "merge"),
+            vec![Type::Generic(
+                "HashMap".to_string(),
+                vec![Type::Str, Type::Int]
+            )]
+        );
+    }
+
+    #[test]
+    fn set_element_type_flows_into_arg_positions() {
+        let s = Type::Generic("Set".to_string(), vec![Type::Int]);
+        assert_eq!(arg_types(s.clone(), "add"), vec![Type::Int]);
+        assert_eq!(arg_types(s.clone(), "has"), vec![Type::Int]);
+        assert_eq!(
+            arg_types(s, "union"),
+            vec![Type::Generic("Set".to_string(), vec![Type::Int])]
+        );
+    }
+
+    #[test]
+    fn result_success_and_error_types_are_not_swapped() {
+        let r = Type::Generic("Result".to_string(), vec![Type::Int, Type::Str]);
+        // map operates on the success type (first type arg)
+        assert_eq!(
+            arg_types(r.clone(), "map"),
+            vec![Type::Function(vec![Type::Int], Box::new(Type::Any))]
+        );
+        // mapError operates on the error type (second type arg)
+        assert_eq!(
+            arg_types(r.clone(), "mapError"),
+            vec![Type::Function(vec![Type::Str], Box::new(Type::Any))]
+        );
+        // getOrDefault carries the success type
+        assert_eq!(arg_types(r, "getOrDefault"), vec![Type::Int]);
+    }
+
+    #[test]
+    fn lax_and_async_inner_type_flows() {
+        let lax = Type::Generic("Lax".to_string(), vec![Type::Str]);
+        assert_eq!(arg_types(lax.clone(), "getOrDefault"), vec![Type::Str]);
+        assert_eq!(
+            arg_types(lax, "map"),
+            vec![Type::Function(vec![Type::Str], Box::new(Type::Any))]
+        );
+        let a = Type::Generic("Async".to_string(), vec![Type::Int]);
+        assert_eq!(
+            arg_types(a.clone(), "map"),
+            vec![Type::Function(vec![Type::Int], Box::new(Type::Any))]
+        );
+        assert_eq!(arg_types(a, "getOrDefault"), vec![Type::Int]);
+    }
+
+    #[test]
+    fn str_arg_types_and_nullary_receivers_are_pinned() {
+        assert_eq!(arg_types(Type::Str, "contains"), vec![Type::Str]);
+        assert_eq!(arg_types(Type::Str, "get"), vec![Type::Int]);
+        assert_eq!(arg_types(Type::Str, "replace"), vec![Type::Any, Type::Str]);
+        assert_eq!(
+            arg_types(Type::Str, "match"),
+            vec![Type::Named("Regex".to_string())]
+        );
+        // nullary builtin receivers (Num / Bool state checks, toString) carry
+        // no argument types.
+        assert_eq!(arg_types(Type::Int, "toString"), Vec::<Type>::new());
+        assert_eq!(arg_types(Type::Bool, "toString"), Vec::<Type>::new());
+        assert_eq!(arg_types(Type::Int, "isNaN"), Vec::<Type>::new());
+    }
+}
