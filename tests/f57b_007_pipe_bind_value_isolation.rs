@@ -103,7 +103,10 @@ fn assert_parity(label: &str, src: &str, expect: &str) {
     let i = interp_out(&format!("{label}_i"), src);
     assert_eq!(i, expect, "{label}: interp baseline");
     let n = native_out(&format!("{label}_n"), src);
-    assert_eq!(n, i, "{label}: native must match interp (outer var must survive the bind)");
+    assert_eq!(
+        n, i,
+        "{label}: native must match interp (outer var must survive the bind)"
+    );
     if let Some(w) = wasm_out(&format!("{label}_w"), src) {
         assert_eq!(w, i, "{label}: wasm must match interp");
     }

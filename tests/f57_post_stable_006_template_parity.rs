@@ -75,7 +75,10 @@ fn nonexpr_pack_interpolation_native_matches_interp() {
     let src = "x <= `${@(a: @(b <= 42))}`\nstdout(x)\n";
     let i = interp_out("f57_006fb_interp_a", src);
     let n = native_out("f57_006fb_native_a", src);
-    assert_eq!(n, i, "native must match the interpreter for a non-expression body");
+    assert_eq!(
+        n, i,
+        "native must match the interpreter for a non-expression body"
+    );
     assert!(i.contains("@(a: @(b <= 42))"), "interp baseline: {i}");
 }
 
@@ -86,7 +89,10 @@ fn nested_pack_interpolation_native_matches_interp() {
     let src = "x <= `${@(a <= @(b <= 42))}`\nstdout(x)\n";
     let i = interp_out("f57_006fb_interp_b", src);
     let n = native_out("f57_006fb_native_b", src);
-    assert_eq!(n, i, "native must match the interpreter for a nested pack body");
+    assert_eq!(
+        n, i,
+        "native must match the interpreter for a nested pack body"
+    );
     assert!(i.contains("@(a <= @(b <= 42))"), "interp baseline: {i}");
 }
 
@@ -101,7 +107,10 @@ fn padded_nonexpr_interpolation_preserves_leading_space_on_both() {
     let src = "x <= `${  @(a: @(b <= 42))  }`\nstdout(x)\n";
     let i = interp_out("f57_006fb_interp_pad", src);
     let n = native_out("f57_006fb_native_pad", src);
-    assert_eq!(n, i, "native must match the interpreter for a padded non-expression body");
+    assert_eq!(
+        n, i,
+        "native must match the interpreter for a padded non-expression body"
+    );
     assert!(
         i.starts_with("  @(a: @(b <= 42))"),
         "interp must keep the leading spaces of the untrimmed body: {i:?}"

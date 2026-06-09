@@ -183,7 +183,10 @@ fn e1506_pipeline_injected_first_arg_type_checked() {
     );
     let e = stderr_text(&output);
     assert!(e.contains("[E1506]"), "expected [E1506], got: {e}");
-    assert!(e.contains("piped value"), "expected the pipe-injection note, got: {e}");
+    assert!(
+        e.contains("piped value"),
+        "expected the pipe-injection note, got: {e}"
+    );
 }
 
 /// No false reject: when the injected and written types both match the shifted

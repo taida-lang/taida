@@ -2721,7 +2721,10 @@ fn rewrite_idents(expr: &Expr, renames: &std::collections::HashMap<String, Strin
         ),
         Expr::MoldInst(name, type_args, fields, s) => Expr::MoldInst(
             name.clone(),
-            type_args.iter().map(|a| rewrite_idents(a, renames)).collect(),
+            type_args
+                .iter()
+                .map(|a| rewrite_idents(a, renames))
+                .collect(),
             rewrite_fields(fields),
             s.clone(),
         ),
