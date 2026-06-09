@@ -1637,10 +1637,12 @@ impl Lowering {
     ///
     /// An intermediate `=> name` step (where `name` is not a
     /// user-defined function or known builtin) acts as a
-    /// **bind-and-forward**: the current value is bound to `name` via
-    /// `DefVar` and passed through unchanged. Steps that explicitly
-    /// reference the bound `name` skip the classic auto-injection of
-    /// `prev_result` as an extra argument.
+    /// **bind-and-forward**: the current value is bound and passed through
+    /// unchanged, and steps that explicitly reference the bound `name` skip the
+    /// classic auto-injection of `prev_result` as an extra argument. The bind
+    /// targets a *fresh synthetic name* (not `name` itself) so an outer
+    /// same-named variable keeps its value across the pipeline, matching the
+    /// interpreter's child-scope binding.
     pub(super) fn lower_pipeline(
         &mut self,
         func: &mut IrFunction,
@@ -1656,6 +1658,15 @@ impl Lowering {
         let mut current = self.lower_expr(func, &exprs[0])?;
         let last_idx = exprs.len().saturating_sub(1);
         let mut bound_names: Vec<String> = Vec::new();
+        // F57B-007: each `=> name` bind is lowered to a *fresh synthetic* name
+        // rather than `name` itself, so the binding never overwrites an outer
+        // same-named variable's slot (the interpreter binds `=> name` in a child
+        // scope; a native/WASM `DefVar(name, ...)` clobbered the outer value — a
+        // parity violation). `bind_renames` maps each bound `name` to its
+        // synthetic; steps consuming the binding are rewritten to read the
+        // synthetic, while the outer `name` keeps its value/kind afterward.
+        let mut bind_renames: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
 
         for (step_idx, expr) in exprs[1..].iter().enumerate() {
             let i = step_idx + 1;
@@ -1664,17 +1675,38 @@ impl Lowering {
                 && let Expr::Ident(name, _) = expr
                 && !self.is_native_pipeline_callable_ident(name)
             {
-                func.push(IrInst::DefVar(name.clone(), current));
+                // Bind to a fresh synthetic so the outer `name` is untouched.
+                let synthetic = format!("__pipe_bind_{}_{}", self.lambda_counter, name);
+                self.lambda_counter += 1;
+                func.push(IrInst::DefVar(synthetic.clone(), current));
+                // Carry the forwarded value's static kind onto the synthetic so
+                // a later `=> name => ... _.toString()` / `... name.toString()`
+                // still dispatches on the right kind. The previous stage's expr
+                // is renamed through earlier binds first, so a chained forward
+                // (`true => a => b => ...`) propagates the kind stage by stage.
+                let prev_renamed = rewrite_idents(&exprs[i - 1], &bind_renames);
+                self.track_forwarded_pipe_type(&synthetic, &prev_renamed);
                 bound_names.push(name.clone());
+                bind_renames.insert(name.clone(), synthetic);
                 continue;
             }
-            // Step consumes a pipeline-scope binding explicitly → evaluate
-            // as-written, no auto-inject.
+            // Step consumes a pipeline-scope binding explicitly → evaluate as
+            // written (no auto-inject), with each bound name rewritten to its
+            // synthetic so the binding — not an outer same-named variable — is read.
             if !bound_names.is_empty() && native_expr_references_any_name(expr, &bound_names) {
-                current = self.lower_expr(func, expr)?;
+                let rewritten = rewrite_idents(expr, &bind_renames);
+                current = self.lower_expr(func, &rewritten)?;
                 continue;
             }
-            current = self.lower_pipeline_step(func, expr, current)?;
+            // Placeholder/transforming step: the incoming value's kind comes
+            // from the previous stage's expr, renamed through active binds so a
+            // bound name resolves to its synthetic's recorded kind.
+            if bind_renames.is_empty() {
+                current = self.lower_pipeline_step(func, expr, current, &exprs[i - 1])?;
+            } else {
+                let prev_renamed = rewrite_idents(&exprs[i - 1], &bind_renames);
+                current = self.lower_pipeline_step(func, expr, current, &prev_renamed)?;
+            }
         }
 
         Ok(current)
@@ -1694,12 +1726,59 @@ impl Lowering {
         name == "debug"
     }
 
+    /// Record the previous pipeline stage's static type on the synthetic
+    /// `__pipe_prev` binding so a placeholder consumer (`_.toString()`,
+    /// comparisons, ...) dispatches on the right kind. The native lowering
+    /// reads `bool_vars` / `float_vars` / `string_vars` for kind dispatch;
+    /// `__pipe_prev` is otherwise a kind-less `DefVar` that collapses
+    /// Bool/Float to the Int-display polymorphic path — e.g.
+    /// `flag => stdout(_.toString())` would print `1` instead of `true` on
+    /// native without this.
+    fn track_pipe_prev_type(&mut self, prev_expr: &Expr) {
+        self.track_forwarded_pipe_type("__pipe_prev", prev_expr);
+    }
+
+    /// Record `prev_expr`'s static type on `target` so a later placeholder /
+    /// bound consumer dispatches on the right kind. `target` is either the
+    /// synthetic `__pipe_prev` placeholder binding (`flag => stdout(_.toString())`)
+    /// or a `=> name` bind-and-forward synthetic (`true => x => stdout(_.toString())`,
+    /// where the kind must survive the intermediate binding). All six kind sets
+    /// are cleared first so a stage that forwards a different kind (or a kind
+    /// with no match) cannot leave a stale membership behind; the checks are
+    /// ordered most-specific-first (Bool/Float/String/Pack/List then Int as the
+    /// scalar fallback).
+    fn track_forwarded_pipe_type(&mut self, target: &str, prev_expr: &Expr) {
+        self.bool_vars.remove(target);
+        self.float_vars.remove(target);
+        self.string_vars.remove(target);
+        self.pack_vars.remove(target);
+        self.list_vars.remove(target);
+        self.int_vars.remove(target);
+        if self.expr_is_likely_bool(prev_expr) {
+            self.bool_vars.insert(target.to_string());
+        } else if self.expr_returns_float(prev_expr) {
+            self.float_vars.insert(target.to_string());
+        } else if self.expr_is_string_full(prev_expr) {
+            self.string_vars.insert(target.to_string());
+        } else if self.expr_is_pack(prev_expr) {
+            self.pack_vars.insert(target.to_string());
+        } else if self.expr_is_list(prev_expr) {
+            self.list_vars.insert(target.to_string());
+        } else if self.expr_is_int(prev_expr) {
+            self.int_vars.insert(target.to_string());
+        }
+    }
+
     pub(super) fn lower_pipeline_step(
         &mut self,
         func: &mut IrFunction,
         expr: &Expr,
         prev_result: IrVar,
+        prev_expr: &Expr,
     ) -> Result<IrVar, LowerError> {
+        // POST-STABLE-007: track the previous stage's static type on
+        // `__pipe_prev` before lowering this step (see `track_pipe_prev_type`).
+        self.track_pipe_prev_type(prev_expr);
         match expr {
             // f(_) → f(prev_result)
             Expr::FuncCall(callee, args, span) => {
@@ -2501,25 +2580,40 @@ impl Lowering {
 
                 // Parse the interpolation expression using the full Taida parser.
                 let (program, errors) = crate::parser::parse(expr_str_trimmed);
-                let str_var = if errors.is_empty()
-                    && !program.statements.is_empty()
-                    && let crate::parser::Statement::Expr(ref parsed_expr) = program.statements[0]
-                {
-                    // Lower the parsed expression and convert to string
-                    let expr_var = self.lower_expr(func, parsed_expr)?;
-                    self.convert_to_string(func, parsed_expr, expr_var)?
+                // Mirror the interpreter (`eval_template_string`) exactly, which
+                // has three cases (F56-FB-006):
+                //   1. parsed as an expression  → lower + stringify
+                //   2. parsed but NOT an expression (e.g. an assignment
+                //      `${x <= 1}`) → the interpreter emits nothing, so emit ""
+                //   3. failed to parse / empty (e.g. a parser-rejected literal
+                //      `${@(a: @(b <= 42))}`) → emit the raw body text verbatim
+                // The previous code collapsed cases 2 and 3 into a bare-variable
+                // read (rendering `0` on native) and, after the first fix, into
+                // a single raw-text fallback (which left case 2 emitting the raw
+                // body while the interpreter emits nothing). Splitting the three
+                // cases keeps `${...}` parity with the interpreter. (A parse-
+                // *successful* undefined identifier `${undefinedVar}` takes
+                // case 1 above, not the fallback; its interp(error)/native(0)
+                // divergence is a separate, unrelated gap.)
+                let str_var = if errors.is_empty() && !program.statements.is_empty() {
+                    if let crate::parser::Statement::Expr(ref parsed_expr) = program.statements[0] {
+                        // Case 1: lower the parsed expression and convert to string.
+                        let expr_var = self.lower_expr(func, parsed_expr)?;
+                        self.convert_to_string(func, parsed_expr, expr_var)?
+                    } else {
+                        // Case 2: parsed as a non-expression statement; the
+                        // interpreter emits nothing, so produce the empty string.
+                        let lit = func.alloc_var();
+                        func.push(IrInst::ConstStr(lit, String::new()));
+                        lit
+                    }
                 } else {
-                    // Fallback: treat as simple variable name (backward compat)
-                    let var_name = expr_str_trimmed.to_string();
-                    let name_var = func.alloc_var();
-                    func.push(IrInst::UseVar(name_var, var_name.clone()));
-                    let v = func.alloc_var();
-                    func.push(IrInst::Call(
-                        v,
-                        "taida_polymorphic_to_string".to_string(),
-                        vec![name_var],
-                    ));
-                    v
+                    // Case 3: did not parse as a program (parser-rejected body)
+                    // or empty — emit the raw body text verbatim, as the
+                    // interpreter does.
+                    let lit = func.alloc_var();
+                    func.push(IrInst::ConstStr(lit, expr_str.clone()));
+                    lit
                 };
                 let concat_var = func.alloc_var();
                 func.push(IrInst::Call(
@@ -2555,6 +2649,128 @@ impl Lowering {
         }
 
         Ok(result_var)
+    }
+}
+
+/// Substitute identifiers per `renames` (real name → synthetic) throughout
+/// `expr`, returning a rewritten copy. Used by `lower_pipeline` to redirect a
+/// step's references to a `=> name` bind from the (untouched) outer variable to
+/// the pipeline-local synthetic. Capture-avoiding: a `Lambda` whose parameters
+/// shadow a renamed name keeps that name un-substituted inside its body.
+///
+/// Variant coverage is kept consistent with `native_expr_references_any_name`
+/// (the gate that decides whether a step references a bound name): both descend
+/// the same expression variants, so any reference the gate detects is rewritten
+/// here. Neither descends into a `TemplateLit`'s interpolation text (re-parsed
+/// on its own elsewhere) nor into non-`Expr` statements inside a `CondArm` body;
+/// the parser cannot place a pipeline-bound-name reference in those positions
+/// mid-pipeline, so they are left as-is. If that ever changes, the gate and this
+/// rewriter must grow together. Literals and other leaves are returned unchanged.
+fn rewrite_idents(expr: &Expr, renames: &std::collections::HashMap<String, String>) -> Expr {
+    if renames.is_empty() {
+        return expr.clone();
+    }
+    let rewrite_fields = |fields: &[BuchiField]| -> Vec<BuchiField> {
+        fields
+            .iter()
+            .map(|f| BuchiField {
+                name: f.name.clone(),
+                value: rewrite_idents(&f.value, renames),
+                span: f.span.clone(),
+            })
+            .collect()
+    };
+    match expr {
+        Expr::Ident(name, span) => match renames.get(name) {
+            Some(syn) => Expr::Ident(syn.clone(), span.clone()),
+            None => expr.clone(),
+        },
+        Expr::BinaryOp(l, op, r, s) => Expr::BinaryOp(
+            Box::new(rewrite_idents(l, renames)),
+            op.clone(),
+            Box::new(rewrite_idents(r, renames)),
+            s.clone(),
+        ),
+        Expr::UnaryOp(op, inner, s) => Expr::UnaryOp(
+            op.clone(),
+            Box::new(rewrite_idents(inner, renames)),
+            s.clone(),
+        ),
+        Expr::FuncCall(callee, args, s) => Expr::FuncCall(
+            Box::new(rewrite_idents(callee, renames)),
+            args.iter().map(|a| rewrite_idents(a, renames)).collect(),
+            s.clone(),
+        ),
+        Expr::MethodCall(obj, m, args, s) => Expr::MethodCall(
+            Box::new(rewrite_idents(obj, renames)),
+            m.clone(),
+            args.iter().map(|a| rewrite_idents(a, renames)).collect(),
+            s.clone(),
+        ),
+        Expr::FieldAccess(obj, f, s) => {
+            Expr::FieldAccess(Box::new(rewrite_idents(obj, renames)), f.clone(), s.clone())
+        }
+        Expr::BuchiPack(fields, s) => Expr::BuchiPack(rewrite_fields(fields), s.clone()),
+        Expr::ListLit(items, s) => Expr::ListLit(
+            items.iter().map(|x| rewrite_idents(x, renames)).collect(),
+            s.clone(),
+        ),
+        Expr::Pipeline(steps, s) => Expr::Pipeline(
+            steps.iter().map(|x| rewrite_idents(x, renames)).collect(),
+            s.clone(),
+        ),
+        Expr::MoldInst(name, type_args, fields, s) => Expr::MoldInst(
+            name.clone(),
+            type_args.iter().map(|a| rewrite_idents(a, renames)).collect(),
+            rewrite_fields(fields),
+            s.clone(),
+        ),
+        Expr::TypeInst(name, fields, s) => {
+            Expr::TypeInst(name.clone(), rewrite_fields(fields), s.clone())
+        }
+        Expr::Unmold(inner, s) => Expr::Unmold(Box::new(rewrite_idents(inner, renames)), s.clone()),
+        Expr::Throw(inner, s) => Expr::Throw(Box::new(rewrite_idents(inner, renames)), s.clone()),
+        Expr::CondBranch(arms, s) => Expr::CondBranch(
+            arms.iter()
+                .map(|arm| crate::parser::CondArm {
+                    condition: arm.condition.as_ref().map(|c| rewrite_idents(c, renames)),
+                    body: arm
+                        .body
+                        .iter()
+                        .map(|st| match st {
+                            Statement::Expr(e) => Statement::Expr(rewrite_idents(e, renames)),
+                            other => other.clone(),
+                        })
+                        .collect(),
+                    span: arm.span.clone(),
+                })
+                .collect(),
+            s.clone(),
+        ),
+        Expr::Lambda(params, body, s) => {
+            // Capture-avoidance: a parameter that shadows a renamed name keeps
+            // that name bound to the parameter inside the body, so drop it from
+            // the rename set before recursing.
+            if params.iter().any(|p| renames.contains_key(&p.name)) {
+                let filtered: std::collections::HashMap<String, String> = renames
+                    .iter()
+                    .filter(|(k, _)| !params.iter().any(|p| &p.name == *k))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                Expr::Lambda(
+                    params.clone(),
+                    Box::new(rewrite_idents(body, &filtered)),
+                    s.clone(),
+                )
+            } else {
+                Expr::Lambda(
+                    params.clone(),
+                    Box::new(rewrite_idents(body, renames)),
+                    s.clone(),
+                )
+            }
+        }
+        _ => expr.clone(),
     }
 }
 
