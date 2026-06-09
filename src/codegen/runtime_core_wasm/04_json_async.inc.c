@@ -1940,4 +1940,7 @@ extern int64_t _taida_main(void);
 
 void _start(void) {
     _taida_main();
+#ifdef TAIDA_PERF_COUNTERS
+    wasm_perf_dump();
+#endif
 }

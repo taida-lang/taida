@@ -86,6 +86,50 @@ static void write_stdout(const char *buf, int32_t len) {
     __wasi_fd_write(1, &iov, 1, &nwritten);
 }
 
+/* Allocation counters for the perf measurement build (mirror of the native
+   TAIDA_PERF_COUNTERS hooks). WASM execution is single-threaded, so plain
+   increments suffice. wasm_perf_dump() runs at the tail of `_start` and
+   writes one machine-parsable line to stderr (fd=2) using only stack
+   buffers — the dump must not itself allocate, since it reports on the
+   allocator. The normal build compiles every hook away to a no-op. */
+#ifdef TAIDA_PERF_COUNTERS
+static unsigned long long wasm_perf_alloc_calls;
+static unsigned long long wasm_perf_alloc_bytes;
+static unsigned long long wasm_perf_arena_enters;
+#define WASM_PERF_INC(c) ((c) += 1ULL)
+#define WASM_PERF_ADD(c, n) ((c) += (unsigned long long)(n))
+static int32_t wasm_perf_format_u64(char *dst, unsigned long long v) {
+    char tmp[20];
+    int32_t n = 0;
+    if (v == 0) { dst[0] = '0'; return 1; }
+    while (v > 0) { tmp[n++] = (char)('0' + (char)(v % 10ULL)); v /= 10ULL; }
+    for (int32_t i = 0; i < n; i++) dst[i] = tmp[n - 1 - i];
+    return n;
+}
+static void wasm_perf_append(char *buf, int32_t *off, const char *s) {
+    while (*s) buf[(*off)++] = *s++;
+}
+static void wasm_perf_dump(void) {
+    char buf[128];
+    int32_t off = 0;
+    wasm_perf_append(buf, &off, "TAIDA_PERF wasm alloc_calls=");
+    off += wasm_perf_format_u64(buf + off, wasm_perf_alloc_calls);
+    wasm_perf_append(buf, &off, " alloc_bytes=");
+    off += wasm_perf_format_u64(buf + off, wasm_perf_alloc_bytes);
+    wasm_perf_append(buf, &off, " arena_enters=");
+    off += wasm_perf_format_u64(buf + off, wasm_perf_arena_enters);
+    buf[off++] = '\n';
+    wasi_ciovec iov;
+    iov.buf = (int32_t)(intptr_t)buf;
+    iov.len = off;
+    int32_t nwritten;
+    __wasi_fd_write(2, &iov, 1, &nwritten);
+}
+#else
+#define WASM_PERF_INC(c) ((void)0)
+#define WASM_PERF_ADD(c, n) ((void)0)
+#endif
+
 /* ── libc stubs (no libc in freestanding wasm) ── */
 /* clang may emit calls to memcpy/memset even for manual loops at -O2.
    Provide minimal implementations for the WASM freestanding environment. */
@@ -128,6 +172,8 @@ void *wasm_alloc(unsigned int size) {
 
     unsigned int result = bump_ptr;
     bump_ptr += size;
+    WASM_PERF_INC(wasm_perf_alloc_calls);
+    WASM_PERF_ADD(wasm_perf_alloc_bytes, size);
 
     /* Check if we need to grow memory */
     unsigned int pages_needed = (bump_ptr + 65535) / 65536;
@@ -191,6 +237,7 @@ int32_t wasm_arena_enter(void) {
         /* Force lazy init so the first enter captures a real __heap_base. */
         (void)wasm_alloc(0);
     }
+    WASM_PERF_INC(wasm_perf_arena_enters);
     return (int32_t)bump_ptr;
 }
 

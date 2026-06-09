@@ -133,7 +133,14 @@ mod tests {
         // 2026-06-09 F56-FB-002: +830 bytes for the non-sealed first-arg reject in
         //   taida_hmac_sha256_secret / taida_constant_time_eq_secret
         //   (02_containers.inc.c; parity with interpreter/JS throw). 458,292 -> 459,122.
-        const EXPECTED_TOTAL_LEN: usize = 459_122;
+        // 2026-06-10 F58 T-M: +2,019 bytes for the TAIDA_PERF_COUNTERS
+        //   measurement-build hooks — counter block + stack-only stderr dump +
+        //   wasm_alloc / wasm_arena_enter hooks (01_core.inc.c) and the
+        //   #ifdef'd wasm_perf_dump() call at the tail of _start
+        //   (04_json_async.inc.c). Compiled in only with -DTAIDA_PERF_COUNTERS
+        //   (env-gated dev build; participates in the runtime .o cache key).
+        //   459,122 -> 461,141.
+        const EXPECTED_TOTAL_LEN: usize = 461_141;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),
@@ -148,9 +155,12 @@ mod tests {
             "first bytes of assembled source must match the historical header"
         );
         // Anchor the last meaningful lines to the WASI entry point —
-        // catches accidental truncation of the tail fragment.
+        // catches accidental truncation of the tail fragment. The _start
+        // body tail gained the #ifdef'd perf-dump call in F58 T-M.
         assert!(
-            asm.trim_end().ends_with("_taida_main();\n}"),
+            asm.trim_end().ends_with(
+                "_taida_main();\n#ifdef TAIDA_PERF_COUNTERS\n    wasm_perf_dump();\n#endif\n}"
+            ),
             "tail of assembled source must end with _start body + closing brace"
         );
     }

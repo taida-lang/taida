@@ -844,7 +844,13 @@ mod tests {
         //   (parity with the interpreter/JS, which throw; closes the `--no-check`
         //   pass-through. Definitions sit after the marker -> F2, so F1_LEN is
         //   unchanged). 1,295,944 -> 1,296,814.
-        const EXPECTED_TOTAL_LEN: usize = 1_296_814;
+        // 2026-06-10 F58 T-M (core.c): +2,384 bytes for the TAIDA_PERF_COUNTERS
+        //   measurement-build hooks (counter block + destructor stderr dump +
+        //   hooks in safe_malloc / freelist pops / arena alloc / request reset).
+        //   Compiled in only with -DTAIDA_PERF_COUNTERS (env-gated dev build);
+        //   the normal build reduces every hook to a no-op. All before the
+        //   marker -> F1. 1,296,814 -> 1,299,198.
+        const EXPECTED_TOTAL_LEN: usize = 1_299_198;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1548,7 +1554,13 @@ mod tests {
         // 2026-06-09 F56 Phase 6+ review: the polymorphic contains/index_of/
         //   last_index_of receiver guards are before the marker: +462 bytes.
         //   F1_LEN 390,445 -> 390,907.
-        const F1_LEN: usize = 390_907;
+        // 2026-06-10 F58 T-M: TAIDA_PERF_COUNTERS measurement-build hooks —
+        //   counter block + destructor dump after the includes, hooks in
+        //   taida_safe_malloc / pack4 + list freelist pops / str freelist
+        //   reuse / taida_arena_alloc / taida_arena_request_reset. All sit
+        //   before the Error-ceiling marker; the normal build compiles them
+        //   away (#ifdef). +2,384 bytes. F1_LEN 390,907 -> 393,291.
+        const F1_LEN: usize = 393_291;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

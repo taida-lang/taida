@@ -20,6 +20,39 @@
 #include <sys/random.h>
 #endif
 
+// Allocation-path counters for the perf measurement build. Compiled in only
+// with -DTAIDA_PERF_COUNTERS (the normal build reduces every hook to a
+// no-op). Counters are process-global with relaxed atomic adds so worker
+// threads are counted exactly without imposing ordering cost; the dump runs
+// as a destructor after main() returns and emits a single machine-parsable
+// line on stderr.
+#ifdef TAIDA_PERF_COUNTERS
+static unsigned long long taida_perf_arena_calls;
+static unsigned long long taida_perf_arena_bytes;
+static unsigned long long taida_perf_malloc_calls;
+static unsigned long long taida_perf_malloc_bytes;
+static unsigned long long taida_perf_freelist_hits;
+static unsigned long long taida_perf_arena_resets;
+#define TAIDA_PERF_INC(c) __atomic_fetch_add(&(c), 1ULL, __ATOMIC_RELAXED)
+#define TAIDA_PERF_ADD(c, n) \
+    __atomic_fetch_add(&(c), (unsigned long long)(n), __ATOMIC_RELAXED)
+__attribute__((destructor)) static void taida_perf_dump(void) {
+    fprintf(stderr,
+            "TAIDA_PERF native arena_calls=%llu arena_bytes=%llu "
+            "malloc_calls=%llu malloc_bytes=%llu freelist_hits=%llu "
+            "arena_resets=%llu\n",
+            __atomic_load_n(&taida_perf_arena_calls, __ATOMIC_RELAXED),
+            __atomic_load_n(&taida_perf_arena_bytes, __ATOMIC_RELAXED),
+            __atomic_load_n(&taida_perf_malloc_calls, __ATOMIC_RELAXED),
+            __atomic_load_n(&taida_perf_malloc_bytes, __ATOMIC_RELAXED),
+            __atomic_load_n(&taida_perf_freelist_hits, __ATOMIC_RELAXED),
+            __atomic_load_n(&taida_perf_arena_resets, __ATOMIC_RELAXED));
+}
+#else
+#define TAIDA_PERF_INC(c) ((void)0)
+#define TAIDA_PERF_ADD(c, n) ((void)0)
+#endif
+
 // FL-9: Safe realloc wrapper — aborts on NULL with a diagnostic message.
 // Usage: TAIDA_REALLOC(ptr, new_size, context_label)
 // ptr is reassigned in-place; on failure, prints OOM message and exits.
@@ -39,6 +72,8 @@ static inline void *taida_safe_malloc(size_t size, const char *label) {
     if (size == 0) size = 1;
     void *p = malloc(size);
     if (!p) { fprintf(stderr, "taida: out of memory (%s)\n", label); exit(1); }
+    TAIDA_PERF_INC(taida_perf_malloc_calls);
+    TAIDA_PERF_ADD(taida_perf_malloc_bytes, size);
     // C26B-024 (Round 10 / wepsilon Step 4): track heap extent so
     // taida_ptr_is_readable can skip mincore for heap pointers.
     // (Inline expansion — heap_range globals declared later via __thread; we
@@ -472,6 +507,7 @@ static __thread int taida_pack4_freelist_count = 0;
 // Returns NULL if the freelist is empty — caller must fall back to malloc.
 static inline taida_val *taida_pack4_freelist_pop(void) {
     if (taida_pack4_freelist_count == 0) return NULL;
+    TAIDA_PERF_INC(taida_perf_freelist_hits);
     return taida_pack4_freelist[--taida_pack4_freelist_count];
 }
 
@@ -505,6 +541,7 @@ static __thread int taida_list_freelist_count = 0;
 
 static inline taida_val *taida_list_freelist_pop(void) {
     if (taida_list_freelist_count == 0) return NULL;
+    TAIDA_PERF_INC(taida_perf_freelist_hits);
     return taida_list_freelist[--taida_list_freelist_count];
 }
 
@@ -653,6 +690,8 @@ static void *taida_arena_alloc(size_t size) {
         if (c->offset + aligned <= c->size) {
             void *p = c->base + c->offset;
             c->offset += aligned;
+            TAIDA_PERF_INC(taida_perf_arena_calls);
+            TAIDA_PERF_ADD(taida_perf_arena_bytes, aligned);
             return p;
         }
     }
@@ -665,6 +704,8 @@ static void *taida_arena_alloc(size_t size) {
     c->size = TAIDA_ARENA_CHUNK_SIZE;
     taida_arena_active_chunk = taida_arena_chunk_count;
     taida_arena_chunk_count++;
+    TAIDA_PERF_INC(taida_perf_arena_calls);
+    TAIDA_PERF_ADD(taida_perf_arena_bytes, aligned);
     return base;
 }
 
@@ -718,6 +759,7 @@ static void *taida_arena_alloc(size_t size) {
  *     B) are not arena-backed and are unaffected by this reset.
  */
 static void taida_arena_request_reset(void) {
+    TAIDA_PERF_INC(taida_perf_arena_resets);
     /* Drain pack4 freelist: arena entries die with arena reset, malloc
      * entries must be freed. Distinguish via taida_arena_contains. */
     for (int i = 0; i < taida_pack4_freelist_count; i++) {
@@ -3128,6 +3170,10 @@ static char* taida_str_alloc(size_t len) {
             cached[1] = (taida_val)len;
             char *bytes = (char*)(cached + 2);
             bytes[len] = '\0';
+            // Counted here (not in the pop helper) because a popped slot can
+            // still be dropped by the capacity check above — only an actual
+            // reuse is a freelist hit.
+            TAIDA_PERF_INC(taida_perf_freelist_hits);
             return bytes;
         }
     }
