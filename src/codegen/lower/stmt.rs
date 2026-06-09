@@ -1193,7 +1193,7 @@ impl Lowering {
         Ok(ir_func)
     }
 
-    /// F58 P2-2: runtime calls that neither retain their arguments nor
+    /// Runtime calls that neither retain their arguments nor
     /// register pointers anywhere — safe to appear inside an
     /// iteration-scope watermark. Anything outside this list (or any
     /// CallUser / CallIndirect / MakeClosure / FuncAddr / GlobalSet)
@@ -1289,7 +1289,7 @@ impl Lowering {
         "taida_list_elem_release",
     ];
 
-    /// F58 P2-2: the subset of loop-visible operations that can actually
+    /// The subset of loop-visible operations that can actually
     /// allocate from the arena. A loop whose body never allocates gains
     /// nothing from the watermark and would pay one reset call per
     /// iteration (a 300M-iteration scalar loop measured ~14x slower), so
@@ -2088,7 +2088,7 @@ impl Lowering {
         }
     }
 
-    /// F58 P2-4 (first stage of the escape-analysis design): fuse the
+    /// First stage of the escape-analysis design: fuse the
     /// direct form `Mold[...]() >=> v` when the unmold result is
     /// statically known and carries no allocation:
     ///

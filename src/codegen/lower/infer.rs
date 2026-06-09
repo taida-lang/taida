@@ -552,7 +552,7 @@ impl Lowering {
         self.shadow_kind_vars.insert(target.to_string());
     }
 
-    /// QF-34 / F58B-003: record the assignment-time inner type for
+    /// Record the assignment-time inner type for
     /// `x <= Mold[...]()` so a later `x >=> val` can land `val` in the
     /// right typed set. For `Lax[arg]()` the *inner* kind is recorded
     /// when statically known — the mold name "Lax" alone carries no

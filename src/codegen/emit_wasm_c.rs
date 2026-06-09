@@ -482,7 +482,7 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
     Ok(c)
 }
 
-/// F58: collect every distinct string literal (recursing into cond arms)
+/// Collect every distinct string literal (recursing into cond arms)
 /// for the header-carrying static table.
 fn collect_string_literals(
     insts: &[IrInst],
