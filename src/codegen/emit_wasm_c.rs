@@ -805,6 +805,13 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             "int64_t taida_abi_host_cage(int64_t capability, int64_t call);".to_string()
         }
         // W-5: Lax runtime functions
+        // F58 P2-2: iteration-scope watermark hooks (wrappers over
+        // wasm_arena_enter/leave in 01_core; available on every profile).
+        "taida_arena_iter_enter" => "int64_t taida_arena_iter_enter(void);".to_string(),
+        "taida_arena_iter_reset" => {
+            "int64_t taida_arena_iter_reset(int64_t mark);".to_string()
+        }
+        "taida_arena_iter_exit" => "int64_t taida_arena_iter_exit(int64_t mark);".to_string(),
         "taida_lax_new" => {
             "int64_t taida_lax_new(int64_t value, int64_t default_value);".to_string()
         }
@@ -1764,6 +1771,23 @@ fn emit_inst(
             writeln!(c, "{}v_{} = nv_{};", indent, dst, sanitize_name(name)).unwrap();
         }
         IrInst::Call(dst, name, args) => {
+            // F58 P2-2: the iteration-scope watermark stays disabled on
+            // WASM for now. The rewind makes the allocator hand out the
+            // SAME addresses every iteration, so a live string keeps
+            // sitting at a fixed low address — and the WASM string
+            // identification is still heuristic (printable first byte),
+            // so a monotonically growing Int accumulator eventually
+            // EQUALS that address and gets displayed as the string
+            // (reproduced: a 50k-iteration concat loop printed "abcdef"
+            // instead of 300000). Native is immune (hidden-header magic
+            // is required). Re-enable when WASM strings carry headers.
+            if name == "taida_arena_iter_enter"
+                || name == "taida_arena_iter_reset"
+                || name == "taida_arena_iter_exit"
+            {
+                writeln!(c, "{}v_{} = 0;", indent, dst).unwrap();
+                return Ok(());
+            }
             // void-returning functions: RC no-ops + tag setters + gorilla (noreturn)
             if name == "taida_retain"
                 || name == "taida_release"

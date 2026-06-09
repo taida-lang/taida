@@ -253,6 +253,24 @@ void wasm_arena_leave(int32_t saved) {
     bump_ptr = target;
 }
 
+/* F58 P2-2: shared-IR iteration-scope hooks. The lowerer emits the same
+   taida_arena_iter_* calls for every backend; on WASM the bump
+   allocator's single watermark maps directly onto wasm_arena_enter /
+   wasm_arena_leave. There are no freelists here, so exit is a no-op. */
+int64_t taida_arena_iter_enter(void) {
+    return (int64_t)wasm_arena_enter();
+}
+
+int64_t taida_arena_iter_reset(int64_t mark) {
+    wasm_arena_leave((int32_t)mark);
+    return 0;
+}
+
+int64_t taida_arena_iter_exit(int64_t mark) {
+    (void)mark;
+    return 0;
+}
+
 int32_t wasm_arena_used(void) {
     if (bump_ptr == 0) {
         return 0;

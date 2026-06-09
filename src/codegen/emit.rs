@@ -1221,6 +1221,19 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         },
 
         // ── Lax ──
+        // ── F58 P2-2: iteration-scope arena watermark ──
+        "taida_arena_iter_enter" => RuntimeAbi {
+            params: &[],
+            returns: &[Val],
+        },
+        "taida_arena_iter_reset" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_arena_iter_exit" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
         "taida_lax_new" => RuntimeAbi {
             params: &[Val, Val],
             returns: &[Ptr],

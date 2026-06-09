@@ -1185,7 +1185,278 @@ impl Lowering {
         // Value-tag track: restore the caller scope's shadow kinds.
         self.shadow_kind_vars = prev_shadow_kinds;
 
+        // F58 P2-2: wrap provably escape-free tail-recursive loops in an
+        // iteration-scope arena watermark (enter at entry, reset right
+        // before each loop back-edge, exit before return).
+        Self::maybe_insert_iter_scope(&mut ir_func, func_def);
+
         Ok(ir_func)
+    }
+
+    /// F58 P2-2: runtime calls that neither retain their arguments nor
+    /// register pointers anywhere — safe to appear inside an
+    /// iteration-scope watermark. Anything outside this list (or any
+    /// CallUser / CallIndirect / MakeClosure / FuncAddr / GlobalSet)
+    /// disqualifies the loop, keeping the analysis fail-closed: an
+    /// unknown call might stash an arena pointer (async spawn keeps its
+    /// argument for a worker thread; the enum-descriptor registry keeps
+    /// the pack pointer itself), which a scope reset would dangle.
+    const ITER_SCOPE_CALL_WHITELIST: &'static [&'static str] = &[
+        // scalar arithmetic / comparison / logic
+        "taida_int_add",
+        "taida_int_sub",
+        "taida_int_mul",
+        "taida_int_neg",
+        "taida_int_eq",
+        "taida_int_neq",
+        "taida_int_lt",
+        "taida_int_gt",
+        "taida_int_gte",
+        "taida_int_lte",
+        "taida_int_to_float",
+        "taida_float_add",
+        "taida_float_sub",
+        "taida_float_mul",
+        "taida_float_neg",
+        "taida_float_eq",
+        "taida_float_neq",
+        "taida_float_lt",
+        "taida_float_gt",
+        "taida_float_gte",
+        "taida_float_lte",
+        "taida_bool_and",
+        "taida_bool_or",
+        "taida_bool_not",
+        "taida_poly_add",
+        "taida_poly_eq",
+        "taida_poly_neq",
+        "taida_poly_eq_tagged",
+        "taida_poly_neq_tagged",
+        // mold construction / unmold (build into the arena, retain nothing)
+        "taida_lax_new",
+        "taida_lax_empty",
+        "taida_lax_tag_value_default",
+        "taida_lax_value_ekind",
+        "taida_generic_unmold",
+        "taida_lax_unmold",
+        "taida_gorillax_unmold",
+        "taida_relaxed_gorillax_unmold",
+        "taida_div_mold",
+        "taida_mod_mold",
+        "taida_div_mold_f",
+        "taida_mod_mold_f",
+        // pack plumbing (writes into the pack being built / reads fields);
+        // taida_register_field_name only records the static field-name
+        // string for display, never the pack pointer.
+        "taida_pack_set_hash",
+        "taida_pack_set_tag",
+        "taida_pack_get",
+        "taida_pack_get_idx",
+        "taida_pack_get_field_tag",
+        "taida_pack_has_hash",
+        // field-name / field-type display registries record the hash, a
+        // static literal name and an integer tag — never the pack pointer
+        // (unlike taida_register_pack_field_enum, which stays excluded).
+        "taida_register_field_name",
+        "taida_register_field_type",
+        // collection construction local to the iteration
+        "taida_list_new",
+        "taida_list_push",
+        "taida_list_note_push_ekind",
+        "taida_list_set_elem_tag",
+        "taida_list_get",
+        "taida_set_from_list",
+        "taida_collection_size",
+        // immediate output (fprintf-and-return, no retention)
+        "taida_io_stdout_with_tag",
+        "taida_io_stderr_with_tag",
+        "taida_stdout_display_string",
+        // call-site tag stack (push/pop pairs of plain integers)
+        "taida_push_call_tags",
+        "taida_pop_call_tags",
+        "taida_set_call_arg_tag",
+        "taida_get_call_arg_tag",
+        "taida_set_return_tag",
+        "taida_get_return_tag",
+        // reference counting: adjusts the header counter / recycles dead
+        // objects; never registers the pointer anywhere. The freelist
+        // push inside release is iteration-scope aware (depth gate).
+        "taida_retain",
+        "taida_release",
+        "taida_str_retain",
+        "taida_str_release",
+        "taida_list_elem_retain",
+        "taida_list_elem_release",
+    ];
+
+    /// F58 P2-2: the subset of loop-visible operations that can actually
+    /// allocate from the arena. A loop whose body never allocates gains
+    /// nothing from the watermark and would pay one reset call per
+    /// iteration (a 300M-iteration scalar loop measured ~14x slower), so
+    /// the scope is only inserted when at least one of these appears.
+    const ITER_SCOPE_ALLOCATING_CALLS: &'static [&'static str] = &[
+        "taida_lax_new",
+        "taida_lax_empty",
+        "taida_div_mold",
+        "taida_mod_mold",
+        "taida_div_mold_f",
+        "taida_mod_mold_f",
+        "taida_list_new",
+        "taida_list_push",
+        "taida_set_from_list",
+        "taida_stdout_display_string",
+        "taida_poly_add",
+    ];
+
+    fn iter_scope_insts_allocate(insts: &[IrInst]) -> bool {
+        insts.iter().any(|inst| match inst {
+            IrInst::PackNew(_, _) => true,
+            IrInst::Call(_, name, _) => Self::ITER_SCOPE_ALLOCATING_CALLS.contains(&name.as_str()),
+            IrInst::CondBranch(_, arms) => arms
+                .iter()
+                .any(|arm| Self::iter_scope_insts_allocate(&arm.body)),
+            _ => false,
+        })
+    }
+
+    fn ir_insts_contain_tail_call(insts: &[IrInst]) -> bool {
+        insts.iter().any(|inst| match inst {
+            IrInst::TailCall(_) => true,
+            IrInst::CondBranch(_, arms) => arms
+                .iter()
+                .any(|arm| Self::ir_insts_contain_tail_call(&arm.body)),
+            _ => false,
+        })
+    }
+
+    /// Debug helper for TAIDA_DEBUG_ITER_SCOPE: name the first
+    /// instruction that disqualified the loop.
+    fn iter_scope_first_unsafe(insts: &[IrInst]) -> Option<String> {
+        for inst in insts {
+            match inst {
+                IrInst::GlobalSet(_, _) => return Some("GlobalSet".to_string()),
+                IrInst::MakeClosure(_, _, _) => return Some("MakeClosure".to_string()),
+                IrInst::CallIndirect(_, _, _) => return Some("CallIndirect".to_string()),
+                IrInst::CallUser(_, name, _) => return Some(format!("CallUser {name}")),
+                IrInst::FuncAddr(_, _) => return Some("FuncAddr".to_string()),
+                IrInst::Call(_, name, _)
+                    if !Self::ITER_SCOPE_CALL_WHITELIST.contains(&name.as_str()) =>
+                {
+                    return Some(format!("Call {name}"));
+                }
+                IrInst::CondBranch(_, arms) => {
+                    for arm in arms {
+                        if let Some(r) = Self::iter_scope_first_unsafe(&arm.body) {
+                            return Some(r);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn iter_scope_insts_safe(insts: &[IrInst]) -> bool {
+        insts.iter().all(|inst| match inst {
+            IrInst::GlobalSet(_, _)
+            | IrInst::MakeClosure(_, _, _)
+            | IrInst::CallIndirect(_, _, _)
+            | IrInst::CallUser(_, _, _)
+            | IrInst::FuncAddr(_, _) => false,
+            IrInst::Call(_, name, _) => Self::ITER_SCOPE_CALL_WHITELIST.contains(&name.as_str()),
+            IrInst::CondBranch(_, arms) => arms
+                .iter()
+                .all(|arm| Self::iter_scope_insts_safe(&arm.body)),
+            _ => true,
+        })
+    }
+
+    fn maybe_insert_iter_scope(ir_func: &mut IrFunction, func_def: &FuncDef) {
+        if !Self::ir_insts_contain_tail_call(&ir_func.body) {
+            return;
+        }
+        // Every parameter must be a scalar-annotated value: the TailCall
+        // arguments become the next iteration's parameters, so scalar
+        // params guarantee nothing allocated inside the scope survives
+        // the back-edge reset.
+        let all_scalar = !func_def.params.is_empty()
+            && func_def.params.iter().all(|p| {
+                matches!(
+                    &p.type_annotation,
+                    Some(crate::parser::TypeExpr::Named(n))
+                        if n == "Int" || n == "Num" || n == "Float" || n == "Bool"
+                )
+            });
+        if !all_scalar {
+            return;
+        }
+        if !Self::iter_scope_insts_safe(&ir_func.body) {
+            if std::env::var("TAIDA_DEBUG_ITER_SCOPE").is_ok() {
+                eprintln!(
+                    "iter-scope reject ({}): {}",
+                    ir_func.name,
+                    Self::iter_scope_first_unsafe(&ir_func.body)
+                        .unwrap_or_else(|| "unknown".to_string())
+                );
+            }
+            return;
+        }
+        if !Self::iter_scope_insts_allocate(&ir_func.body) {
+            if std::env::var("TAIDA_DEBUG_ITER_SCOPE").is_ok() {
+                eprintln!("iter-scope skip ({}): allocation-free body", ir_func.name);
+            }
+            return;
+        }
+
+        let mark = ir_func.alloc_var();
+        let mut counter_seed = mark;
+        Self::insert_iter_scope_hooks(&mut ir_func.body, mark, &mut counter_seed);
+        ir_func.body.insert(
+            0,
+            IrInst::Call(mark, "taida_arena_iter_enter".to_string(), vec![]),
+        );
+        // insert_iter_scope_hooks allocated dummy vars past `mark`;
+        // reflect them in the function's counter so any later pass never
+        // collides with them.
+        if counter_seed >= ir_func.next_var {
+            ir_func.next_var = counter_seed + 1;
+        }
+    }
+
+    fn insert_iter_scope_hooks(insts: &mut Vec<IrInst>, mark: IrVar, next_var: &mut IrVar) {
+        let mut i = 0;
+        while i < insts.len() {
+            match &mut insts[i] {
+                IrInst::TailCall(_) => {
+                    *next_var += 1;
+                    let dummy = *next_var;
+                    insts.insert(
+                        i,
+                        IrInst::Call(dummy, "taida_arena_iter_reset".to_string(), vec![mark]),
+                    );
+                    i += 2;
+                    continue;
+                }
+                IrInst::Return(_) => {
+                    *next_var += 1;
+                    let dummy = *next_var;
+                    insts.insert(
+                        i,
+                        IrInst::Call(dummy, "taida_arena_iter_exit".to_string(), vec![mark]),
+                    );
+                    i += 2;
+                    continue;
+                }
+                IrInst::CondBranch(_, arms) => {
+                    for arm in arms.iter_mut() {
+                        Self::insert_iter_scope_hooks(&mut arm.body, mark, next_var);
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
     }
 
     /// 文列を処理。ErrorCeiling が出現したら後続文をすべて通常パスに包む。

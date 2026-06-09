@@ -709,6 +709,15 @@ static inline void taida_arena_bounds_recompute(void) {
     }
 }
 
+// F58 P2-2: iteration-scope watermark depth. While > 0, arena-backed
+// objects must not enter the small-object freelists: the enclosing
+// iteration scope will rewind the arena past them, so a freelist entry
+// would dangle. malloc-backed objects are unaffected. The depth is
+// thread-local (worker threads have independent arenas) and is cleared
+// on taida_throw — a longjmp escapes every active iteration scope, after
+// which the arena follows the normal leak-until-reset discipline again.
+static __thread int taida_arena_iter_depth = 0;
+
 static inline int taida_arena_contains(void *ptr) {
     TAIDA_PERF_INC(taida_perf_arena_contains_calls);
     uintptr_t p = (uintptr_t)ptr;
@@ -873,6 +882,82 @@ static void taida_arena_request_reset(void) {
          * an explicit if. */
         taida_arena_active_chunk = -1;
     }
+}
+
+// F58 P2-2: iteration-scope watermark over the chunked arena. The lowerer
+// inserts these around tail-recursive loops whose iteration-local values
+// provably cannot escape (scalar-annotated TailCall params, no
+// GlobalSet / closures / indirect or user calls, runtime calls limited
+// to a retention-free whitelist):
+//
+//   mark = taida_arena_iter_enter()        — function entry
+//   taida_arena_iter_reset(mark)           — after the TailCall arguments
+//                                            are evaluated, right before
+//                                            the loop back-edge
+//   taida_arena_iter_exit(mark)            — right before return
+//
+// The mark encodes {active_chunk + 1, offset} in one taida_val (an
+// offset never exceeds the 2 MiB chunk, so 32 bits each are plenty).
+// reset frees every chunk allocated after the mark, rewinds the offset,
+// and recomputes the containment bounding box. Values allocated before
+// the mark are never touched, so freelist entries from outside the
+// scope stay valid; values allocated inside the scope are kept out of
+// the freelists by the taida_arena_iter_depth gate in the push helpers.
+// A throw longjmps past every active scope, so taida_throw clears the
+// depth — the arena then simply follows the normal leak-until-reset
+// discipline for whatever the escaped scopes had allocated.
+taida_val taida_arena_iter_enter(void) {
+    taida_arena_iter_depth++;
+    int ai = taida_arena_active_chunk;
+    size_t off = (ai >= 0) ? taida_arena_chunks[ai].offset : 0;
+    return (((taida_val)(ai + 1)) << 32) | (taida_val)off;
+}
+
+taida_val taida_arena_iter_reset(taida_val mark) {
+    int ai = (int)(mark >> 32) - 1;
+    size_t off = (size_t)(mark & 0xFFFFFFFFLL);
+    if (ai >= taida_arena_chunk_count) return 0;  // defensive: stale mark
+    if (ai < 0) {
+        // No chunk existed at enter time: mirror request_reset's
+        // keep-chunk-zero discipline so the next allocation reuses a
+        // warm slab instead of round-tripping malloc.
+        if (taida_arena_chunk_count > 1) {
+            for (int i = 1; i < taida_arena_chunk_count; i++) {
+                free(taida_arena_chunks[i].base);
+                taida_arena_chunks[i].base = NULL;
+                taida_arena_chunks[i].offset = 0;
+                taida_arena_chunks[i].size = 0;
+            }
+            taida_arena_chunk_count = 1;
+            taida_arena_bounds_recompute();
+        }
+        if (taida_arena_chunk_count == 1 && taida_arena_chunks[0].base) {
+            taida_arena_chunks[0].offset = 0;
+            taida_arena_active_chunk = 0;
+        }
+        TAIDA_PERF_INC(taida_perf_arena_resets);
+        return 0;
+    }
+    if (taida_arena_chunk_count > ai + 1) {
+        for (int i = ai + 1; i < taida_arena_chunk_count; i++) {
+            free(taida_arena_chunks[i].base);
+            taida_arena_chunks[i].base = NULL;
+            taida_arena_chunks[i].offset = 0;
+            taida_arena_chunks[i].size = 0;
+        }
+        taida_arena_chunk_count = ai + 1;
+        taida_arena_bounds_recompute();
+    }
+    taida_arena_chunks[ai].offset = off;
+    taida_arena_active_chunk = ai;
+    TAIDA_PERF_INC(taida_perf_arena_resets);
+    return 0;
+}
+
+taida_val taida_arena_iter_exit(taida_val mark) {
+    (void)mark;
+    if (taida_arena_iter_depth > 0) taida_arena_iter_depth--;
+    return 0;
 }
 
 extern taida_val _taida_main(void);
@@ -3162,7 +3247,13 @@ taida_val taida_release(taida_ptr ptr) {
             // re-uses the cached pointer as-is), so pushing an arena
             // pointer is sound. The arena chunks stay alive until process
             // exit, so the cached pointer remains valid.
-            if (TAIDA_IS_PACK(ptr) && obj[1] == TAIDA_PACK_FC_FOR_FREELIST) {
+            // F58 P2-2: inside an iteration scope an arena-backed object
+            // must not enter the freelist — the scope reset will rewind
+            // the arena past it. Skipping the push routes it to the
+            // arena-containment fall-through below (no free, reclaimed by
+            // the rewind).
+            if (TAIDA_IS_PACK(ptr) && obj[1] == TAIDA_PACK_FC_FOR_FREELIST
+                && (taida_arena_iter_depth == 0 || !taida_arena_contains(obj))) {
                 if (taida_pack4_freelist_push(obj)) {
                     return 0;  // recycled — skip free()
                 }
@@ -3173,7 +3264,8 @@ taida_val taida_release(taida_ptr ptr) {
             // C27B-018 (Round 2 wH): same reasoning as the pack4 freelist —
             // entries are uniformly cap=16 lists, so push/pop sizes match
             // exactly. Arena-backed slabs are now safely recycled.
-            if (TAIDA_IS_LIST(ptr) && obj[1] == TAIDA_LIST_INIT_CAP) {
+            if (TAIDA_IS_LIST(ptr) && obj[1] == TAIDA_LIST_INIT_CAP
+                && (taida_arena_iter_depth == 0 || !taida_arena_contains(obj))) {
                 if (taida_list_freelist_push(obj)) {
                     return 0;  // recycled -- skip free()
                 }
@@ -3344,6 +3436,12 @@ static void taida_str_release(taida_val ptr) {
             size_t slen = (size_t)hdr[1];
             size_t rel_total = sizeof(taida_val) * 2 + slen + 1;
             int bucket = taida_str_bucket_for(rel_total);
+            // F58 P2-2: arena-backed strings stay out of the freelist
+            // inside an iteration scope (see the pack4 note above).
+            if (bucket >= 0 && taida_arena_iter_depth > 0
+                && taida_arena_contains(hdr)) {
+                bucket = -1;
+            }
             if (bucket >= 0) {
                 size_t aligned_total = (rel_total + 15) & ~((size_t)15);
                 size_t cap = aligned_total - sizeof(taida_val) * 2;
@@ -8906,6 +9004,11 @@ void taida_error_ceiling_pop(void) {
 }
 
 taida_val taida_throw(taida_val error_val) {
+    // F58 P2-2: a longjmp escapes every active iteration scope without
+    // running its exit hook; clear the depth so the freelists resume
+    // normal recycling. The escaped scopes' allocations follow the
+    // ordinary leak-until-reset arena discipline.
+    taida_arena_iter_depth = 0;
     if (__taida_error_depth > 0) {
         int depth = __taida_error_depth - 1;
         __taida_error_val[depth] = error_val;

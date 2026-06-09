@@ -146,7 +146,10 @@ mod tests {
         //   so the first static string literal sits AT 1024 and the old
         //   guard rejected it: `"x" + "y"` via untyped params concatenated
         //   the pointer value instead ("x1024"). 461,141 -> 461,494.
-        const EXPECTED_TOTAL_LEN: usize = 461_494;
+        // 2026-06-10 F58 P2-2: taida_arena_iter_enter/reset/exit wrappers
+        //   over wasm_arena_enter/leave in 01_core.inc.c (call sites stay
+        //   disabled in the emitter until WASM strings carry headers).
+        const EXPECTED_TOTAL_LEN: usize = 462_036;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

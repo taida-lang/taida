@@ -425,6 +425,18 @@ const DIVERGENT_CRYPTO: &[&str] = &[
     "taida_hmac_sha256_secret",
 ];
 
+/// Deliberately divergent: the iteration-scope watermark rides each
+/// backend's own allocator — native encodes {active_chunk, offset} into
+/// the mark, frees chunks past it and gates the freelists via the
+/// thread-local depth; WASM wraps the single bump-pointer
+/// wasm_arena_enter/leave pair (and its call sites stay disabled in the
+/// emitter until WASM strings carry hidden headers).
+const DIVERGENT_ITER_SCOPE: &[&str] = &[
+    "taida_arena_iter_enter",
+    "taida_arena_iter_reset",
+    "taida_arena_iter_exit",
+];
+
 /// Deliberately divergent: container construction/mutation sits on
 /// different memory policies — native = freelist + arena + live
 /// refcounting; WASM = bump allocator + no-op refcounting. Element-kind
@@ -798,6 +810,10 @@ const DIVERGENT_MISC: &[&str] = &[
 /// All divergence groups with their reasons (the group docs above hold
 /// the long form; the strings here surface in test failure messages).
 pub(crate) const DIVERGENT_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "iter-scope watermark: chunked-arena mark vs bump-pointer wrapper",
+        DIVERGENT_ITER_SCOPE,
+    ),
     ("async: pthread vs deterministic stubs", DIVERGENT_ASYNC),
     (
         "io/debug: libc stdio vs fd_write imports",

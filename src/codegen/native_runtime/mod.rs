@@ -868,7 +868,8 @@ mod tests {
         //   on the plaintext-HTTP response path: 1,301,012 -> 1,301,087.
         // 2026-06-10 F58 P2-1 (core.c): guard fast path — see the F1/F2
         //   notes above. 1,301,087 -> 1,305,437.
-        const EXPECTED_TOTAL_LEN: usize = 1_305_437;
+        // 2026-06-10 F58 P2-2: iteration-scope watermark (core.c, F1).
+        const EXPECTED_TOTAL_LEN: usize = 1_310_405;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1598,7 +1599,10 @@ mod tests {
         //   contains), molten/moltenized type-slot matchers shared with the
         //   single-probe unmold dispatch. All before the marker.
         //   394,977 -> 397,931.
-        const F1_LEN: usize = 397_931;
+        // 2026-06-10 F58 P2-2 iteration-scope watermark: iter_enter/reset/
+        //   exit + depth gate + freelist-push guards + throw depth clear,
+        //   all before the marker. F1 -> 402,606.
+        const F1_LEN: usize = 402_606;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1635,7 +1639,9 @@ mod tests {
             // F58 P2-1: taida_generic_unmold single-probe dispatch +
             // gorillax type-slot classifier split (after the marker).
             // F2 225,711 -> 227,107.
-            F1_LEN + 227_107,
+            // F58 P2-2: (no change after the marker for the watermark itself;
+            // recompute keeps this in lockstep). F2 -> 227,400.
+            F1_LEN + 227_400,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
