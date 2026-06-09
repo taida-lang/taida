@@ -805,6 +805,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             "int64_t taida_abi_host_cage(int64_t capability, int64_t call);".to_string()
         }
         // W-5: Lax runtime functions
+        // F58 P2-4: divisor-proven exact division (fused unmold form).
+        "taida_div_exact" => "int64_t taida_div_exact(int64_t a, int64_t b);".to_string(),
+        "taida_mod_exact" => "int64_t taida_mod_exact(int64_t a, int64_t b);".to_string(),
         // F58 P2-2: iteration-scope watermark hooks (wrappers over
         // wasm_arena_enter/leave in 01_core; available on every profile).
         "taida_arena_iter_enter" => "int64_t taida_arena_iter_enter(void);".to_string(),

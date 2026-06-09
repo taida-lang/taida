@@ -1221,6 +1221,11 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         },
 
         // ── Lax ──
+        // ── F58 P2-4: divisor-proven exact division (fused unmold) ──
+        "taida_div_exact" | "taida_mod_exact" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
         // ── F58 P2-2: iteration-scope arena watermark ──
         "taida_arena_iter_enter" => RuntimeAbi {
             params: &[],

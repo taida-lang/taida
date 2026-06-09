@@ -869,7 +869,9 @@ mod tests {
         // 2026-06-10 F58 P2-1 (core.c): guard fast path — see the F1/F2
         //   notes above. 1,301,087 -> 1,305,437.
         // 2026-06-10 F58 P2-2: iteration-scope watermark (core.c, F1).
-        const EXPECTED_TOTAL_LEN: usize = 1_310_405;
+        // 2026-06-10 F58 P2-4: divisor-proven exact div/mod helpers (core.c,
+        //   F1; mirrored on WASM). 1,310,405 -> 1,310,758.
+        const EXPECTED_TOTAL_LEN: usize = 1_310_758;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1602,7 +1604,9 @@ mod tests {
         // 2026-06-10 F58 P2-2 iteration-scope watermark: iter_enter/reset/
         //   exit + depth gate + freelist-push guards + throw depth clear,
         //   all before the marker. F1 -> 402,606.
-        const F1_LEN: usize = 402_606;
+        // 2026-06-10 F58 P2-4: taida_div_exact / taida_mod_exact (next to
+        //   div_mold, before the marker). +353. F1 402,606 -> 402,959.
+        const F1_LEN: usize = 402_959;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

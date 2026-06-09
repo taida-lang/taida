@@ -149,7 +149,9 @@ mod tests {
         // 2026-06-10 F58 P2-2: taida_arena_iter_enter/reset/exit wrappers
         //   over wasm_arena_enter/leave in 01_core.inc.c (call sites stay
         //   disabled in the emitter until WASM strings carry headers).
-        const EXPECTED_TOTAL_LEN: usize = 462_036;
+        // 2026-06-10 F58 P2-4: taida_div_exact / taida_mod_exact mirrors in
+        //   01_core.inc.c. 462,036 -> 462,377.
+        const EXPECTED_TOTAL_LEN: usize = 462_377;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

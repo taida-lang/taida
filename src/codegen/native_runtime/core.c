@@ -2202,6 +2202,12 @@ taida_val taida_mod_mold(taida_val a, taida_val b) {
     return taida_lax_new(a % b, 0);
 }
 
+// F58 P2-4: division/modulo with a compiler-proven non-zero divisor —
+// the fused form of `Div[a, b]() >=> v` where `b` is a non-zero Int
+// literal, so the empty-Lax path is unreachable and no Lax is built.
+taida_val taida_div_exact(taida_val a, taida_val b) { return a / b; }
+taida_val taida_mod_exact(taida_val a, taida_val b) { return a % b; }
+
 // ── Type conversion molds (Str/Int/Float/Bool) ──────────────
 // Each returns a Lax BuchiPack. Str default="", Int default=0, Float default=0.0, Bool default=false(0).
 //

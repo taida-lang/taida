@@ -2021,6 +2021,23 @@ impl Lowering {
             }
             Statement::UnmoldForward(uf) => {
                 // expr >=> name : Async のアンモールド
+                // F58 P2-4 (first stage of the escape-analysis design):
+                // direct-form unmold fusion. In `Mold[...]() >=> v` the
+                // syntax guarantees the mold value has no other reference,
+                // so when the unmold result is statically known the Lax is
+                // never materialised — no allocation, no runtime call, no
+                // has_value branch.
+                if let Some(result) = self.try_lower_fused_unmold(func, &uf.source)? {
+                    func.push(IrInst::DefVar(uf.target.clone(), result));
+                    self.track_unmold_type(&uf.target, &uf.source);
+                    // A rebind invalidates any previous shadow kind for
+                    // this name (mirrors maybe_capture_shadow_kind).
+                    self.shadow_kind_vars.remove(&uf.target);
+                    if Self::NET_BUILTIN_NAMES.contains(&uf.target.as_str()) {
+                        self.shadowed_net_builtins.insert(uf.target.clone());
+                    }
+                    return Ok(());
+                }
                 let source_var = self.lower_expr(func, &uf.source)?;
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
@@ -2040,6 +2057,16 @@ impl Lowering {
             }
             Statement::UnmoldBackward(ub) => {
                 // name <=< expr : Async のアンモールド（逆方向）
+                // F58 P2-4: same direct-form fusion as UnmoldForward.
+                if let Some(result) = self.try_lower_fused_unmold(func, &ub.source)? {
+                    func.push(IrInst::DefVar(ub.target.clone(), result));
+                    self.track_unmold_type(&ub.target, &ub.source);
+                    self.shadow_kind_vars.remove(&ub.target);
+                    if Self::NET_BUILTIN_NAMES.contains(&ub.target.as_str()) {
+                        self.shadowed_net_builtins.insert(ub.target.clone());
+                    }
+                    return Ok(());
+                }
                 let source_var = self.lower_expr(func, &ub.source)?;
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
@@ -2058,6 +2085,69 @@ impl Lowering {
                 Ok(())
             } // All statement types are now handled above.
               // This branch should not be reached.
+        }
+    }
+
+    /// F58 P2-4 (first stage of the escape-analysis design): fuse the
+    /// direct form `Mold[...]() >=> v` when the unmold result is
+    /// statically known and carries no allocation:
+    ///
+    /// - `Lax[x]() >=> v` always has `has_value = true`, so `v` is `x`
+    ///   itself. Restricted to statically-scalar `x` for now: a heap
+    ///   payload would change the retain/release pairing that the
+    ///   materialised path performs (second stage, with the IR-level
+    ///   escape pass).
+    /// - `Div[a, b]() >=> v` / `Mod[a, b]()` with all-Int operands and a
+    ///   non-zero Int-literal divisor can never produce the empty Lax,
+    ///   so `v` is the exact quotient/remainder via a divisor-proven
+    ///   runtime helper (no Lax, no branch).
+    ///
+    /// Named arguments (an explicit default, etc.) keep the general
+    /// materialised path.
+    fn try_lower_fused_unmold(
+        &mut self,
+        func: &mut IrFunction,
+        source: &Expr,
+    ) -> Result<Option<IrVar>, LowerError> {
+        let Expr::MoldInst(name, type_args, fields, _) = source else {
+            return Ok(None);
+        };
+        if !fields.is_empty() {
+            return Ok(None);
+        }
+        match (name.as_str(), type_args.as_slice()) {
+            ("Lax", [inner])
+                if self.expr_is_int(inner)
+                    || self.expr_returns_float(inner)
+                    || self.expr_is_bool(inner) =>
+            {
+                Ok(Some(self.lower_expr(func, inner)?))
+            }
+            ("Div" | "Mod", [a, b]) if Self::nonzero_int_literal(b) && self.expr_is_int(a) => {
+                let av = self.lower_expr(func, a)?;
+                let bv = self.lower_expr(func, b)?;
+                let result = func.alloc_var();
+                let helper = if name == "Div" {
+                    "taida_div_exact"
+                } else {
+                    "taida_mod_exact"
+                };
+                func.push(IrInst::Call(result, helper.to_string(), vec![av, bv]));
+                Ok(Some(result))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Divisor proof for the Div/Mod fusion: a non-zero Int literal
+    /// (optionally negated).
+    fn nonzero_int_literal(e: &Expr) -> bool {
+        match e {
+            Expr::IntLit(v, _) => *v != 0,
+            Expr::UnaryOp(crate::parser::UnaryOp::Neg, inner, _) => {
+                matches!(inner.as_ref(), Expr::IntLit(v, _) if *v != 0)
+            }
+            _ => false,
         }
     }
 

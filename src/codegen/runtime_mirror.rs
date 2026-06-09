@@ -327,6 +327,7 @@ pub(crate) const MIRROR_SYNC_ALLOWLIST: &[&str] = &[
     "taida_bool_and",
     "taida_bool_not",
     "taida_bool_or",
+    "taida_div_exact",
     "taida_div_mold",
     "taida_error_type_check_or_rethrow",
     "taida_float_add",
@@ -357,6 +358,7 @@ pub(crate) const MIRROR_SYNC_ALLOWLIST: &[&str] = &[
     "taida_lax_has_value",
     "taida_lax_is_empty",
     "taida_lax_unmold",
+    "taida_mod_exact",
     "taida_mod_mold",
     "taida_poly_neq_tagged",
 ];

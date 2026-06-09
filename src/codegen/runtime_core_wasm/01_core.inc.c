@@ -978,6 +978,12 @@ int64_t taida_mod_mold(int64_t a, int64_t b) {
     return taida_lax_new(a % b, 0);
 }
 
+// F58 P2-4: division/modulo with a compiler-proven non-zero divisor —
+// the fused form of `Div[a, b]() >=> v` where `b` is a non-zero Int
+// literal, so the empty-Lax path is unreachable and no Lax is built.
+int64_t taida_div_exact(int64_t a, int64_t b) { return a / b; }
+int64_t taida_mod_exact(int64_t a, int64_t b) { return a % b; }
+
 /* F56: shared __type tags for sealed carriers. The producers
    (taida_moltenize_new / taida_secret_new in 02_containers.inc.c) and the
    detector below reference these SAME statics, so classification is a pure
