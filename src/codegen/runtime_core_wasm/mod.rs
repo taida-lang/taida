@@ -151,7 +151,11 @@ mod tests {
         //   disabled in the emitter until WASM strings carry headers).
         // 2026-06-10 F58 P2-4: taida_div_exact / taida_mod_exact mirrors in
         //   01_core.inc.c. 462,036 -> 462,377.
-        const EXPECTED_TOTAL_LEN: usize = 462_377;
+        // 2026-06-10 F58 string headers: WASM_STR_MAGIC/_STATIC + _wasm_str_alloc
+        //   + 63 allocation-site conversions + magic-required _wasm_is_string_ptr
+        //   + the generic_unmold string/field-count guards + the
+        //   _looks_like_string magic fast path. -> 464,779.
+        const EXPECTED_TOTAL_LEN: usize = 464_779;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

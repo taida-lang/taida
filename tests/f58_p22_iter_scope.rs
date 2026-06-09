@@ -97,13 +97,6 @@ stdout(laxLoop(200000, 0))
 #[test]
 fn string_loop_values_survive_iteration_rewind() {
     let dir = unique_temp_dir("f58_p22_str_loop");
-    // wasm leg skipped: the heuristic string identification on WASM
-    // (printable first byte, no header magic) misreads the Int result
-    // 300000 as a pointer to a string the bump allocator happened to
-    // place at that address — reproduced WITHOUT the watermark, so it is
-    // the pre-existing representation gap, not a rewind artifact. The
-    // watermark stays disabled on WASM for the same reason; both resolve
-    // together when WASM strings carry hidden headers.
     let out = assert_parity_with(
         &dir,
         "str_loop",
@@ -115,7 +108,7 @@ fn string_loop_values_survive_iteration_rewind() {
 => :Int
 stdout(strLoop(50000, 0))
 "#,
-        false,
+        true,
     );
     assert_eq!(out, "300000");
     let _ = std::fs::remove_dir_all(&dir);

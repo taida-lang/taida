@@ -189,6 +189,33 @@ void *wasm_alloc(unsigned int size) {
     return (void *)(unsigned long)result;
 }
 
+/* ── F58: positive string identification (hidden one-word header) ──
+ *
+ * Every Taida Str value on WASM points just past a single hidden magic
+ * word: [WASM_STR_MAGIC] | bytes...\0 for heap strings built through
+ * _wasm_str_alloc, and [WASM_STR_STATIC_MAGIC] | bytes...\0 for the
+ * static literals the emitter lays out as file-scope structs. The
+ * previous identification ("address in a plausible range and the first
+ * byte is printable ASCII") misread a monotonically growing Int
+ * accumulator as a live string the moment its value coincided with an
+ * address the bump allocator had handed to a string. No length field is
+ * kept — string length stays NUL-scan (wasm_strlen) exactly as before,
+ * which is what makes the allocation-site conversion purely mechanical.
+ */
+#define WASM_STR_MAGIC        0x5441494453545200LL /* "TAIDSTR\0" */
+#define WASM_STR_STATIC_MAGIC 0x5441494453545300LL /* "TAIDSTS\0" */
+
+/* Allocate a string buffer of `total` bytes (the caller's historical
+ * request, NUL included by the caller's own accounting) behind a hidden
+ * magic word. Returns the data pointer; wasm_alloc's 8-byte alignment
+ * keeps both the header and the data aligned. */
+static char *_wasm_str_alloc(unsigned int total) {
+    int64_t *hdr = (int64_t *)wasm_alloc(total + 8);
+    if (!hdr) return (char *)0;
+    hdr[0] = WASM_STR_MAGIC;
+    return (char *)(hdr + 1);
+}
+
 /* C25B-026 / Phase 5-G (2026-04-23): Arena-scoped bump release.
  *
  * The WASM bump allocator never frees, so a long-running loop that
@@ -948,6 +975,7 @@ int64_t taida_str_concat(int64_t a_ptr, int64_t b_ptr);  /* NTH-5: forward decl 
 static int64_t _wasm_invoke_callback1(int64_t fn_ptr, int64_t arg0);
 static int64_t _wasm_result_is_error_check(int64_t result);
 static int _wasm_is_valid_ptr(int64_t val, unsigned int min_bytes);  /* NTH-4: forward decl */
+static int _wasm_is_string_ptr(int64_t v);   /* F58: forward decl for the unmold string guard */
 static int _wasm_is_async_obj(int64_t val);   /* PR-4: forward decl for async */
 static int _looks_like_bytes(int64_t val);    /* F54B-016: forward decl for Bytes structural eq (defined in 02_containers) */
 static int64_t _wasm_bytes_len(int64_t val);  /* F54B-016 */
@@ -1022,6 +1050,14 @@ int64_t taida_generic_unmold(int64_t val) {
        _wasm_is_valid_ptr already handles this for is_lax/result/gorillax, but
        taida_pack_has_hash (called later) does not. Guard early. */
     if (!_wasm_is_valid_ptr(val, 8)) return val;
+    /* F58: a string is never a monadic carrier — return it as-is before
+       the pack walks below. taida_pack_has_hash trusts slot 0 as a field
+       count, so a string pointer reaching it reads its own bytes as a
+       huge count and walks far out of bounds (latent for years because
+       the misread count was layout-dependent; the hidden string headers
+       shifted layouts and made it reproducible). Strings now carry a
+       magic word, so the check is exact. */
+    if (_wasm_is_string_ptr(val)) return val;
     /* PR-4: Async unmold — check before other types */
     if (_wasm_is_async_obj(val)) {
         return taida_async_unmold(val);
@@ -1081,6 +1117,18 @@ int64_t taida_generic_unmold(int64_t val) {
             (int64_t)(intptr_t)"Gorillax error");
         return taida_throw(err);
     }
+    /* F58: the field-pack walks below trust slot 0 as a field count.
+       A non-pack heap object reaching this point (a List from
+       `Split[...]() >=> parts`, Bytes, a hash map...) would read its own
+       first word as a huge count and walk far out of bounds — latent for
+       years because the misread count was layout-dependent. Require a
+       sane count and a fully in-bounds slot range before any walk. */
+    {
+        int64_t *p_chk = (int64_t *)(intptr_t)val;
+        int64_t fc_chk = p_chk[0];
+        if (fc_chk < 0 || fc_chk > 256) return val;
+        if (!_wasm_is_valid_ptr(val, (unsigned int)((1 + fc_chk * 3) * 8))) return val;
+    }
     /* BE-WASM-1: TODO mold unmold — return unm channel, fallback to sol/__default/__value.
        Matches native_runtime.c taida_generic_unmold TODO branch. */
     if (taida_pack_has_hash(val, WASM_HASH___TYPE)) {
@@ -1139,30 +1187,22 @@ int64_t taida_generic_unmold(int64_t val) {
    Small integer values (< 1024) are never treated as string pointers to avoid
    false positives from small numeric literals. */
 static int _wasm_is_string_ptr(int64_t v) {
-    /* F58B-003: `v < 1024`, not `<= 1024` — wasm-ld places the data
-       segment at global-base 1024, so the very first static string
-       literal sits AT address 1024 and the old guard rejected it
-       (poly_add then stringified the pointer value: "x"+"y" -> "x1024").
-       Addresses 0..1023 stay rejected (null-guard region, never data). */
-    if (v < 1024 || v > 0xFFFFFFFFLL) return 0;
+    /* F58: positive identification via the hidden one-word header. Every
+       Taida Str value points just past its magic word (heap strings via
+       _wasm_str_alloc, static literals via the emitter's header-carrying
+       structs), so anything without the magic — in particular an Int
+       whose value happens to coincide with a live address — is not a
+       string. Replaces the printable-first-byte heuristic that misread
+       monotonically growing loop accumulators as strings. */
+    if (v < 1024 + 8 || v > 0xFFFFFFFFLL) return 0;
+    if ((v & 0x7) != 0) return 0;
     unsigned int addr = (unsigned int)(uint64_t)v;
-    /* Check within wasm linear memory bounds */
+    /* The header word (and at least the first data byte) must lie inside
+       linear memory. */
     unsigned int mem_bytes = (unsigned int)__builtin_wasm_memory_size(0) * 65536u;
     if (addr >= mem_bytes) return 0;
-    /* Require the address to be in a known region: either the data segment
-       (static string literals, typically at low addresses before __heap_base)
-       or the dynamic heap (between __heap_base and bump_ptr).
-       We check: if it's a dynamically allocated object, it must be < bump_ptr. */
-    extern unsigned int __heap_base;
-    unsigned int heap_start = (unsigned int)(unsigned long)&__heap_base;
-    if (addr >= heap_start && (bump_ptr == 0 || addr >= bump_ptr)) return 0;
-    /* Finally, peek at the first byte: must be a printable ASCII char (0x20..0x7E).
-       NUL (empty string at address) is excluded since it's indistinguishable from
-       zeroed memory.  Integer values that happen to be valid addresses with a
-       printable first byte will still false-positive, but with the > 1024 guard
-       and heap range check, this is rare. */
-    unsigned char first = *(const unsigned char *)(intptr_t)v;
-    return first >= 0x20 && first <= 0x7E;
+    int64_t magic = *(const int64_t *)(intptr_t)(v - 8);
+    return magic == WASM_STR_MAGIC || magic == WASM_STR_STATIC_MAGIC;
 }
 
 int64_t taida_poly_add(int64_t a, int64_t b) {
@@ -1202,7 +1242,7 @@ int64_t taida_str_concat(int64_t a_ptr, int64_t b_ptr) {
     if (!b) b = "";
     int32_t la = wasm_strlen(a);
     int32_t lb = wasm_strlen(b);
-    char *buf = (char *)wasm_alloc(la + lb + 1);
+    char *buf = _wasm_str_alloc(la + lb + 1);
     if (!buf) return 0;
     for (int32_t i = 0; i < la; i++) buf[i] = a[i];
     for (int32_t i = 0; i < lb; i++) buf[la + i] = b[i];
@@ -1262,7 +1302,7 @@ int64_t taida_int_to_str(int64_t a) {
     }
 
     int32_t len = 20 - pos;
-    char *buf = (char *)wasm_alloc(len + 1);
+    char *buf = _wasm_str_alloc(len + 1);
     if (!buf) return 0;
     for (int i = 0; i < len; i++) buf[i] = tmp[pos + i];
     buf[len] = '\0';
@@ -1556,7 +1596,7 @@ int64_t taida_float_to_str(int64_t val) {
     char tmp[64];
     int len = fmt_g(d, tmp, 64);
 
-    char *buf = (char *)wasm_alloc(len + 1);
+    char *buf = _wasm_str_alloc(len + 1);
     if (!buf) return 0;
     for (int i = 0; i < len; i++) buf[i] = tmp[i];
     buf[len] = '\0';
@@ -1703,6 +1743,14 @@ int64_t taida_polymorphic_length(int64_t ptr) {
    We check that the pointer is in a reasonable range and points to a NUL-terminated
    byte sequence with printable or whitespace characters. */
 static int _looks_like_string(int64_t val) {
+    /* F58: header-carrying strings (every string built by the runtime
+       and every emitted literal) are identified exactly by their magic
+       word — including the empty string, which the byte heuristic below
+       can never accept (its first byte IS the terminator; a Split
+       producing a leading empty fragment used to render that fragment
+       as its pointer value). The heuristic survives only as a fallback
+       for the runtime's own bare C literals. */
+    if (_wasm_is_string_ptr(val)) return 1;
     /* Zero is not a string (it's the integer 0 or null) */
     if (val == 0) return 0;
     /* Negative values or values > 32-bit range are not pointers on wasm32 */
@@ -1868,7 +1916,7 @@ typedef struct {
 
 static void _sb_init(_wasm_strbuf *sb) {
     sb->cap = 128;
-    sb->buf = (char *)wasm_alloc(sb->cap);
+    sb->buf = _wasm_str_alloc(sb->cap);
     sb->len = 0;
     if (sb->buf) sb->buf[0] = '\0';
 }
@@ -1877,7 +1925,7 @@ static void _sb_ensure(_wasm_strbuf *sb, int needed) {
     if (sb->len + needed + 1 > sb->cap) {
         int new_cap = sb->cap;
         while (sb->len + needed + 1 > new_cap) new_cap *= 2;
-        char *new_buf = (char *)wasm_alloc(new_cap);
+        char *new_buf = _wasm_str_alloc(new_cap);
         if (!new_buf) return;
         for (int i = 0; i < sb->len; i++) new_buf[i] = sb->buf[i];
         new_buf[sb->len] = '\0';
@@ -2169,7 +2217,7 @@ static int64_t _wasm_render_elem_tagged_debug(int64_t val, int64_t tag) {
     if (tag == WASM_TAG_STR) {
         const char *s = (const char *)(intptr_t)val;
         int slen = s ? wasm_strlen(s) : 0;
-        char *buf = (char *)wasm_alloc(slen + 3);
+        char *buf = _wasm_str_alloc(slen + 3);
         if (!buf) return val;
         buf[0] = '"';
         for (int i = 0; i < slen; i++) buf[1 + i] = s[i];
@@ -2188,7 +2236,7 @@ static int64_t _wasm_render_elem_tagged_debug_full(int64_t val, int64_t tag) {
     if (tag == WASM_TAG_STR) {
         const char *s = (const char *)(intptr_t)val;
         int slen = s ? wasm_strlen(s) : 0;
-        char *buf = (char *)wasm_alloc(slen + 3);
+        char *buf = _wasm_str_alloc(slen + 3);
         if (!buf) return val;
         buf[0] = '"';
         for (int i = 0; i < slen; i++) buf[1 + i] = s[i];
@@ -2250,7 +2298,7 @@ static int64_t _wasm_value_to_debug_string_full(int64_t val) {
     if (_looks_like_string(val)) {
         const char *s = (const char *)(intptr_t)val;
         int slen = wasm_strlen(s);
-        char *buf = (char *)wasm_alloc(slen + 3);
+        char *buf = _wasm_str_alloc(slen + 3);
         if (!buf) return val;
         buf[0] = '"';
         for (int i = 0; i < slen; i++) buf[1 + i] = s[i];
@@ -2712,7 +2760,7 @@ static int64_t _wasm_value_to_debug_string(int64_t val) {
     if (_looks_like_string(val)) {
         const char *s = (const char *)(intptr_t)val;
         int slen = wasm_strlen(s);
-        char *buf = (char *)wasm_alloc(slen + 3);
+        char *buf = _wasm_str_alloc(slen + 3);
         if (!buf) return val;
         buf[0] = '"';
         for (int i = 0; i < slen; i++) buf[1 + i] = s[i];
@@ -4614,7 +4662,7 @@ int64_t taida_hashmap_to_string(int64_t hm_ptr) {
 
     if (entry_count == 0) {
         // WCR-6: "HashMap({})" = 11 chars + NUL = 12 bytes
-        char *r = (char *)wasm_alloc(12);
+        char *r = _wasm_str_alloc(12);
         _wf_memcpy(r, "HashMap({})", 11);
         r[11] = '\0';
         return (int64_t)r;
@@ -4622,7 +4670,7 @@ int64_t taida_hashmap_to_string(int64_t hm_ptr) {
 
     /* Build "HashMap({k: v, k: v, ...})" */
     int buf_size = 256;
-    char *buf = (char *)wasm_alloc((unsigned int)buf_size);
+    char *buf = _wasm_str_alloc((unsigned int)buf_size);
     _wf_memcpy(buf, "HashMap({", 9);
     int pos = 9;
     int first = 1;
@@ -4639,7 +4687,7 @@ int64_t taida_hashmap_to_string(int64_t hm_ptr) {
             int vl = _wf_strlen(vs);
             while (pos + kl + vl + 10 > buf_size) {
                 buf_size *= 2;
-                char *new_buf = (char *)wasm_alloc((unsigned int)buf_size);
+                char *new_buf = _wasm_str_alloc((unsigned int)buf_size);
                 _wf_memcpy(new_buf, buf, pos);
                 buf = new_buf;
             }
@@ -4735,12 +4783,12 @@ int64_t taida_set_to_string(int64_t set_ptr) {
     int64_t *list = (int64_t *)(intptr_t)set_ptr;
     int64_t len = list[1];
     if (len == 0) {
-        char *r = (char *)wasm_alloc(8);
+        char *r = _wasm_str_alloc(8);
         _wf_memcpy(r, "Set({})", 8);
         return (int64_t)r;
     }
     int buf_size = 128;
-    char *buf = (char *)wasm_alloc((unsigned int)buf_size);
+    char *buf = _wasm_str_alloc((unsigned int)buf_size);
     _wf_memcpy(buf, "Set({", 5);
     int pos = 5;
     for (int64_t i = 0; i < len; i++) {
@@ -4749,7 +4797,7 @@ int64_t taida_set_to_string(int64_t set_ptr) {
         int vl = _wf_strlen(vs);
         while (pos + vl + 10 > buf_size) {
             buf_size *= 2;
-            char *new_buf = (char *)wasm_alloc((unsigned int)buf_size);
+            char *new_buf = _wasm_str_alloc((unsigned int)buf_size);
             _wf_memcpy(new_buf, buf, pos);
             buf = new_buf;
         }

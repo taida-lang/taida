@@ -75,7 +75,7 @@ static char *_wc_i64_to_str(int64_t val) {
         while (uval > 0) { tmp[len++] = '0' + (int)(uval % 10); uval /= 10; }
     }
     int total = neg + len;
-    char *buf = (char *)wasm_alloc((unsigned int)(total + 1));
+    char *buf = _wasm_str_alloc((unsigned int)(total + 1));
     int pos = 0;
     if (neg) buf[pos++] = '-';
     for (int i = len - 1; i >= 0; i--) buf[pos++] = tmp[i];
@@ -86,7 +86,7 @@ static char *_wc_i64_to_str(int64_t val) {
 /* ── Helper: double to string ── */
 static char *_wc_double_to_str(double val) {
     if (val != val) {
-        char *r = (char *)wasm_alloc(4); r[0]='N'; r[1]='a'; r[2]='N'; r[3]='\0'; return r;
+        char *r = _wasm_str_alloc(4); r[0]='N'; r[1]='a'; r[2]='N'; r[3]='\0'; return r;
     }
     if (val > 1e18 || val < -1e18) {
         int neg = val < 0;
@@ -94,7 +94,7 @@ static char *_wc_double_to_str(double val) {
         int exp = 0;
         double v = val;
         while (v >= 10.0) { v /= 10.0; exp++; }
-        char *buf = (char *)wasm_alloc(32);
+        char *buf = _wasm_str_alloc(32);
         int pos = 0;
         if (neg) buf[pos++] = '-';
         int d = (int)v;
@@ -129,7 +129,7 @@ static char *_wc_double_to_str(double val) {
     }
     char *istr = _wc_i64_to_str(int_part);
     int ilen = _wf_strlen(istr);
-    char *buf = (char *)wasm_alloc((unsigned int)(ilen + 18));
+    char *buf = _wasm_str_alloc((unsigned int)(ilen + 18));
     int pos = 0;
     if (neg) buf[pos++] = '-';
     for (int i = 0; i < ilen; i++) buf[pos++] = istr[i];
@@ -302,7 +302,7 @@ static char *_wc_json_parse_string_raw(const char **p) {
         else scan++;
         len++;
     }
-    char *buf = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *buf = _wasm_str_alloc((unsigned int)(len + 1));
     int out = 0;
     while (**p && **p != '"') {
         if (**p == '\\') {
@@ -506,7 +506,7 @@ static int _wc_b64_value(char c) {
 static int64_t _wc_json_bytes_from_base64_string(const char *src) {
     if (!src) return _wc_json_bytes_from_raw((const unsigned char *)"", 0);
     int raw_len = _wf_strlen(src);
-    char *clean = (char *)wasm_alloc((unsigned int)(raw_len + 1));
+    char *clean = _wasm_str_alloc((unsigned int)(raw_len + 1));
     int clen = 0;
     for (int i = 0; i < raw_len; i++) {
         char c = src[i];
@@ -649,7 +649,7 @@ static int64_t _wc_json_default_value_for_desc(const char *desc) {
         case 'i': return 0;
         case 'f': return _d2l(0.0);
         case 's': {
-            char *empty = (char *)wasm_alloc(1);
+            char *empty = _wasm_str_alloc(1);
             empty[0] = '\0';
             return (int64_t)(intptr_t)empty;
         }
@@ -854,7 +854,7 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
 
             uint64_t type_hash = _wc_fnv1a("__type", 6);
             taida_pack_set_hash(pack, idx, (int64_t)type_hash);
-            char *type_str = (char *)wasm_alloc((unsigned int)(tn_len + 1));
+            char *type_str = _wasm_str_alloc((unsigned int)(tn_len + 1));
             _wf_memcpy(type_str, type_name, tn_len + 1);
             taida_pack_set(pack, idx, (int64_t)(intptr_t)type_str);
 
@@ -865,7 +865,7 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
             if (d[1] != '{') { *desc = d + 1; return taida_list_new(); }
             d += 2;
             int inner_len = _wc_schema_find_closing_brace(d);
-            char *inner_desc = (char *)wasm_alloc((unsigned int)(inner_len + 1));
+            char *inner_desc = _wasm_str_alloc((unsigned int)(inner_len + 1));
             _wf_memcpy(inner_desc, d, inner_len);
             inner_desc[inner_len] = '\0';
 
@@ -945,14 +945,14 @@ int64_t taida_json_parse(int64_t str_ptr) {
     const char *src = (const char *)(intptr_t)str_ptr;
     if (!src) src = "{}";
     int len = _wf_strlen(src);
-    char *buf = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *buf = _wasm_str_alloc((unsigned int)(len + 1));
     _wf_memcpy(buf, src, len + 1);
     return (int64_t)(intptr_t)buf;
 }
 
 /* taida_json_empty: return "{}" */
 int64_t taida_json_empty(void) {
-    char *buf = (char *)wasm_alloc(3);
+    char *buf = _wasm_str_alloc(3);
     buf[0] = '{'; buf[1] = '}'; buf[2] = '\0';
     return (int64_t)(intptr_t)buf;
 }
@@ -969,7 +969,7 @@ int64_t taida_json_from_str(int64_t str_ptr) {
     if (!src) src = "";
     int src_len = _wf_strlen(src);
     int new_len = src_len + 2;
-    char *buf = (char *)wasm_alloc((unsigned int)(new_len + 1));
+    char *buf = _wasm_str_alloc((unsigned int)(new_len + 1));
     buf[0] = '"';
     _wf_memcpy(buf + 1, src, src_len);
     buf[new_len - 1] = '"';
@@ -982,7 +982,7 @@ int64_t taida_json_unmold(int64_t json_ptr) {
     const char *src = (const char *)(intptr_t)json_ptr;
     if (!src) return taida_str_alloc(0);
     int len = _wf_strlen(src);
-    char *buf = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *buf = _wasm_str_alloc((unsigned int)(len + 1));
     _wf_memcpy(buf, src, len + 1);
     return (int64_t)(intptr_t)buf;
 }
@@ -1030,7 +1030,7 @@ int64_t taida_debug_json(int64_t json_ptr) {
     int blen = _wf_strlen(body);
     int slen = _wf_strlen(suffix);
     int total = plen + blen + slen;
-    char *buf = (char *)wasm_alloc((unsigned int)(total + 1));
+    char *buf = _wasm_str_alloc((unsigned int)(total + 1));
     _wf_memcpy(buf, prefix, plen);
     _wf_memcpy(buf + plen, body, blen);
     _wf_memcpy(buf + plen + blen, suffix, slen);
@@ -1050,7 +1050,7 @@ int64_t taida_debug_list(int64_t list_ptr) {
     int len = _wf_strlen(s);
     extern int fd_write(int fd, const void *iovs, int iovs_len, int *nwritten)
         __attribute__((import_module("wasi_snapshot_preview1"), import_name("fd_write")));
-    char *buf = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *buf = _wasm_str_alloc((unsigned int)(len + 1));
     _wf_memcpy(buf, s, len);
     buf[len] = '\n';
     struct { const char *buf; int len; } iov = { buf, len + 1 };
@@ -1071,7 +1071,7 @@ typedef struct {
 
 static void _wc_jb_init(_wc_json_buf *jb) {
     jb->cap = 256;
-    jb->buf = (char *)wasm_alloc(jb->cap);
+    jb->buf = _wasm_str_alloc(jb->cap);
     jb->len = 0;
     if (jb->buf) jb->buf[0] = '\0';
 }
@@ -1080,7 +1080,7 @@ static void _wc_jb_ensure(_wc_json_buf *jb, int needed) {
     if (jb->len + needed + 1 > jb->cap) {
         int new_cap = jb->cap;
         while (jb->len + needed + 1 > new_cap) new_cap *= 2;
-        char *new_buf = (char *)wasm_alloc((unsigned int)new_cap);
+        char *new_buf = _wasm_str_alloc((unsigned int)new_cap);
         if (!new_buf) return;
         for (int i = 0; i < jb->len; i++) new_buf[i] = jb->buf[i];
         new_buf[jb->len] = '\0';
@@ -1454,7 +1454,7 @@ static int _wc_wire_schema_desc_len(const char *d) {
 }
 
 static char *_wc_wire_schema_copy(const char *d, int len) {
-    char *out = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *out = _wasm_str_alloc((unsigned int)(len + 1));
     _wf_memcpy(out, d, len);
     out[len] = '\0';
     return out;
