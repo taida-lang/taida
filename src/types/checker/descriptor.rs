@@ -107,19 +107,22 @@ impl TypeChecker {
             Statement::FuncDef(fd) => {
                 // A descriptor returned / used inside a function body is a
                 // runtime use (functions are not the descriptor build path).
-                // Parameters (and the nested function's own name) shadow
-                // same-named top-level descriptor bindings within the body.
-                if !top_level {
-                    self.descriptor_scope_shadows.insert(fd.name.clone());
+                self.check_descriptor_use_in_funcdef(fd, !top_level);
+            }
+            // POST-STABLE-005: a class-like definition is a *type* definition,
+            // not part of the descriptor build path, so a descriptor used as a
+            // runtime value in a field default expression or inside a method
+            // body is an [E1532] runtime use. Field type annotations carry no
+            // value position and need no walk.
+            Statement::ClassLikeDef(cl) => {
+                for field in &cl.fields {
+                    if let Some(default) = &field.default_value {
+                        self.check_descriptor_use_in_expr(default, DescriptorUseCtx::Runtime);
+                    }
+                    if let Some(method) = &field.method_def {
+                        self.check_descriptor_use_in_funcdef(method, false);
+                    }
                 }
-                let saved = self.descriptor_scope_shadows.clone();
-                for p in &fd.params {
-                    self.descriptor_scope_shadows.insert(p.name.clone());
-                }
-                for s in &fd.body {
-                    self.check_descriptor_use_in_stmt(s, false);
-                }
-                self.descriptor_scope_shadows = saved;
             }
             Statement::ErrorCeiling(ec) => {
                 let saved = self.descriptor_scope_shadows.clone();
@@ -142,10 +145,41 @@ impl TypeChecker {
                 }
             }
             // Exports name symbols (`<<< @(name)`); the bound value was
-            // validated at its binding site as the allow-listed RHS. Class /
-            // enum / import statements carry no descriptor value positions.
+            // validated at its binding site as the allow-listed RHS. Enum /
+            // import statements carry no descriptor value positions.
             _ => {}
         }
+    }
+
+    /// Walk a function definition (top-level / nested / method body) for
+    /// build-descriptor runtime use. Parameters shadow same-named top-level
+    /// descriptor bindings within the body; `shadow_self_name` additionally
+    /// shadows the function's own name (used for nested functions).
+    ///
+    /// Parameter default expressions are walked in `Runtime` context *before*
+    /// the parameters enter the shadow set: a default is checked with
+    /// `fd.name` already shadowed (for a nested function) but the parameters
+    /// themselves not yet inserted, so it cannot resolve to its own parameter.
+    /// The current parser never produces parameter defaults, but the AST
+    /// permits them, so this keeps the pass total over the AST (no silent
+    /// runtime-use hole if defaults are added).
+    fn check_descriptor_use_in_funcdef(&mut self, fd: &FuncDef, shadow_self_name: bool) {
+        if shadow_self_name {
+            self.descriptor_scope_shadows.insert(fd.name.clone());
+        }
+        let saved = self.descriptor_scope_shadows.clone();
+        for p in &fd.params {
+            if let Some(default) = &p.default_value {
+                self.check_descriptor_use_in_expr(default, DescriptorUseCtx::Runtime);
+            }
+        }
+        for p in &fd.params {
+            self.descriptor_scope_shadows.insert(p.name.clone());
+        }
+        for s in &fd.body {
+            self.check_descriptor_use_in_stmt(s, false);
+        }
+        self.descriptor_scope_shadows = saved;
     }
 
     fn check_descriptor_use_in_expr(&mut self, expr: &Expr, ctx: DescriptorUseCtx) {

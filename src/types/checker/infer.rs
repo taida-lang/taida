@@ -729,13 +729,25 @@ impl TypeChecker {
                             fd.type_params.iter().map(|tp| tp.name.clone()).collect();
                         let mut bindings = HashMap::<String, Type>::new();
 
-                        if args.len() > fd.params.len() {
+                        // POST-STABLE-006: a placeholder/hole-free pipeline
+                        // stage call receives the piped value as an implicit
+                        // first argument, so count it toward the effective
+                        // arity (`data => f(a, b)` runs as `f(data, a, b)`).
+                        let injects_pipe = injected_first_arg.is_some() && hole_count == 0;
+                        let effective_args = args.len() + usize::from(injects_pipe);
+                        if effective_args > fd.params.len() {
+                            let pipe_note = if injects_pipe {
+                                " (the piped value counts as the first argument)"
+                            } else {
+                                ""
+                            };
                             self.errors.push(TypeError {
                                 message: format!(
-                                    "[E1301] Function '{}' takes at most {} argument(s), got {}. Hint: Remove extra arguments or update the function signature.",
+                                    "[E1301] Function '{}' takes at most {} argument(s), got {}.{} Hint: Remove extra arguments or update the function signature.",
                                     name,
                                     fd.params.len(),
-                                    args.len()
+                                    effective_args,
+                                    pipe_note
                                 ),
                                 span: span.clone(),
                             });
@@ -753,11 +765,41 @@ impl TypeChecker {
                             });
                         }
 
+                        // POST-STABLE-006 type-shift follow-up: a placeholder/
+                        // hole-free pipeline stage injects the piped value as
+                        // param 0. Bind it to pattern 0 first (preserving the
+                        // generic binding order: injected, then written) and
+                        // shift the written-arg checks to patterns 1.. so each
+                        // written value is checked against the slot it fills.
+                        let generic_injects = injected_first_arg.is_some() && hole_count == 0;
+                        if generic_injects
+                            && let Some(injected_ty) = &injected_first_arg
+                            && *injected_ty != Type::Unknown
+                            && let Some(pattern) = param_patterns.first()
+                            && !self.bind_generic_type_pattern(
+                                pattern,
+                                injected_ty,
+                                &generic_names,
+                                &mut bindings,
+                            )
+                        {
+                            let expected_ty =
+                                self.substitute_generic_type(pattern, &generic_names, &bindings);
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1506] Argument 1 of '{}' has type {}, expected {} (the piped value is the first argument). \
+                                     Hint: Pass a value of the correct type, or use an explicit conversion.",
+                                    name, injected_ty, expected_ty
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+                        let written_base = usize::from(generic_injects);
                         for (i, arg) in args.iter().enumerate() {
                             if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
                                 continue;
                             }
-                            let Some(pattern) = param_patterns.get(i) else {
+                            let Some(pattern) = param_patterns.get(i + written_base) else {
                                 continue;
                             };
                             let expected_hint =
@@ -784,7 +826,7 @@ impl TypeChecker {
                                     message: format!(
                                         "[E1506] Argument {} of '{}' has type {}, expected {}. \
                                          Hint: Pass a value of the correct type, or use an explicit conversion.",
-                                        i + 1,
+                                        i + written_base + 1,
                                         name,
                                         actual_ty,
                                         expected_ty
@@ -827,12 +869,34 @@ impl TypeChecker {
 
                     // First check func_types (registered function return types)
                     if let Some(ret_ty) = self.func_types.get(name).cloned() {
+                        // POST-STABLE-006 (+ type-shift follow-up): crypto runs
+                        // its own injection-aware arity and argument-type checks
+                        // (`validate_crypto*`), so the general pipeline-injection
+                        // handling below — both the effective-arity count and the
+                        // injected-first-arg type check — excludes it.
+                        let is_crypto = self.crypto_sha256_funcs.contains(name)
+                            || self.crypto_funcs.contains_key(name);
+                        // A placeholder/hole-free pipeline stage injects the
+                        // piped value as param 0, so written args fill slots
+                        // 1.. and the injected value fills slot 0.
+                        let reg_injects =
+                            injected_first_arg.is_some() && hole_count == 0 && !is_crypto;
                         if let Some(expected) = self.func_param_counts.get(name).copied() {
-                            if args.len() > expected {
+                            // POST-STABLE-006: count the implicit pipeline first
+                            // argument toward the effective arity, the same way
+                            // `validate_crypto*` already does.
+                            let injects_pipe = reg_injects;
+                            let effective_args = args.len() + usize::from(injects_pipe);
+                            if effective_args > expected {
+                                let pipe_note = if injects_pipe {
+                                    " (the piped value counts as the first argument)"
+                                } else {
+                                    ""
+                                };
                                 self.errors.push(TypeError {
                                     message: format!(
-                                        "[E1301] Function '{}' takes at most {} argument(s), got {}. Hint: Remove extra arguments or update the function signature.",
-                                        name, expected, args.len()
+                                        "[E1301] Function '{}' takes at most {} argument(s), got {}.{} Hint: Remove extra arguments or update the function signature.",
+                                        name, expected, effective_args, pipe_note
                                     ),
                                     span: span.clone(),
                                 });
@@ -858,12 +922,34 @@ impl TypeChecker {
                         }
                         // E1506: Check argument types against registered parameter types
                         if let Some(param_types) = self.func_param_types.get(name).cloned() {
+                            // POST-STABLE-006 type-shift follow-up: when a
+                            // pipeline injects param 0, validate the injected
+                            // value against param 0 and shift the written-arg
+                            // checks to params 1.. so each written value is
+                            // checked against the slot it actually fills.
+                            if reg_injects
+                                && let Some(injected_ty) = &injected_first_arg
+                                && *injected_ty != Type::Unknown
+                                && let Some(expected_ty) = param_types.first()
+                                && *expected_ty != Type::Unknown
+                                && !self.registry.is_subtype_of(injected_ty, expected_ty)
+                            {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1506] Argument 1 of '{}' has type {}, expected {} (the piped value is the first argument). \
+                                         Hint: Pass a value of the correct type, or use an explicit conversion.",
+                                        name, injected_ty, expected_ty
+                                    ),
+                                    span: span.clone(),
+                                });
+                            }
+                            let written_base = usize::from(reg_injects);
                             for (i, arg) in args.iter().enumerate() {
                                 // Skip holes (partial application) and placeholders
                                 if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
                                     continue;
                                 }
-                                if let Some(expected_ty) = param_types.get(i) {
+                                if let Some(expected_ty) = param_types.get(i + written_base) {
                                     if *expected_ty == Type::Unknown {
                                         continue;
                                     }
@@ -882,7 +968,7 @@ impl TypeChecker {
                                             message: format!(
                                                 "[E1506] Argument {} of '{}' has type {}, expected {}. \
                                                  Hint: Add annotations or simplify the function body so inference can resolve the argument type.",
-                                                i + 1,
+                                                i + written_base + 1,
                                                 name,
                                                 actual_ty,
                                                 expected_ty
@@ -896,7 +982,7 @@ impl TypeChecker {
                                             message: format!(
                                                 "[E1506] Argument {} of '{}' has type {}, expected {}. \
                                                  Hint: Pass a value of the correct type, or use an explicit conversion.",
-                                                i + 1, name, actual_ty, expected_ty
+                                                i + written_base + 1, name, actual_ty, expected_ty
                                             ),
                                             span: span.clone(),
                                         });
