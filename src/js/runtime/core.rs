@@ -20,6 +20,11 @@ function __taida_debug(...args) {
     if (__taida_isBytes(arg)) {
       console.log(__taida_bytes_to_string(arg));
     } else
+    if (arg && arg.__type === 'Moltenized') {
+      // F56: sealed carrier — policy label only. Without this guard the
+      // generic `JSON.stringify(arg)` branch below would expose __value.
+      console.log('<' + (arg.__policy || 'Moltenized') + '>');
+    } else
     if (arg && arg.__type) {
       console.log(arg.__type + '(' + JSON.stringify(arg) + ')');
     } else if (Array.isArray(arg)) {
@@ -1189,6 +1194,23 @@ function __taida_molten() {
   return Object.freeze({ __type: 'Molten' });
 }
 
+// F56: opaque secret carrier. The inner value is held in a frozen object;
+// the checker sink matrix rejects display / JSON / concat / equality, so the
+// value cannot reach a leak sink from user code. (Phase 3 hardens this to a
+// WeakMap / private handle to also close JS-interop object traversal.)
+function __taida_moltenize(value, policy) {
+  // F56: `toJSON` fails closed so `jsonEncode`/`jsonPretty` (and any nested
+  // `JSON.stringify`) emit `null` for a sealed carrier instead of exposing
+  // `__value` — matching the interpreter's `jsonEncode(Moltenized)` → `null`.
+  // (Object-traversal hardening via WeakMap is tracked for a later phase.)
+  return Object.freeze({ __type: 'Moltenized', __policy: policy, __value: value, toJSON() { return null; } });
+}
+
+// F56: Redact[secret]() → fixed "***" string. The inner value is never read.
+function __taida_redact(_carrier) {
+  return '***';
+}
+
 function __taida_stub(message) {
   if (typeof message !== 'string') {
     throw new __TaidaError(
@@ -1485,6 +1507,7 @@ function __taida_display_string(v) {
     // Molten is an opaque interpreter value; `Value::Molten.to_display_string()`
     // returns `"Molten"`.
     if (v.__type === 'Molten') return 'Molten';
+    if (v.__type === 'Moltenized') return '<' + (v.__policy || 'Moltenized') + '>';
     // Plain BuchiPack-like object (user data) — skip `__` internal fields
     // to match the interpreter's `to_display_string` on `Value::BuchiPack`
     // for non-typed packs.
@@ -2384,6 +2407,9 @@ function __taida_stdout(...args) {
       }
     } else if (arg && arg.__type === 'Result') {
       rendered = __taida_display_string(arg);
+    } else if (arg && arg.__type === 'Moltenized') {
+      // F56: sealed carrier — policy label only, never the sealed __value.
+      rendered = '<' + (arg.__policy || 'Moltenized') + '>';
     } else if (arg && arg.__type === 'Lax') {
       // Match interpreter BuchiPack display format.
       // C21B-seed-04 re-fix: when the Lax was produced by `Float_mold_f`
@@ -2483,6 +2509,8 @@ function __taida_to_string(v) {
     return '@[' + v.map(x => __taida_format(x)).join(', ') + ']';
   }
   if (typeof v === 'object') {
+    // F56: sealed carrier — policy label only, never the sealed __value.
+    if (v.__type === 'Moltenized') return '<' + (v.__policy || 'Moltenized') + '>';
     // Typed packs (Result, Lax, HashMap, Set, Gorillax, etc.) carry a
     // bespoke toString prototype method — prefer that for parity with
     // the interpreter's typed dispatch.
@@ -2741,6 +2769,12 @@ function __taida_unmold(v) {
     if (v.__type === 'Molten') {
       throw new __TaidaError('TypeError', 'Cannot unmold Molten directly. Molten can only be used inside Cage.', {});
     }
+    // F56: a sealed carrier (Moltenized/Secret) cannot be unmolded directly —
+    // that would reveal the inner value. Fail closed (parity with the checker
+    // [E1535] and the interpreter/native/wasm runtimes).
+    if (v.__type === 'Moltenized') {
+      throw new __TaidaError('TypeError', 'Cannot unmold a sealed carrier (Moltenized/Secret) directly. Use a secret-aware consumer.', {});
+    }
     // Gorillax unmold: success → value, failure → gorilla (exit)
     if (v.__type === 'Gorillax') {
       const hv = v.has_value;
@@ -2778,6 +2812,13 @@ async function __taida_unmold_async(v) {
 // ── Structural equality helper ───────────────────────────
 // Taida uses structural equality (value-based) not reference identity.
 function __taida_equals(a, b) {
+  // F56: a sealed carrier (Moltenized/Secret) is NEVER equal — not even to
+  // itself (`a === b`). Comparing `__value` would open an equality oracle (the
+  // 1-bit match/no-match leaks even though the plaintext never prints), and the
+  // interpreter has value semantics (no identity) so it always returns
+  // non-equal. Checked BEFORE the `a === b` identity fast-path so every backend
+  // agrees (`a == a` / `indexOf(sameSecret)` is non-equal on all of them).
+  if ((a && a.__type === 'Moltenized') || (b && b.__type === 'Moltenized')) return false;
   if (a === b) return true;
   if (a == null || b == null) return false;
   // C18-2: Enum-aware equality. Enum wrappers compare by (enum_name,
@@ -3060,6 +3101,10 @@ function __taida_normalise_monadic_field(k, v) {
   return v;
 }
 function __taidaSortKeys(obj) {
+  // F56: a sealed carrier (Moltenized/Secret) serializes to `null` (direct and
+  // nested) — never expose __value. `toJSON` alone is insufficient because the
+  // key-sort below rebuilds the object and drops function-valued fields.
+  if (obj && obj.__type === 'Moltenized') return null;
   // C18-2: Pass Enum wrappers through untouched so JSON.stringify invokes
   // their `toJSON` method and emits the variant-name Str.
   if (__taida_isEnumVal(obj)) return obj;
@@ -3224,6 +3269,12 @@ function hashMap(entries) {
 // (the immutable-clone cost is unchanged, matching the native `add` policy).
 function __taida_fingerprint(x) {
   if (x === null || x === undefined) return "u";
+  // F56: a sealed carrier fingerprints to a fixed bucket, never its __value.
+  // Mixing the plaintext into a fingerprint is a side channel (the generic
+  // object path below would otherwise emit `__value=s:<plaintext>`). The
+  // hashable/equality guards already keep carriers from deduping; this matches
+  // native/wasm `*_fp_accum` and the interpreter's non-hashable behaviour.
+  if (x && x.__type === 'Moltenized') return "M:sealed";
   if (__taida_isEnumVal(x)) return "n:" + x.__taida_enum_ordinal;
   const t = typeof x;
   if (t === 'bigint') return "n:" + x.toString();

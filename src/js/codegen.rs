@@ -3962,6 +3962,105 @@ impl JsCodegen {
                     self.write("__taida_molten()");
                     return Ok(());
                 }
+                // F56: Moltenize[v]() / MoltenizeSecret[v]() → __taida_moltenize(v, policy)
+                if name == "Moltenize" || name == "MoltenizeSecret" {
+                    if type_args.len() != 1 {
+                        return Err(JsError {
+                            message: format!(
+                                "{} requires exactly 1 type argument: {}[value]",
+                                name, name
+                            ),
+                        });
+                    }
+                    let policy = if name == "MoltenizeSecret" {
+                        "Secret"
+                    } else {
+                        "Moltenized"
+                    };
+                    self.write("__taida_moltenize(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(&format!(", '{}')", policy));
+                    return Ok(());
+                }
+                // F56 Phase 2: MoltenizeSecretFromEnv[name]() → Lax[Secret[Str]].
+                if name == "MoltenizeSecretFromEnv" {
+                    if type_args.len() != 1 {
+                        return Err(JsError {
+                            message: "MoltenizeSecretFromEnv requires 1 type argument: \
+                                      MoltenizeSecretFromEnv[name]"
+                                .to_string(),
+                        });
+                    }
+                    self.write("__taida_os_envvar_secret(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(")");
+                    return Ok(());
+                }
+                // F56 Phase 2: the file / stdin secret producers are
+                // Interpreter-only for now (the env producer is the canonical
+                // cross-backend ingestion). Reject rather than miscompile.
+                if name == "MoltenizeSecretFromFile" || name == "MoltenizeSecretFromInput" {
+                    return Err(JsError {
+                        message: format!(
+                            "{} is supported on the Interpreter backend only. Read the secret \
+                             with MoltenizeSecretFromEnv[name]() on compiled backends.",
+                            name
+                        ),
+                    });
+                }
+                // F56: Redact[secret]() → __taida_redact(secret)
+                if name == "Redact" {
+                    if type_args.len() != 1 {
+                        return Err(JsError {
+                            message: "Redact requires exactly 1 type argument: Redact[secret]"
+                                .to_string(),
+                        });
+                    }
+                    self.write("__taida_redact(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(")");
+                    return Ok(());
+                }
+                // F56 Phase 4: secret-aware consumers.
+                // HmacSha256[secret, msg]() → __taida_hmac_sha256_secret(secret, msg)
+                // ConstantTimeEq[secret, cand]() → __taida_constant_time_eq_secret(secret, cand)
+                if name == "HmacSha256" || name == "ConstantTimeEq" {
+                    if type_args.len() != 2 {
+                        return Err(JsError {
+                            message: format!(
+                                "{} requires 2 type arguments: {}[secret, x]",
+                                name, name
+                            ),
+                        });
+                    }
+                    let func = if name == "HmacSha256" {
+                        "__taida_hmac_sha256_secret"
+                    } else {
+                        "__taida_constant_time_eq_secret"
+                    };
+                    self.write(func);
+                    self.write("(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(", ");
+                    self.gen_expr(&type_args[1])?;
+                    self.write(")");
+                    return Ok(());
+                }
+                // F56 Phase 4: Reveal[secret, consumer]() → __taida_reveal(secret, consumer)
+                if name == "Reveal" {
+                    if type_args.len() != 2 {
+                        return Err(JsError {
+                            message: "Reveal requires 2 type arguments: Reveal[secret, consumer]"
+                                .to_string(),
+                        });
+                    }
+                    self.write("__taida_reveal(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(", ");
+                    self.gen_expr(&type_args[1])?;
+                    self.write(")");
+                    return Ok(());
+                }
                 // Stream[value]() → Stream_mold(value)
                 if name == "Stream" {
                     self.write("Stream_mold(");

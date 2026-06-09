@@ -2006,6 +2006,103 @@ impl Lowering {
                 func.push(IrInst::Call(result, "taida_molten_new".to_string(), vec![]));
                 Ok(result)
             }
+            // F56: Moltenize[v]() -> taida_moltenize_new(v),
+            // MoltenizeSecret[v]() -> taida_secret_new(v), Redact[v]() -> taida_redact(v).
+            "Moltenize" | "MoltenizeSecret" | "Redact" => {
+                if type_args.len() != 1 {
+                    return Err(LowerError {
+                        message: format!(
+                            "{} requires exactly 1 type argument: {}[value]",
+                            type_name, type_name
+                        ),
+                    });
+                }
+                let val = self.lower_expr(func, &type_args[0])?;
+                let result = func.alloc_var();
+                let fn_name = match type_name {
+                    "MoltenizeSecret" => "taida_secret_new",
+                    "Redact" => "taida_redact",
+                    _ => "taida_moltenize_new",
+                };
+                func.push(IrInst::Call(result, fn_name.to_string(), vec![val]));
+                Ok(result)
+            }
+            // F56 Phase 4: secret-aware consumers. HmacSha256[secret, msg]() ->
+            // taida_hmac_sha256_secret; ConstantTimeEq[secret, cand]() ->
+            // taida_constant_time_eq_secret. The secret's inner bytes are read
+            // from the sealed pack and fed to the crypto primitive.
+            "HmacSha256" | "ConstantTimeEq" => {
+                if type_args.len() != 2 {
+                    return Err(LowerError {
+                        message: format!("{} requires 2 type arguments: {}[secret, x]", type_name, type_name),
+                    });
+                }
+                let secret = self.lower_expr(func, &type_args[0])?;
+                let other = self.lower_expr(func, &type_args[1])?;
+                let result = func.alloc_var();
+                let fn_name = if type_name == "HmacSha256" {
+                    "taida_hmac_sha256_secret"
+                } else {
+                    "taida_constant_time_eq_secret"
+                };
+                func.push(IrInst::Call(result, fn_name.to_string(), vec![secret, other]));
+                Ok(result)
+            }
+            // F56 Phase 4: Reveal[secret, consumer]() is the explicit escape
+            // hatch (apply a user function to the revealed plaintext). It is
+            // available on the Interpreter and JS backends; the Native / WASM
+            // backends gate it with a capability error (calling an arbitrary
+            // function value on a revealed secret in a non-list mold is deferred
+            // alongside the graph-flow lint that governs Reveal). The secret-
+            // aware consumers (HmacSha256 / ConstantTimeEq) cover the common
+            // cases on all four backends.
+            "Reveal" => Err(LowerError {
+                message: "Reveal is supported on the Interpreter and JS backends only. \
+                          On Native / WASM, use a secret-aware consumer \
+                          (HmacSha256 / ConstantTimeEq) instead of revealing the plaintext."
+                    .into(),
+            }),
+            // F56 Phase 6+: source-side secret producers from file / stdin ->
+            // Async[Lax[Secret[_]]]. Implemented on Native (the env producer is
+            // already four-backend). WASM has no file/stdin capability, so the
+            // emitted runtime call has no WASM prototype and the WASM C emitter
+            // rejects it with a capability error (design L0-5); JS rejects in its
+            // codegen.
+            "MoltenizeSecretFromFile" | "MoltenizeSecretFromInput" => {
+                if type_args.len() != 1 {
+                    return Err(LowerError {
+                        message: format!("{} requires 1 type argument: {}[arg]", type_name, type_name),
+                    });
+                }
+                let arg = self.lower_expr(func, &type_args[0])?;
+                let result = func.alloc_var();
+                let fn_name = if type_name == "MoltenizeSecretFromFile" {
+                    "taida_os_secret_from_file"
+                } else {
+                    "taida_os_secret_from_input"
+                };
+                func.push(IrInst::Call(result, fn_name.to_string(), vec![arg]));
+                Ok(result)
+            }
+            // F56 Phase 2: MoltenizeSecretFromEnv[name]() -> Lax[Secret[Str]].
+            "MoltenizeSecretFromEnv" => {
+                if type_args.len() != 1 {
+                    return Err(LowerError {
+                        message:
+                            "MoltenizeSecretFromEnv requires 1 type argument: \
+                             MoltenizeSecretFromEnv[name]"
+                                .into(),
+                    });
+                }
+                let name = self.lower_expr(func, &type_args[0])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_os_env_var_secret".to_string(),
+                    vec![name],
+                ));
+                Ok(result)
+            }
             // C25B-001: Stream[val]() — minimal native/wasm lowering for
             // string-form parity. Wraps a single value into a completed
             // single-item stream; `Str[stream]()` renders it as

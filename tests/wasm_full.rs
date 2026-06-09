@@ -878,9 +878,10 @@ fn wasm_full_parity_allowlist_guard() {
     // constant deliberately.
     //
     //   92 fixtures - 14 skip - 1 rejected - 9 native_fail - 0 diff = 68
+    //   F56: +compile_f56_secret_carrier (parity-OK across all profiles) -> 69.
     assert_eq!(
         expected_parity_ok,
-        68,
+        69,
         "WF-5: parity-OK count drift — got {} = |fixtures {}| - |skip {}| - |rejected {}| - \
          |native_fail {}| - |diff {}|. Expected 68. Update this constant deliberately.",
         expected_parity_ok,

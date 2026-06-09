@@ -422,6 +422,15 @@ exit code: Int => :Int
 | `Stream[value]()` | `Stream[T]` | 逐次値を表す stream wrapper。 |
 | `StreamFrom[list]()` | `Stream[T]` | リストから stream を生成。 |
 | `Molten[]()` | `Molten` | 外部由来の不透明値。通常は境界 API が生成する。 |
+| `Moltenize[value]()` | `Moltenized[T]` | 値を不透明な封印キャリアに包む。表示・シリアライズ・直接 unmold・等値比較は型レベルで遮断される。 |
+| `MoltenizeSecret[value]()` | `Secret[T]` | secret / credential 用の封印キャリア。`Moltenized[T]` と同じ遮断に加え、用途をシグネチャで明示する。 |
+| `Redact[secret]()` | `Str` | 封印キャリアを固定マスク `"***"` の文字列へ落とす。内部値は読み出さない唯一の表示手段。 |
+| `MoltenizeSecretFromEnv[name]()` | `Lax[Secret[Str]]` | 環境変数を封印キャリアへ直接読み込む（同期）。値は境界で封印され、平文 `Str` を経由しない。 |
+| `MoltenizeSecretFromInput[prompt]()` | `Async[Lax[Secret[Str]]]` | 標準入力 1 行を封印キャリアへ読み込む。 |
+| `MoltenizeSecretFromFile[path]()` | `Async[Lax[Secret[Bytes]]]` | ファイルのバイト列を封印キャリアへ読み込む。 |
+| `HmacSha256[secret, message]()` | `Str` | 封印された秘密鍵で HMAC-SHA256 を計算する secret-aware consumer。秘密を平文へ revealせず鍵として使う。戻り値の MAC は公開値。 |
+| `ConstantTimeEq[secret, candidate]()` | `Bool` | 封印された秘密と候補を定数時間で比較する。`==`（`[E1536]`）の代わりに秘密の照合に使う。 |
+| `Reveal[secret, consumer]()` | `R` | escape hatch。`consumer: T => R` を revealed 平文に適用し `R` を返す。封印を弱めるため上の consumer を優先する（interpreter / JS のみ）。 |
 | `Stub[value]()` | `T` | 「ここはまだ仮の値」と印を付けた値を返す。 |
 | `TODO[]()` | `T` | 未実装の印として置く値。リリース版のビルドでは残存を拒否できる。 |
 | `Cage[subject, runner]()` | `Gorillax[T]` / `Async[T]` | `Molten` を扱う境界。同期 runner は `Gorillax[T]`、Promise-returning JS runner (`JSCallAsync`) は `Async[T]` で受ける。 |
@@ -438,6 +447,73 @@ exit code: Int => :Int
 > File / Build branch は、対応する具体 runner を公開している API の
 > リファレンスで説明されている場合にだけ使います。JS 実行記述の詳細は
 > [`docs/api/js.md`](js.md) を参照してください。
+
+#### 封印キャリア (Moltenized / Secret)
+
+`Moltenize[v]()` / `MoltenizeSecret[v]()` は値を `Molten` の不透明性を継承する
+封印キャリアに包みます。secret / credential を平文の `Str` として持ち回らず、
+観測される経路を型レベルで遮断するための型です。包んだ値の観測は
+`Redact[secret]()` (固定マスク `"***"`) を介してのみ行えます。
+
+```taida
+secret <= MoltenizeSecret["api-key"]()
+stdout(Redact[secret]())
+```
+
+型チェッカーは封印された値が漏れ口に届くことをコンパイル時に拒否します:
+
+- 表示 (`stdout` / `stderr` / `debug`、`.toString()` / `.toStr()`、`Str[secret]()`、文字列補間 `` `${secret}` ``) — `[E1533]`
+- シリアライズ (`jsonEncode` / `jsonPretty`、`@(...)` / `@[...]` 構造内の封印値を含む) — `[E1534]`
+- 直接 unmold (`>=>` / `<=<`) — `[E1535]`
+- 二項演算・等値・メンバシップ (`+` 連結・`==` / `!=`・`.contains()` / `.indexOf()` のオラクル) — `[E1536]`
+
+万一コンパイル時検査を省いた場合 (`--no-check`) でも、全バックエンド (interpreter /
+JS / native / wasm) のランタイムは標準 sink を fail-closed で処理し、封印値の代わりに
+policy ラベル (`<Secret>` / `<Moltenized>`) を返します。診断コードの詳細は
+[`docs/reference/diagnostic_codes.md`](../reference/diagnostic_codes.md)
+を参照してください。
+
+**秘密を観測せずに使う (secret-aware consumer):** 封印された秘密は、平文へ戻さずに
+そのまま消費できます。
+
+```taida
+apiKey <= MoltenizeSecretFromEnv["API_KEY"]() => unwrapped
+sig <= HmacSha256[unwrapped, requestBody]()
+stdout(sig)
+ok <= ConstantTimeEq[unwrapped, providedToken]()
+```
+
+- `HmacSha256[secret, message]()` — 封印鍵で署名を計算。戻り値 (MAC) は公開値で、
+  封印キャリア型を離れます。
+- `ConstantTimeEq[secret, candidate]()` — 秘密と候補を定数時間で比較。秘密の照合は
+  `==`（`[E1536]` で拒否）ではなく必ずこれを使います。
+
+これらの第1引数は `Secret`/`Moltenized` が `Str`/`Bytes` を包んだ封印キャリア、第2引数は
+非秘密の `Str`/`Bytes` であることを型チェッカーが強制します。非封印の鍵や封印された
+第2引数は `[E1506]` でコンパイル時に拒否されます (全バックエンド共通)。
+
+`Reveal[secret, consumer]()` は **escape hatch** です。`consumer: T => R` を revealed
+平文に適用して `R` を返します。封印を弱める（平文が consumer のスコープに入る）ため、
+上の secret-aware consumer で済む場合はそちらを使ってください。`Reveal` は interpreter と
+JS バックエンドでのみ利用でき、native / WASM では capability error になります。
+
+`Reveal` による de-seal 点は `taida way verify --check secret-flow` で監査できます。秘密が
+平文として consumer に入る箇所を全て列挙するので、consumer の戻り値が平文を再漏洩しない
+ことをレビューで確認してください。
+
+**脅威モデルとメモリ保証 (Level):** 封印キャリアの第一目的は、秘密が **誤って** 平文の
+`Str` として表示・シリアライズ・比較される経路を塞ぐことです。**プロセスの全メモリを
+読める攻撃者** への完全防御は脅威モデルの対象外です。メモリ上の保証はバックエンドごとに
+異なります。
+
+| バックエンド | メモリ保証 | 内容 |
+|------------|-----------|------|
+| Interpreter | Level 1 (ZeroizedBuffer) | 封印値は破棄時に zeroize される。生存中のメモリは脅威モデル外 |
+| Native / WASM / JS | Level 0 (RedactedOpaque) | sink 遮断のみ。封印値はメモリ上に平文で保持され、消費時にコピーが生じうる |
+
+`HmacSha256` / `ConstantTimeEq` を使った時点で、各バックエンドの暗号プリミティブは内部で
+鍵バッファを扱います（interpreter 以外では平文コピーを materialize します）。秘密を扱う
+本番ワークロードでは、メモリ保証が必要なバックエンド (interpreter) を選んでください。
 
 ### 7.4 文字列モールド
 

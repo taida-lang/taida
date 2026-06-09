@@ -397,6 +397,7 @@ pub const ALL_CHECKS: &[&str] = &[
     "unchecked-division",
     "direction-constraint",
     "unchecked-lax",
+    "secret-flow",
 ];
 
 /// Run a specific verification check.
@@ -413,6 +414,7 @@ pub fn run_check(check: &str, program: &Program, file: &str) -> Vec<VerifyFindin
         "direction-constraint" => check_direction_constraint(program, file),
         "unchecked-lax" => check_unchecked_lax(program, file),
         "naming-convention" => check_naming_convention(program, file),
+        "secret-flow" => check_secret_flow(program, file),
         // unchecked-index removed in v0.5.0 — IndexAccess no longer exists
         _ => vec![VerifyFinding {
             check: check.to_string(),
@@ -1040,6 +1042,132 @@ fn scan_expr_for_direction(expr: &Expr, flags: &mut DirectionFlags) {
             scan_expr_for_direction(inner, flags);
         }
         // Literals and identifiers — no direction operators
+        _ => {}
+    }
+}
+
+// ── Check: secret-flow ─────────────────────────────
+//
+// Audit the explicit de-seal points of the F56 sealed-carrier model. The sink
+// matrix (`[E1533]`–`[E1536]`) already blocks display / JSON / unmold / equality
+// of a sealed secret at compile time, and the secret-aware consumers' argument
+// contracts are enforced (`[E1506]`). The one place a secret's plaintext
+// deliberately crosses into user code is `Reveal[secret, consumer]()`. This
+// check surfaces every such point so a reviewer can confirm the consumer's
+// result does not re-leak the plaintext (e.g. an identity consumer that returns
+// the secret as a plain `Str`). Run with `taida way verify --check secret-flow`.
+fn check_secret_flow(program: &Program, file: &str) -> Vec<VerifyFinding> {
+    let mut findings = Vec::new();
+    for stmt in &program.statements {
+        scan_stmt_for_reveal(stmt, file, &mut findings);
+    }
+    findings
+}
+
+fn scan_stmt_for_reveal(stmt: &Statement, file: &str, findings: &mut Vec<VerifyFinding>) {
+    match stmt {
+        Statement::Assignment(a) => scan_expr_for_reveal(&a.value, file, findings),
+        Statement::Expr(e) => scan_expr_for_reveal(e, file, findings),
+        Statement::UnmoldForward(uf) => scan_expr_for_reveal(&uf.source, file, findings),
+        Statement::UnmoldBackward(ub) => scan_expr_for_reveal(&ub.source, file, findings),
+        Statement::FuncDef(fd) => {
+            for body_stmt in &fd.body {
+                scan_stmt_for_reveal(body_stmt, file, findings);
+            }
+        }
+        Statement::ErrorCeiling(ec) => {
+            for handler_stmt in &ec.handler_body {
+                scan_stmt_for_reveal(handler_stmt, file, findings);
+            }
+        }
+        Statement::ClassLikeDef(cl) => {
+            // Reveal can hide in a field default or a method body of a
+            // buchi-pack / mold definition — walk those too so the audit lists
+            // every de-seal point, not just the top-level ones.
+            for field in &cl.fields {
+                if let Some(default) = &field.default_value {
+                    scan_expr_for_reveal(default, file, findings);
+                }
+                if let Some(method) = &field.method_def {
+                    for body_stmt in &method.body {
+                        scan_stmt_for_reveal(body_stmt, file, findings);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scan_expr_for_reveal(expr: &Expr, file: &str, findings: &mut Vec<VerifyFinding>) {
+    if let Expr::MoldInst(name, args, fields, span) = expr {
+        if name == "Reveal" {
+            findings.push(VerifyFinding {
+                check: "secret-flow".to_string(),
+                severity: Severity::Warning,
+                message: "[secret-flow] Reveal de-seals a secret here — the plaintext enters \
+                          the consumer. Confirm the consumer's result does not re-leak it; \
+                          prefer HmacSha256 / ConstantTimeEq where they suffice."
+                    .to_string(),
+                file: Some(file.to_string()),
+                line: Some(span.line),
+            });
+        }
+        for arg in args {
+            scan_expr_for_reveal(arg, file, findings);
+        }
+        for field in fields {
+            scan_expr_for_reveal(&field.value, file, findings);
+        }
+        return;
+    }
+    match expr {
+        Expr::Pipeline(stages, _) => {
+            for stage in stages {
+                scan_expr_for_reveal(stage, file, findings);
+            }
+        }
+        Expr::BinaryOp(left, _, right, _) => {
+            scan_expr_for_reveal(left, file, findings);
+            scan_expr_for_reveal(right, file, findings);
+        }
+        Expr::UnaryOp(_, inner, _) => scan_expr_for_reveal(inner, file, findings),
+        Expr::FuncCall(func, args, _) => {
+            scan_expr_for_reveal(func, file, findings);
+            for arg in args {
+                scan_expr_for_reveal(arg, file, findings);
+            }
+        }
+        Expr::MethodCall(obj, _, args, _) => {
+            scan_expr_for_reveal(obj, file, findings);
+            for arg in args {
+                scan_expr_for_reveal(arg, file, findings);
+            }
+        }
+        Expr::FieldAccess(obj, _, _) => scan_expr_for_reveal(obj, file, findings),
+        Expr::ListLit(items, _) => {
+            for item in items {
+                scan_expr_for_reveal(item, file, findings);
+            }
+        }
+        Expr::Lambda(_, body, _) => scan_expr_for_reveal(body, file, findings),
+        Expr::CondBranch(branches, _) => {
+            for branch in branches {
+                if let Some(cond) = &branch.condition {
+                    scan_expr_for_reveal(cond, file, findings);
+                }
+                for stmt in &branch.body {
+                    scan_stmt_for_reveal(stmt, file, findings);
+                }
+            }
+        }
+        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+            for field in fields {
+                scan_expr_for_reveal(&field.value, file, findings);
+            }
+        }
+        Expr::Unmold(inner, _) => scan_expr_for_reveal(inner, file, findings),
+        Expr::Throw(inner, _) => scan_expr_for_reveal(inner, file, findings),
         _ => {}
     }
 }

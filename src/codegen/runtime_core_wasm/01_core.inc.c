@@ -913,6 +913,36 @@ int64_t taida_mod_mold(int64_t a, int64_t b) {
     return taida_lax_new(a % b, 0);
 }
 
+/* F56: shared __type tags for sealed carriers. The producers
+   (taida_moltenize_new / taida_secret_new in 02_containers.inc.c) and the
+   detector below reference these SAME statics, so classification is a pure
+   pointer-identity check. Crucially it never dereferences an arbitrary __type
+   slot: a content compare on an unrelated pack's __type — e.g. the magic-tagged
+   AsyncTask / Par packs surfaced by `out.toString()` — walked past the end of
+   linear memory and trapped (OOB). Pointer identity is safe and exact: only a
+   carrier built by the producers carries these addresses. */
+const char __wasm_moltenized_str[] = "Moltenized";
+const char __wasm_secret_str[] = "Secret";
+static int _wasm_carrier_kind(int64_t val) {
+    /* Read ONLY the header + field-0 slots directly. Pack layout is
+       `[fc, hash0, tag0, val0, ...]`, so a carrier is `fc==2`, field-0 hash ==
+       __TYPE, field-0 value == one of the shared __type statics (pointer
+       identity — exact, and the producers store those exact addresses). We must
+       NOT call taida_pack_has_hash / taida_pack_get here: those iterate the hash
+       slots and walk past the end of linear memory (OOB trap) on the
+       magic-tagged Async / Lax / Result packs that reach the equality / hashing
+       helpers (e.g. `i == n` inside pi_approx). A bounded 4-slot read is safe on
+       any value — a small int / magic pack / Lax (`fc != 2`) all fail fast. */
+    if (!_wasm_is_valid_ptr(val, 4 * 8)) return 0;
+    int64_t *p = (int64_t *)(intptr_t)val;
+    if (p[0] != 2) return 0;                /* field_count */
+    if (p[1] != WASM_HASH___TYPE) return 0; /* field-0 hash */
+    int64_t type_ptr = p[3];                /* field-0 value */
+    if (type_ptr == (int64_t)(intptr_t)__wasm_moltenized_str) return 1;
+    if (type_ptr == (int64_t)(intptr_t)__wasm_secret_str) return 2;
+    return 0;
+}
+
 /* ── generic_unmold — W-5g: Lax/Result/Gorillax-aware, predicate-evaluated ── */
 
 int64_t taida_generic_unmold(int64_t val) {
@@ -984,6 +1014,21 @@ int64_t taida_generic_unmold(int64_t val) {
        Matches native_runtime.c taida_generic_unmold TODO branch. */
     if (taida_pack_has_hash(val, WASM_HASH___TYPE)) {
         int64_t type_ptr = taida_pack_get(val, WASM_HASH___TYPE);
+        /* F56: a sealed carrier (Moltenized/Secret) cannot be unmolded directly —
+           the __value fallback below would otherwise leak the sealed value. Use
+           pointer identity against the shared __type statics (the producers store
+           those exact addresses), placed before the low-address guard which would
+           otherwise return the carrier unchanged. Fail closed (parity with the
+           checker [E1535] and the interpreter/JS/native runtimes). val is a
+           confirmed field-pack here — the async/lax/result/gorillax branches
+           returned earlier — so this never reaches a magic-tagged pack. */
+        if (type_ptr == (int64_t)(intptr_t)__wasm_moltenized_str
+            || type_ptr == (int64_t)(intptr_t)__wasm_secret_str) {
+            int64_t error = taida_make_error(
+                (int64_t)(intptr_t)"TypeError",
+                (int64_t)(intptr_t)"Cannot unmold a sealed carrier (Moltenized/Secret) directly. Use a secret-aware consumer.");
+            return taida_throw(error);
+        }
         /* Guard: ensure type_ptr looks like a valid pointer (> WASM_MIN_HEAP_ADDR) */
         if ((intptr_t)type_ptr <= WASM_MIN_HEAP_ADDR) return val;
         const char *type_str = (const char *)(intptr_t)type_ptr;
@@ -1059,8 +1104,18 @@ int64_t taida_poly_add(int64_t a, int64_t b) {
 
 /* ── 多態比較 (wasm-min: 整数比較のみ) ── */
 
-int64_t taida_poly_eq(int64_t a, int64_t b) { return a == b ? 1 : 0; }
-int64_t taida_poly_neq(int64_t a, int64_t b) { return a != b ? 1 : 0; }
+/* F56: a sealed carrier (Moltenized/Secret) is never equal — not even to itself
+   — so `==`/`!=` agree with the interpreter and never form an equality oracle.
+   (`==` is `[E1536]` in checked code; this covers `--no-check` + the tagged
+   wrappers `taida_poly_eq_tagged`/`taida_poly_neq_tagged` which route here.) */
+int64_t taida_poly_eq(int64_t a, int64_t b) {
+    if (_wasm_carrier_kind(a) || _wasm_carrier_kind(b)) return 0;
+    return a == b ? 1 : 0;
+}
+int64_t taida_poly_neq(int64_t a, int64_t b) {
+    if (_wasm_carrier_kind(a) || _wasm_carrier_kind(b)) return 1;
+    return a != b ? 1 : 0;
+}
 
 /* ── W-3: String operations (dynamic allocation via bump allocator) ── */
 
@@ -1853,6 +1908,14 @@ static int64_t _wasm_list_to_string(int64_t list_ptr) {
 
 /* W-4f2: Pack toString: @(field <= value, ...) */
 static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
+    /* F56: a sealed carrier (Moltenized/Secret) renders only its policy label;
+       every pack display path converges here so the sealed __value can never
+       reach stdout / Str[] / debug / nesting. */
+    {
+        int ck = _wasm_carrier_kind(pack_ptr);
+        if (ck == 1) return (int64_t)(intptr_t)"<Moltenized>";
+        if (ck == 2) return (int64_t)(intptr_t)"<Secret>";
+    }
     int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
     int64_t fc = pack[0];
     _wasm_strbuf sb;
@@ -1935,6 +1998,13 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
    `taida_pack_to_display_string_full`. The per-field tag dispatches
    Float / Bool rendering the same way the non-full variant does. */
 static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
+    /* F56: sealed carrier — policy label only (the full-form path keeps __
+       fields, so without this guard stdout(secret) would expose __value). */
+    {
+        int ck = _wasm_carrier_kind(pack_ptr);
+        if (ck == 1) return (int64_t)(intptr_t)"<Moltenized>";
+        if (ck == 2) return (int64_t)(intptr_t)"<Secret>";
+    }
     int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
     int64_t fc = pack[0];
     _wasm_strbuf sb;
@@ -3539,6 +3609,13 @@ void taida_set_set_elem_tag(int64_t set_ptr, int64_t tag) {
    F54B-018). HashMap / Set elements fall back to identity. */
 static int _wasm_list_struct_eq_k(int64_t *la, int64_t *lb); /* kind-aware list walk (below) */
 static int _wasm_value_eq(int64_t a, int64_t b) {
+    /* F56: a sealed carrier (Moltenized/Secret) is NEVER equal — not even to
+       itself (same pointer). A content compare of __value would be an equality
+       oracle (Unique dedup / Set / contains / indexOf / `@[a]==@[b]` leak the
+       match bit), and the interpreter has value semantics (no pointer identity)
+       so it always returns non-equal. Checked BEFORE the identity fast-path so
+       every backend agrees (`a == a` is false for a secret). */
+    if (_wasm_carrier_kind(a) || _wasm_carrier_kind(b)) return 0;
     if (a == b) return 1;
     int a_str = _looks_like_string(a), b_str = _looks_like_string(b);
     if (a_str || b_str)
@@ -3601,6 +3678,10 @@ static void _wasm_fnv_bytes(uint64_t *h, const void *p, int n) {
    non-scalar kinds delegate back to the structural walk). */
 static void _wasm_fp_accum_k(int64_t v, uint32_t ekind, uint64_t *h);
 static void _wasm_fp_accum(int64_t v, uint64_t *h) {
+    /* F56: a sealed carrier contributes a fixed tag, never its __value — mixing
+       the plaintext into a hash is a side channel (and the hashable gate keeps
+       carriers out of collection hashing entirely). */
+    if (_wasm_carrier_kind(v)) { unsigned char tag = 0x5F; _wasm_fnv_bytes(h, &tag, 1); return; }
     if (_looks_like_string(v)) {
         unsigned char tag = 2; _wasm_fnv_bytes(h, &tag, 1);
         const char *s = (const char*)(intptr_t)v; int l = _wf_strlen(s);
@@ -3655,6 +3736,10 @@ static uint64_t _wasm_value_fingerprint(int64_t v) {
 static int _wasm_elem_hashable_for_gate(int64_t v, uint32_t ekind); /* below */
 
 static int _wasm_value_hashable(int64_t v) {
+    /* F56: a sealed carrier is non-hashable so it never enters a hash-based
+       dedup / Set bucket / fingerprint path (any of which would expose an
+       equality oracle). Mirrors the interpreter's `is_hashable == false`. */
+    if (_wasm_carrier_kind(v)) return 0;
     if (_is_wasm_hashmap(v) || _is_wasm_set(v) || _wasm_is_async_obj(v)) return 0;
     if (_looks_like_bytes(v)) return 1;
     if (_looks_like_string(v)) return 1;
@@ -4732,6 +4817,10 @@ int64_t taida_polymorphic_has_value(int64_t obj) {
 /* Polymorphic .contains() */
 int64_t taida_polymorphic_contains(int64_t obj, int64_t needle) {
     if (obj == 0) return 0;
+    /* F56: a sealed carrier has no methods (checker [E1533]/[E1536], interpreter
+       rejects); guard the receiver so a `--no-check` `secret.contains(x)` cannot
+       misread the carrier pack as a list. */
+    if (_wasm_carrier_kind(obj)) return 0;
     if (_is_wasm_hashmap(obj)) return taida_hashmap_has(obj, taida_value_hash(needle), needle);
     if (_is_wasm_set(obj)) return taida_set_has(obj, needle);
     if (_looks_like_list(obj)) return taida_list_contains(obj, needle);
@@ -4742,6 +4831,7 @@ int64_t taida_polymorphic_contains(int64_t obj, int64_t needle) {
 /* Polymorphic .indexOf() */
 int64_t taida_polymorphic_index_of(int64_t obj, int64_t needle) {
     if (obj == 0) return -1;
+    if (_wasm_carrier_kind(obj)) return -1; /* F56: sealed receiver — see contains. */
     if (_looks_like_list(obj)) return taida_list_index_of(obj, needle);
     if (_looks_like_string(obj)) return taida_str_index_of(obj, needle);
     return -1;
@@ -4750,6 +4840,7 @@ int64_t taida_polymorphic_index_of(int64_t obj, int64_t needle) {
 /* Polymorphic .lastIndexOf() */
 int64_t taida_polymorphic_last_index_of(int64_t obj, int64_t needle) {
     if (obj == 0) return -1;
+    if (_wasm_carrier_kind(obj)) return -1; /* F56: sealed receiver — see contains. */
     if (_looks_like_list(obj)) return taida_list_last_index_of(obj, needle);
     if (_looks_like_string(obj)) return taida_str_last_index_of(obj, needle);
     return -1;

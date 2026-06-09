@@ -1259,6 +1259,19 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[],
             returns: &[Ptr],
         },
+        // F56: opaque secret carriers + redaction.
+        "taida_moltenize_new" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_secret_new" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_redact" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
         // C25B-001: minimal Stream wrapper — see `taida_stream_new` in
         // src/codegen/native_runtime/core.c and runtime_core_wasm/
         // 02_containers.inc.c for the implementation.
@@ -1730,6 +1743,26 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         "taida_os_env_var" => RuntimeAbi {
             params: &[Ptr],
             returns: &[Ptr],
+        },
+        // F56 Phase 2: MoltenizeSecretFromEnv[name]() -> Lax[Secret[Str]].
+        "taida_os_env_var_secret" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        // F56 Phase 6+: From{File,Input} -> Async[Lax[Secret[_]]].
+        "taida_os_secret_from_file" | "taida_os_secret_from_input" => RuntimeAbi {
+            params: &[Ptr],
+            returns: &[Ptr],
+        },
+        // F56 Phase 4: secret-aware consumers. (secret pack, Str|Bytes) ->
+        // HmacSha256 -> Str (Ptr); ConstantTimeEq -> Bool (Val).
+        "taida_hmac_sha256_secret" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_constant_time_eq_secret" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
         },
         // taida-lang/os package — side-effect functions
         "taida_os_write_file" => RuntimeAbi {

@@ -155,6 +155,10 @@
 | `E1530` | 未定義のモールド名を `Name[args]()` として呼び出した。既知のモールド / 型 / 関数名を定義してから使うか、通常の関数呼び出し `name(args)` を使う必要がある。 | TypeChecker |
 | `E1531` | `.throw()` の対象が `Error` 系の値ではない。`Error` を継承した型の値を構築してから throw する必要がある。 | TypeChecker |
 | `E1532` | ビルドドライバ専用ディスクリプタ (`BuildUnit` / `BuildPlan` / `AssetBundle` / `RouteAsset` / `BuildHook`) をランタイム値として使用した。許可される位置はトップレベル export 値・別ディスクリプタのフィールド・export へ到達させるためのトップレベル変数束縛の右辺のみ。それ以外 (builtin / ユーザー関数引数、変換 / モールド引数、演算オペランド、フィールド / メソッドアクセス等) は reject する。 | TypeChecker |
+| `E1533` | 封印キャリア (`Moltenized[T]` / `Secret[T]`) を表示系 sink (`stdout` / `stderr` / `debug` 等) に渡した。封印値は平文として表示できない。`Redact[secret]()` で固定マスクを得るか、secret-aware consumer を使う。 | TypeChecker |
+| `E1534` | 封印キャリア (`Moltenized[T]` / `Secret[T]`) を JSON シリアライズ (`jsonEncode` / `jsonPretty`) に渡した。封印値はシリアライズできない。 | TypeChecker |
+| `E1535` | 封印キャリア (`Moltenized[T]` / `Secret[T]`) を `>=>` / `<=<` で直接 unmold した。内部値を取り出す行為そのものが封印キャリアの存在意義に反するため reject する。secret-aware consumer を通すこと。 | TypeChecker |
+| `E1536` | 封印キャリア (`Moltenized[T]` / `Secret[T]`) を二項演算のオペランドに使ったか、`assert` で観測した。`+` 連結は値を漏らし、`==` / `!=` や `assert` の成否は等値オラクルになる。内容比較は `ConstantTimeEq[secret, candidate]()` のみで行う。 | TypeChecker |
 
 `E1512`〜`E1519` は **`Cage` / `CageRilla` 診断範囲**。`Cage[subject, runner]()` の型規則、および `CageRilla[Branch, Out]` の子系統 (`JSRilla` / `JSONRilla` / `BuildRilla` / `FileRilla`) が守る境界規約を扱う。`E1513` は将来の実行時検証用に予約している。
 
@@ -175,6 +179,15 @@
 - export へ到達させるためのトップレベル変数束縛の右辺 (`serverX <= BuildUnit(...)`)
 
 これら以外の位置 — builtin 関数引数 (`stdout(serverX)`)、ユーザー関数引数、変換 / モールド引数 (`Str[serverX]()`)、演算オペランド、フィールド / メソッドアクセスなど — でディスクリプタ値を使うと `[E1532]` で reject する。ディスクリプタビルド経路はディスクリプタモジュールを直接解析・取り込みするため型チェッカーを経由せず、`[E1532]` の対象外。詳細は `docs/api/build_descriptors.md` の 6 節 / 9 節を参照。
+
+`E1533`〜`E1536` は **封印キャリア (`Moltenized[T]` / `Secret[T]`) の漏れ口拒否** 診断。封印キャリアは `Molten` の不透明性を継承し、`Moltenize[value]()` / `MoltenizeSecret[value]()` で生成する。型チェッカーは封印された値が観測可能な経路へ到達することをコンパイル時に拒否する。
+
+- `E1533`: 表示ビルトイン (`stdout` / `stderr` / `debug`) に封印キャリアを渡した場合。
+- `E1534`: シリアライズ (`jsonEncode` / `jsonPretty`) に封印キャリアを渡した場合。
+- `E1535`: `>=>` / `<=<` で封印キャリアを直接 unmold した場合。封印値を秘密のまま使う正規の手段は secret-aware consumer (`HmacSha256` / `ConstantTimeEq`) である。
+- `E1536`: 封印キャリアを二項演算 (`+` 連結、`==` / `!=` / `<` 等の比較) のオペランドにした場合、または `assert` で観測した場合 (`assert(secret == x)` 等)。
+
+封印値を扱う正規の手段は次の通り: `Redact[secret]()` (固定マスク `"***"` を返す)、secret-aware consumer (`HmacSha256` / `ConstantTimeEq`、秘密を平文化せず消費)、そして escape hatch `Reveal[secret, consumer]()` (平文を consumer に渡す。封印を弱めるため最終手段。`taida way verify --check secret-flow` で de-seal 点を監査できる)。表示系 (`.toString()` / `Str[]` / 文字列補間)、メンバシップ (`.contains()` / `.indexOf()`)、`@(...)` / `@[...]` 構造内の封印値も上記の各診断でコンパイル時に拒否される。万一型検査を省いた場合 (`--no-check`) でも、4 バックエンド (interpreter / JS / native / wasm) のランタイムが標準 sink を fail-closed で処理し、封印値の代わりに policy ラベル (`<Secret>` / `<Moltenized>`) を返す。ただし `--no-check` で型検査を放棄した上に、低レベルの JS interop (`JSGet` / `JSSpread` 等) でキャリアの内部表現を意図的に走査するような迂回までは保証範囲外であり、秘密を扱うコードは通常のコンパイル (型検査あり) で運用すること。
 
 `E1520` は **「値の不在を表す型」の完全排除** 診断。PHILOSOPHY.md I の系「値の不在は値の不在」と II の系「ふくろの中身が変わったら、別のふくろにしまいなおす」を整合的に実装する。
 

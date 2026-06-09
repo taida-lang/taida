@@ -255,6 +255,15 @@ impl Interpreter {
                         .to_string(),
                 })
             }
+            // F56: a sealed carrier (Moltenized/Secret) cannot be unmolded
+            // directly — that would reveal the inner value and defeat the
+            // carrier. The checker rejects this at compile time ([E1535]); this
+            // is the fail-closed runtime layer (parity with native/wasm/JS).
+            Value::Moltenized { .. } => Err(RuntimeError {
+                message: "Cannot unmold a sealed carrier (Moltenized/Secret) directly. \
+                          Use a secret-aware consumer."
+                    .to_string(),
+            }),
             // BuchiPack with __type field (Mold type): extract the inner value
             Value::BuchiPack(ref fields) => {
                 let type_name = fields

@@ -476,6 +476,25 @@ impl TypeChecker {
                             err.span = span.clone();
                         }
                     }
+                    // F56: interpolating a sealed carrier (`` `${secret}` `` or a
+                    // `${@(token <= secret)}` literal) is a display sink. The
+                    // interpolated parts are not in the AST (TemplateLit holds the
+                    // raw string), so check the freshly parsed `${...}` expression
+                    // here — directly and one level into a literal. Side-effect-free.
+                    if let Some(carrier) = self
+                        .first_direct_sealed_operand(&parsed_expr)
+                        .or_else(|| self.first_nested_sealed_in_literal(&parsed_expr))
+                    {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1533] string interpolation cannot display a sealed carrier \
+                                 ({}); the secret value would be exposed. Hint: interpolate \
+                                 `Redact[secret]()` for a masked string instead.",
+                                carrier
+                            ),
+                            span: span.clone(),
+                        });
+                    }
                 }
                 if i < chars.len() {
                     i += 1;
@@ -971,6 +990,7 @@ impl TypeChecker {
             Statement::UnmoldForward(uf) => {
                 // `expr >=> target` -- target gets the unmolded (inner) value
                 let source_ty = self.infer_expr_type(&uf.source);
+                self.reject_sealed_carrier_unmold(&source_ty, &uf.span);
                 let target_ty = self.unmold_type(&source_ty);
                 self.define_var_with_span(&uf.target, target_ty.clone(), Some(&uf.span));
                 if target_ty == Type::Molten
@@ -982,6 +1002,7 @@ impl TypeChecker {
             Statement::UnmoldBackward(ub) => {
                 // `target <=< expr`
                 let source_ty = self.infer_expr_type(&ub.source);
+                self.reject_sealed_carrier_unmold(&source_ty, &ub.span);
                 let target_ty = self.unmold_type(&source_ty);
                 self.define_var_with_span(&ub.target, target_ty.clone(), Some(&ub.span));
                 if target_ty == Type::Molten

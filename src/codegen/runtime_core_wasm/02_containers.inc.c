@@ -1081,6 +1081,43 @@ int64_t taida_molten_new(void) {
     return pack;
 }
 
+/* F56: opaque secret carriers (Moltenized / Secret). fc=2 pack with an extra
+   __value slot. Checker sink matrix rejects display / JSON / concat / unmold;
+   this is the value-construction half of the contract.
+
+   INVARIANT: the __type slot MUST store the shared `__wasm_moltenized_str` /
+   `__wasm_secret_str` statics (defined in 01_core.inc.c). `_wasm_carrier_kind`
+   classifies a carrier by *pointer identity* against those exact addresses (a
+   content compare faulted out of bounds on magic-tagged AsyncTask/Par packs).
+   All `.inc.c` fragments compile as one translation unit, so the addresses
+   match. Any future carrier producer must use these same statics — a distinct
+   "Moltenized" literal would fail closed in display (renders the pack) but
+   fail OPEN in the detector, so do not inline the string here. (Native's
+   `taida_is_moltenized` additionally falls back to a bounded content compare,
+   so the native/wasm guards are intentionally asymmetric.) */
+int64_t taida_moltenize_new(int64_t value) {
+    int64_t pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, WASM_HASH___TYPE);
+    taida_pack_set(pack, 0, (int64_t)(intptr_t)__wasm_moltenized_str);
+    taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
+    taida_pack_set(pack, 1, value);
+    return pack;
+}
+
+int64_t taida_secret_new(int64_t value) {
+    int64_t pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, WASM_HASH___TYPE);
+    taida_pack_set(pack, 0, (int64_t)(intptr_t)__wasm_secret_str);
+    taida_pack_set_hash(pack, 1, WASM_HASH___VALUE);
+    taida_pack_set(pack, 1, value);
+    return pack;
+}
+
+int64_t taida_redact(int64_t carrier) {
+    (void)carrier;
+    return taida_str_new_copy((int64_t)(intptr_t)"***");
+}
+
 int64_t taida_stub_new(int64_t message) {
     (void)message;
     return taida_molten_new();
@@ -2017,6 +2054,33 @@ int64_t taida_crypto_constant_time_equals(int64_t a_val, int64_t b_val) {
         diff |= a[i] ^ bb;
     }
     return (int64_t)(diff == 0 ? 1 : 0);
+}
+
+/* F56 Phase 4: secret-aware consumers. Reveal the sealed secret's inner value
+   (pack index 1 = __value) and feed it to the crypto primitive; the result
+   (MAC hex / bool) is public. (Level 0 on WASM: the inner value lives in the
+   pack — see the F56 backend guarantee matrix.) */
+int64_t taida_hmac_sha256_secret(int64_t secret_ptr, int64_t msg_val) {
+    /* F56-FB-002: reject a non-sealed first argument (parity with the interpreter
+       and JS, which throw). Without this guard WASM silently MAC'd the plain value
+       under `--no-check`; the checker [E1506] gates it normally. */
+    if (!_wasm_carrier_kind(secret_ptr)) {
+        return taida_throw(taida_make_error(
+            (int64_t)(intptr_t)"TypeError",
+            (int64_t)(intptr_t)"HmacSha256 expects a sealed Secret as its first argument — seal it with MoltenizeSecret[...] or read it via MoltenizeSecretFromEnv / MoltenizeSecretFromFile"));
+    }
+    int64_t inner = taida_pack_get_idx(secret_ptr, 1);
+    return taida_crypto_hmac_sha256(inner, msg_val);
+}
+
+int64_t taida_constant_time_eq_secret(int64_t secret_ptr, int64_t cand_val) {
+    if (!_wasm_carrier_kind(secret_ptr)) { /* F56-FB-002: see taida_hmac_sha256_secret. */
+        return taida_throw(taida_make_error(
+            (int64_t)(intptr_t)"TypeError",
+            (int64_t)(intptr_t)"ConstantTimeEq expects a sealed Secret as its first argument — seal it with MoltenizeSecret[...] or read it via MoltenizeSecretFromEnv / MoltenizeSecretFromFile"));
+    }
+    int64_t inner = taida_pack_get_idx(secret_ptr, 1);
+    return taida_crypto_constant_time_equals(inner, cand_val);
 }
 
 /* hexEncode: Str|Bytes -> lower-hex Str. */

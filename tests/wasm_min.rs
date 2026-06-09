@@ -245,10 +245,18 @@ fn wasm_min_size_gate() {
         hello_size
     );
 
-    // Hard gate: pi_approx must be <= 9,216 bytes.
+    // Hard gate: pi_approx must be <= 9,664 bytes.
+    // F56 (2026-06-09): bumped 9,216 -> 9,664 across the secret-carrier landing.
+    // The shared wasm runtime gained the sealed-carrier (Moltenized/Secret)
+    // fail-closed guards, which `pi_approx` links via `>=>` (unmold reject),
+    // `debug` (display carrier check), and `i == n` (taida_poly_eq carrier
+    // guard): pi.wasm 9,097 -> 9,516 (+419). These guards are the runtime half of
+    // the no-plaintext-leak guarantee — display/unmold can't expose a sealed
+    // value and `==`/dedup/indexOf can't form an equality oracle — even under
+    // `--no-check`, so the cost is intentional. Headroom kept at ~148 bytes.
     assert!(
-        pi_size > 0 && pi_size <= 9216,
-        "HARD GATE FAIL: pi.wasm should be <= 9,216 bytes (WC-7d gate), got {} bytes. \
+        pi_size > 0 && pi_size <= 9664,
+        "HARD GATE FAIL: pi.wasm should be <= 9,664 bytes (WC-7d gate), got {} bytes. \
          E33 core baseline is 8,348 bytes.",
         pi_size
     );

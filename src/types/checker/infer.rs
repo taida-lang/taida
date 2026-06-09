@@ -456,6 +456,36 @@ impl TypeChecker {
                     matches!(&right_type, Type::Named(n) if self.type_param_is_numeric(n));
                 let left_is_numeric_ext = left_type.is_numeric() || left_is_numeric_var;
                 let right_is_numeric_ext = right_type.is_numeric() || right_is_numeric_var;
+                // F56: a sealed carrier (Moltenized/Secret) cannot participate in
+                // any binary operation. `+`/concat would leak the value; `==`/`!=`
+                // would act as an equality oracle. Comparison must go through
+                // ConstantTimeEq[]; consumption through Reveal[].
+                let left_sealed =
+                    matches!(&left_type, Type::Generic(n, _) if n == "Moltenized" || n == "Secret");
+                let right_sealed = matches!(&right_type, Type::Generic(n, _) if n == "Moltenized" || n == "Secret");
+                if left_sealed || right_sealed {
+                    let carrier = if left_sealed { &left_type } else { &right_type };
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1536] a sealed carrier ({}) cannot be used in a `{:?}` \
+                             operation; the value would leak or act as an equality \
+                             oracle. Hint: use `ConstantTimeEq[secret, candidate]()` to \
+                             compare, or `Reveal[secret, consumer]()` to consume it.",
+                            carrier, op
+                        ),
+                        span: span.clone(),
+                    });
+                    return match op {
+                        BinOp::Eq
+                        | BinOp::NotEq
+                        | BinOp::Lt
+                        | BinOp::Gt
+                        | BinOp::GtEq
+                        | BinOp::And
+                        | BinOp::Or => Type::Bool,
+                        _ => Type::Unknown,
+                    };
+                }
                 match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul => {
                         if left_is_numeric_ext && right_is_numeric_ext {
@@ -1119,6 +1149,117 @@ impl TypeChecker {
                             }
                         }
                     }
+                    // F56: display / serialization sinks must not receive a sealed
+                    // carrier (Moltenized/Secret). This compile-time guard is the
+                    // primary defence; the runtime display/JSON paths are the
+                    // fail-closed second layer.
+                    //
+                    // Only the arg forms that can *directly* resolve to a sealed
+                    // carrier are inspected. `BinaryOp` operands are deliberately
+                    // excluded: a sealed value inside a binary op is already
+                    // rejected by [E1536], and re-inferring a `BinaryOp` subtree
+                    // here would double-infer method chains (e.g. HashMap
+                    // `.get().getOrDefault()`) and disturb the pre-existing
+                    // `"x" + lax.getOrDefault(_)` tolerance (see the
+                    // `check_str_plus_known_non_str_in_expr` note above). This
+                    // mirrors the stdout/stderr arg-walk filter just below.
+                    if matches!(
+                        name.as_str(),
+                        "stdout" | "stderr" | "debug" | "jsonEncode" | "jsonPretty"
+                    ) {
+                        // Side-effect-free detection only (`first_direct_sealed_operand`
+                        // uses `lookup_var` + syntactic mold checks, never
+                        // `infer_expr_type`). Re-inferring a sink arg here would
+                        // (a) double-infer method chains and disturb the
+                        // `"x" + lax.getOrDefault(_)` tolerance, and (b) surface
+                        // spurious errors for doc-fragment idents defined in an
+                        // earlier block (`jsonEncode(rec)`). A sealed value reached
+                        // through a `FuncCall` / `MethodCall` / `FieldAccess` return
+                        // is left to the fail-closed runtime (it renders the policy
+                        // label / `null`, never plaintext).
+                        for arg in args.iter() {
+                            let Some(carrier) = self.first_direct_sealed_operand(arg) else {
+                                // F56 (lock L0-4c): a sealed carrier nested in a
+                                // `@(...)` / `@[...]` literal passed to the sink —
+                                // the structure as a whole reaches serialization /
+                                // display. Reject it too (runtime fails closed with
+                                // `null` / `<policy>` for the nested element).
+                                if let Some(nested) = self.first_nested_sealed_in_literal(arg) {
+                                    let code =
+                                        if matches!(name.as_str(), "jsonEncode" | "jsonPretty") {
+                                            "E1534"
+                                        } else {
+                                            "E1533"
+                                        };
+                                    self.errors.push(TypeError {
+                                        message: format!(
+                                            "[{}] `{}` cannot receive a structure containing a \
+                                             sealed carrier ({}); the secret value would be \
+                                             exposed. Hint: project the secret out (e.g. with \
+                                             `Redact[secret]()`) before serializing.",
+                                            code, name, nested
+                                        ),
+                                        span: span.clone(),
+                                    });
+                                }
+                                continue;
+                            };
+                            if matches!(arg, Expr::Ident(_, _) | Expr::MoldInst(_, _, _, _)) {
+                                // The arg is *itself* a sealed carrier.
+                                let code = if matches!(name.as_str(), "jsonEncode" | "jsonPretty") {
+                                    "E1534"
+                                } else {
+                                    "E1533"
+                                };
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[{}] `{}` cannot receive a sealed carrier ({}); the \
+                                         secret value would be exposed. Hint: use \
+                                         `Redact[secret]()` for a masked string, or a \
+                                         secret-aware consumer such as `HmacSha256[]`.",
+                                        code, name, carrier
+                                    ),
+                                    span: span.clone(),
+                                });
+                            } else {
+                                // BinaryOp / UnaryOp arg containing a sealed operand:
+                                // the op itself is the leak (`+` concat / `==` oracle).
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1536] a sealed carrier ({}) cannot be used in a binary \
+                                         operation; the value would leak or act as an equality \
+                                         oracle. Hint: use `ConstantTimeEq[secret, candidate]()` \
+                                         to compare, or `Redact[secret]()` to render a mask.",
+                                        carrier
+                                    ),
+                                    span: span.clone(),
+                                });
+                            }
+                        }
+                    }
+                    // F56: `assert` observes truthiness / a comparison. A sealed
+                    // carrier reaching it — directly or inside the asserted
+                    // expression — is an oracle (the pass/fail bit leaks even
+                    // though the plaintext never prints), so reject it as the same
+                    // [E1536] equality/observation family. Design lock L0-4 lists
+                    // `assert` among the error-channel sinks. Side-effect-free
+                    // (`first_direct_sealed_operand`) so it preserves the
+                    // `"x" + lax.getOrDefault(_)` tolerance.
+                    if name == "assert" {
+                        for arg in args.iter() {
+                            if let Some(carrier) = self.first_direct_sealed_operand(arg) {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1536] a sealed carrier ({}) cannot be observed by \
+                                         `assert`; the pass/fail result is an oracle. Hint: assert \
+                                         on `Redact[secret]()` or a `ConstantTimeEq[]` result.",
+                                        carrier
+                                    ),
+                                    span: span.clone(),
+                                });
+                            }
+                        }
+                    }
                     if matches!(name.as_str(), "stdout" | "stderr") {
                         for arg in args.iter() {
                             if matches!(
@@ -1226,6 +1367,66 @@ impl TypeChecker {
 
             Expr::MethodCall(obj, method, args, span) => {
                 let obj_type = self.infer_expr_type(obj);
+                // F56: a sealed carrier exposes *no* observable methods — the
+                // interpreter rejects every `.method()` on a `Moltenized`/`Secret`
+                // (see `interpreter/methods.rs`), so reject them at compile time
+                // too. Without this, a sealed *receiver* with a plain argument
+                // (`secret.contains("x")` / `secret.toString()`) slips past the
+                // arg-only guards and the Native polymorphic dispatcher misreads
+                // the carrier pack as a list. `.toString()` / `.toStr()` and the
+                // membership methods get their specific code; anything else is a
+                // display/observation attempt.
+                let receiver_sealed = matches!(
+                    &obj_type,
+                    Type::Generic(n, _) if n == "Secret" || n == "Moltenized"
+                );
+                if receiver_sealed {
+                    let (code, hint) = if matches!(
+                        method.as_str(),
+                        "contains" | "indexOf" | "lastIndexOf"
+                    ) {
+                        (
+                            "E1536",
+                            "compare with `ConstantTimeEq[secret, candidate]()`",
+                        )
+                    } else {
+                        (
+                            "E1533",
+                            "use `Redact[secret]()` or a secret-aware consumer (`HmacSha256[]` / `ConstantTimeEq[]`)",
+                        )
+                    };
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[{}] `.{}()` cannot observe a sealed carrier ({}); the secret value \
+                             would be exposed. Hint: {}.",
+                            code, method, obj_type, hint
+                        ),
+                        span: span.clone(),
+                    });
+                }
+                // F56: membership of a sealed carrier (`list.contains(secret)` /
+                // `.indexOf(secret)`) is an equality oracle — the match bit would
+                // leak whether the secret is present. The runtime is fail-closed
+                // (never finds it), but reject at compile time too (lock L0-4
+                // collection sink). Compare with `ConstantTimeEq[]` instead.
+                // Only when the receiver is *not* itself sealed: a sealed receiver
+                // is already rejected above, and firing both guards would emit a
+                // duplicate `[E1536]` on the same span (`secret.contains(other)`).
+                else if matches!(method.as_str(), "contains" | "indexOf" | "lastIndexOf") {
+                    for arg in args {
+                        if let Some(carrier) = self.first_direct_sealed_operand(arg) {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1536] `.{}()` cannot test membership of a sealed carrier \
+                                     ({}); the match would be an equality oracle. Hint: compare \
+                                     with `ConstantTimeEq[secret, candidate]()`.",
+                                    method, carrier
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+                    }
+                }
                 if !self.in_comparison_error_walk {
                     for arg in args {
                         if !matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
@@ -1445,6 +1646,24 @@ impl TypeChecker {
                 self.validate_custom_mold_inst_bindings(name, type_args, fields, mold_span);
                 self.validate_mold_header_constraints(name, type_args, mold_span);
                 self.validate_builtin_mold_spec(name, type_args, fields, mold_span);
+                // F56: `Str[secret]()` stringifies a sealed carrier — a display
+                // sink. Reject at compile time (lock L0-4), matching the runtime
+                // policy-label fail-close. Side-effect-free detection only.
+                if name == "Str"
+                    && let Some(carrier) = type_args
+                        .first()
+                        .and_then(|a| self.first_direct_sealed_operand(a))
+                {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1533] `Str[]` cannot stringify a sealed carrier ({}); the secret \
+                             value would be exposed. Hint: use `Redact[secret]()` for a masked \
+                             string.",
+                            carrier
+                        ),
+                        span: mold_span.clone(),
+                    });
+                }
                 match name.as_str() {
                     "HostCapability" => self.infer_host_capability_type(type_args, mold_span),
                     "HostStep" => self.infer_host_step_type(type_args, mold_span),
@@ -1813,6 +2032,62 @@ impl TypeChecker {
                             .unwrap_or(Type::Unknown);
                         Type::Generic("Lax".to_string(), vec![inner])
                     }
+                    // F56: Moltenize[v]() -> Moltenized[T], MoltenizeSecret[v]() -> Secret[T].
+                    // The inner type T is preserved as the reveal type; the carrier
+                    // itself is opaque (sink matrix rejects display / JSON / unmold).
+                    "Moltenize" => {
+                        let inner = type_args
+                            .first()
+                            .map(|a| self.infer_expr_type(a))
+                            .unwrap_or(Type::Unknown);
+                        Type::Generic("Moltenized".to_string(), vec![inner])
+                    }
+                    "MoltenizeSecret" => {
+                        let inner = type_args
+                            .first()
+                            .map(|a| self.infer_expr_type(a))
+                            .unwrap_or(Type::Unknown);
+                        Type::Generic("Secret".to_string(), vec![inner])
+                    }
+                    // Redact[secret]() -> Str (fixed "***").
+                    "Redact" => Type::Str,
+                    // F56 Phase 2: source-side secret producers. The read value is
+                    // sealed at the boundary; the failure channel is `Lax` (sync
+                    // env) or `Async[Lax]` (input / file I/O).
+                    "MoltenizeSecretFromEnv" => Type::Generic(
+                        "Lax".to_string(),
+                        vec![Type::Generic("Secret".to_string(), vec![Type::Str])],
+                    ),
+                    "MoltenizeSecretFromInput" => Type::Generic(
+                        "Async".to_string(),
+                        vec![Type::Generic(
+                            "Lax".to_string(),
+                            vec![Type::Generic("Secret".to_string(), vec![Type::Str])],
+                        )],
+                    ),
+                    "MoltenizeSecretFromFile" => Type::Generic(
+                        "Async".to_string(),
+                        vec![Type::Generic(
+                            "Lax".to_string(),
+                            vec![Type::Generic("Secret".to_string(), vec![Type::Bytes])],
+                        )],
+                    ),
+                    // F56 Phase 4: secret-aware consumers. The result is public —
+                    // the MAC (`Str`) / comparison verdict (`Bool`) is not a
+                    // secret, so it leaves the sealed-carrier type behind.
+                    "HmacSha256" => Type::Str,
+                    "ConstantTimeEq" => Type::Bool,
+                    // F56 Phase 4: Reveal[secret, consumer]() returns the
+                    // consumer's return type `R` (the plaintext `T` is consumed
+                    // inside the function and does not appear in the result type).
+                    "Reveal" => type_args
+                        .get(1)
+                        .map(|a| self.infer_expr_type(a))
+                        .and_then(|t| match t {
+                            Type::Function(_, ret) => Some(*ret),
+                            _ => None,
+                        })
+                        .unwrap_or(Type::Unknown),
                     // Div[x, y]() and Mod[x, y]() return Lax[Num]
                     "Div" | "Mod" => {
                         let inner = type_args
@@ -2240,9 +2515,14 @@ impl TypeChecker {
                 }
             }
 
-            Expr::Unmold(inner, _) => {
+            Expr::Unmold(inner, span) => {
                 // Unmolding a Mold[T] returns T
                 let inner_type = self.infer_expr_type(inner);
+                // F56: a sealed carrier (Moltenized/Secret) must never be unmolded
+                // directly — that is exactly the leak the carrier exists to prevent.
+                // The compile-time guard is the primary defence; every backend
+                // runtime also fails closed (`>=>` / `<=<` throws on a sealed value).
+                self.reject_sealed_carrier_unmold(&inner_type, span);
                 match &inner_type {
                     Type::Generic(name, args) => {
                         match name.as_str() {
@@ -2387,6 +2667,78 @@ impl TypeChecker {
             Statement::UnmoldForward(u) => self.lookup_var(&u.target).unwrap_or(Type::Unknown),
             Statement::UnmoldBackward(u) => self.lookup_var(&u.target).unwrap_or(Type::Unknown),
             _ => Type::Unknown,
+        }
+    }
+
+    /// F56: reject a direct unmold (`>=>` / `<=<`, statement or expression) of a
+    /// sealed carrier (`Moltenized[T]` / `Secret[T]`). Pulling the inner value
+    /// back out is exactly the leak the carrier exists to prevent — the value
+    /// can only be consumed by a secret-aware operation. Emits `[E1535]`.
+    pub(super) fn reject_sealed_carrier_unmold(&mut self, source_ty: &Type, span: &Span) {
+        if matches!(source_ty, Type::Generic(n, _) if n == "Moltenized" || n == "Secret") {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1535] a sealed carrier ({}) cannot be unmolded directly with \
+                     `>=>` / `<=<`; the secret value would be exposed. Hint: consume it \
+                     with a secret-aware operation (e.g. `HmacSha256[]` / \
+                     `ConstantTimeEq[]`) or render a mask with `Redact[secret]()`.",
+                    source_ty
+                ),
+                span: span.clone(),
+            });
+        }
+    }
+
+    /// F56: find a sealed carrier (`Moltenized[T]` / `Secret[T]`) used as a
+    /// *direct* operand of a binary/unary expression, without inferring the full
+    /// subtree. This is the cheap, idempotent counterpart to the binary-op
+    /// `[E1536]` guard for sink-builtin arguments: a sink's `BinaryOp` arg is not
+    /// type-inferred (to preserve the `"x" + lax.getOrDefault(_)` tolerance), so
+    /// `stdout("x" + secret)` would otherwise reach the divergent runtime path.
+    /// Only `Ident` (via `lookup_var`) and `Moltenize[]` / `MoltenizeSecret[]`
+    /// producers are recognised — never a method chain, so HashMap `.get()`
+    /// inference is left untouched.
+    pub(super) fn first_direct_sealed_operand(&self, expr: &Expr) -> Option<Type> {
+        match expr {
+            Expr::Ident(name, _) => {
+                let t = self.lookup_var(name)?;
+                matches!(&t, Type::Generic(n, _) if n == "Moltenized" || n == "Secret").then_some(t)
+            }
+            Expr::MoldInst(name, _, _, _) if name == "Moltenize" || name == "MoltenizeSecret" => {
+                let policy = if name == "MoltenizeSecret" {
+                    "Secret"
+                } else {
+                    "Moltenized"
+                };
+                Some(Type::Generic(policy.to_string(), vec![Type::Unknown]))
+            }
+            Expr::BinaryOp(l, _, r, _) => self
+                .first_direct_sealed_operand(l)
+                .or_else(|| self.first_direct_sealed_operand(r)),
+            Expr::UnaryOp(_, inner, _) => self.first_direct_sealed_operand(inner),
+            _ => None,
+        }
+    }
+
+    /// F56: find a sealed carrier nested one or more levels inside a `@(...)` /
+    /// `@[...]` literal (lock L0-4c). Used by the serialization / display sink
+    /// guard so `jsonEncode(@(token <= secret))` is rejected at compile time,
+    /// matching the runtime's nested fail-close (`null` / `<policy>`). Only walks
+    /// literal structures and `first_direct_sealed_operand` leaves — side-effect-
+    /// free, so it never re-infers a method chain.
+    pub(super) fn first_nested_sealed_in_literal(&self, expr: &Expr) -> Option<Type> {
+        match expr {
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                fields.iter().find_map(|f| {
+                    self.first_direct_sealed_operand(&f.value)
+                        .or_else(|| self.first_nested_sealed_in_literal(&f.value))
+                })
+            }
+            Expr::ListLit(items, _) => items.iter().find_map(|item| {
+                self.first_direct_sealed_operand(item)
+                    .or_else(|| self.first_nested_sealed_in_literal(item))
+            }),
+            _ => None,
         }
     }
 }

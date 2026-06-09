@@ -141,7 +141,8 @@ fn is_hashable(v: &Value) -> bool {
         | Value::Stream(_)
         | Value::Error(_)
         | Value::Molten
-        | Value::Json(_) => false,
+        | Value::Json(_)
+        | Value::Moltenized { .. } => false,
     }
 }
 
@@ -252,7 +253,8 @@ fn hash_value_into<H: Hasher>(v: &Value, state: &mut H) {
         | Value::Stream(_)
         | Value::Error(_)
         | Value::Molten
-        | Value::Json(_) => {
+        | Value::Json(_)
+        | Value::Moltenized { .. } => {
             unreachable!("ValueKey::hash called on non-hashable variant")
         }
     }

@@ -331,6 +331,16 @@ function __taida_os_envvar(name) {
   return Lax(null, '', undefined, __taida_error_pack('IoError', 'EnvVar error', 'not_found', 0));
 }
 
+// F56 Phase 2: MoltenizeSecretFromEnv[name]() → Lax[Secret[Str]]. The value is
+// sealed at the boundary; the failure-channel default is a sealed empty string
+// (never a plain Str on the surface).
+function __taida_os_envvar_secret(name) {
+  const val = typeof process !== 'undefined' && process.env ? process.env[name] : undefined;
+  if (val !== undefined) return Lax(__taida_moltenize(val, 'Secret'));
+  return Lax(null, __taida_moltenize('', 'Secret'), undefined,
+    __taida_error_pack('IoError', 'MoltenizeSecretFromEnv error', 'not_found', 0));
+}
+
 // ── Side-effect functions (writeFile, appendFile, remove, createDir, rename) ──
 
 // The five write/remove/create APIs return Result[Int]. The inner
@@ -1547,6 +1557,29 @@ function constantTimeEquals(a, b) {
     diff |= ba[i] ^ x;
   }
   return diff === 0;
+}
+// F56 Phase 4: secret-aware consumers. Reveal the sealed secret's inner value
+// (Level 0: it lives in `__value`) and feed it to the crypto primitive — the
+// secret is consumed without being surfaced as a plain value. The MAC / verdict
+// is public.
+function __taida_reveal_secret(carrier, fnName) {
+  if (carrier && carrier.__type === 'Moltenized') return carrier.__value;
+  throw new __TaidaError(
+    fnName + ' expects a sealed Secret as its first argument — seal it with ' +
+    'MoltenizeSecret[...] or read it via MoltenizeSecretFromEnv / MoltenizeSecretFromFile'
+  );
+}
+function __taida_hmac_sha256_secret(secret, message) {
+  return hmacSha256(__taida_reveal_secret(secret, 'HmacSha256'), message);
+}
+function __taida_constant_time_eq_secret(secret, candidate) {
+  return constantTimeEquals(__taida_reveal_secret(secret, 'ConstantTimeEq'), candidate);
+}
+// F56 Phase 4: Reveal[secret, consumer]() — the explicit escape hatch. Apply
+// the consumer function to the revealed plaintext and return its result. This
+// weakens the sealing; prefer the secret-aware consumers above.
+function __taida_reveal(secret, consumer) {
+  return consumer(__taida_reveal_secret(secret, 'Reveal'));
 }
 const __TAIDA_HEX = '0123456789abcdef';
 function hexEncode(value) {

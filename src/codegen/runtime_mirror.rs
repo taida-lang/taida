@@ -418,6 +418,11 @@ const DIVERGENT_CRYPTO: &[&str] = &[
     "taida_crypto_sha224",
     "taida_crypto_sha384",
     "taida_crypto_sha512",
+    // F56 Phase 4: secret-aware consumers reveal via the per-target carrier
+    // probe (`taida_is_moltenized` / `_wasm_carrier_kind`) then share the
+    // crypto algorithm — same divergence class as the primitives above.
+    "taida_constant_time_eq_secret",
+    "taida_hmac_sha256_secret",
 ];
 
 /// Deliberately divergent: container construction/mutation sits on
@@ -742,6 +747,11 @@ const DIVERGENT_MISC: &[&str] = &[
     "taida_make_error_with_kind_code",
     "taida_make_io_error",
     "taida_molten_new",
+    // F56: opaque secret carriers + redaction. native (taida_val) / wasm
+    // (int64_t) signatures normalize to identical bodies (same pack shape).
+    "taida_moltenize_new",
+    "taida_secret_new",
+    "taida_redact",
     "taida_monadic_field_count",
     "taida_monadic_flat_map",
     "taida_monadic_get_or_throw",

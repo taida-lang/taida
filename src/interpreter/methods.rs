@@ -256,6 +256,17 @@ impl Interpreter {
                     ),
                 })
             }
+            // F56: a sealed carrier (Moltenized/Secret) exposes no methods —
+            // `.toString()` / accessor calls would leak the inner value. Reject
+            // every method (the checker sink matrix is the primary defence; this
+            // is the fail-closed runtime layer).
+            Value::Moltenized { policy, .. } => Err(RuntimeError {
+                message: format!(
+                    "Cannot call method '{}' on a sealed carrier ({}). The value is opaque — \
+                     use a secret-aware consumer or `Redact[secret]()`.",
+                    method, policy
+                ),
+            }),
             Value::Stream(s) => self.eval_stream_method(s, method, &arg_values),
             Value::Async(a) => self.eval_async_method(a, method, &arg_values),
             Value::BuchiPack(fields) => {

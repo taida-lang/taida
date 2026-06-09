@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use super::eval::{Interpreter, RuntimeError, Signal};
 use super::value::{
-    AsyncStatus, AsyncTaskValue, AsyncValue, BytesValue, ErrorValue, StreamStatus, StreamTransform,
-    StreamValue, Value,
+    AsyncStatus, AsyncTaskValue, AsyncValue, BytesValue, ErrorValue, SealedCell, StreamStatus,
+    StreamTransform, StreamValue, Value,
 };
 /// Operation mold evaluation for the Taida interpreter.
 ///
@@ -97,13 +97,48 @@ fn make_bytes_cursor_step(value: Value, cursor: Value) -> Value {
     Value::pack(vec![("value".into(), value), ("cursor".into(), cursor)])
 }
 
-fn parse_bytes_cursor(
-    value: Value,
-    mold_name: &str,
-) -> Result<(Arc<BytesValue>, usize), RuntimeError> {
+/// F56 Phase 4: borrow the plaintext bytes of a sealed `Secret` / `Moltenized`
+/// argument for a secret-aware consumer (`HmacSha256` / `ConstantTimeEq`).
+///
+/// The bytes are read by reference from the sealed buffer — the secret is *not*
+/// copied into a fresh plaintext `Vec` / `Str`. Errors if the argument is not a
+/// sealed carrier (a non-secret input should use the lowercase `Str`/`Bytes`
+/// crypto API such as `hmacSha256` instead).
+fn sealed_secret_bytes<'a>(v: &'a Value, ctx: &str) -> Result<&'a [u8], RuntimeError> {
+    match v {
+        Value::Moltenized { value, .. } => match value.reveal() {
+            Value::Str(s) => Ok(s.as_str().as_bytes()),
+            Value::Bytes(b) => Ok(b.as_slice()),
+            _ => Err(RuntimeError {
+                message: format!("{ctx}: a sealed secret must wrap Str or Bytes"),
+            }),
+        },
+        _ => Err(RuntimeError {
+            message: format!(
+                "{ctx} expects a sealed Secret as its first argument — seal it with \
+                 MoltenizeSecret[...] or read it via MoltenizeSecretFromEnv / \
+                 MoltenizeSecretFromFile"
+            ),
+        }),
+    }
+}
+
+/// F56 Phase 4: borrow the bytes of a non-secret consumer argument (the HMAC
+/// message / comparison candidate). Accepts `Str` or `Bytes`.
+fn plain_consumer_bytes<'a>(v: &'a Value, ctx: &str) -> Result<&'a [u8], RuntimeError> {
+    match v {
+        Value::Str(s) => Ok(s.as_str().as_bytes()),
+        Value::Bytes(b) => Ok(b.as_slice()),
+        _ => Err(RuntimeError {
+            message: format!("{ctx} must be Str or Bytes"),
+        }),
+    }
+}
+
+fn parse_bytes_cursor(value: Value, name: &str) -> Result<(Arc<BytesValue>, usize), RuntimeError> {
     let Value::BuchiPack(fields) = value else {
         return Err(RuntimeError {
-            message: format!("{}: argument must be BytesCursor, got {}", mold_name, value),
+            message: format!("{}: argument must be BytesCursor, got {}", name, value),
         });
     };
 
@@ -113,12 +148,12 @@ fn parse_bytes_cursor(
         Some((_, Value::Bytes(v))) => Arc::clone(v),
         Some((_, v)) => {
             return Err(RuntimeError {
-                message: format!("{}: cursor.bytes must be Bytes, got {}", mold_name, v),
+                message: format!("{}: cursor.bytes must be Bytes, got {}", name, v),
             });
         }
         None => {
             return Err(RuntimeError {
-                message: format!("{}: cursor.bytes field is required", mold_name),
+                message: format!("{}: cursor.bytes field is required", name),
             });
         }
     };
@@ -127,7 +162,7 @@ fn parse_bytes_cursor(
         Some((_, Value::Int(v))) => *v,
         Some((_, v)) => {
             return Err(RuntimeError {
-                message: format!("{}: cursor.offset must be Int, got {}", mold_name, v),
+                message: format!("{}: cursor.offset must be Int, got {}", name, v),
             });
         }
         None => 0,
@@ -2645,6 +2680,253 @@ impl Interpreter {
                     });
                 }
                 Ok(Some(Signal::Value(Value::Molten)))
+            }
+
+            // Moltenize[v]() / MoltenizeSecret[v](): wrap a value in an opaque
+            // Moltenized[T] / Secret[T] carrier (F56). The sealed value can only
+            // be consumed by secret-aware operations; display / JSON / unmold /
+            // equality are rejected by the checker sink matrix and fail-closed
+            // at runtime (see Value::to_display_string / is_hashable).
+            "Moltenize" | "MoltenizeSecret" => {
+                if type_args.len() != 1 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "{} requires exactly 1 type argument: {}[value]",
+                            name, name
+                        ),
+                    });
+                }
+                let inner = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let reveal_type = Self::type_name_of(&inner).to_string();
+                let policy = if name == "MoltenizeSecret" {
+                    "Secret"
+                } else {
+                    "Moltenized"
+                };
+                Ok(Some(Signal::Value(Value::Moltenized {
+                    value: SealedCell::new(inner),
+                    reveal_type,
+                    policy: policy.to_string(),
+                })))
+            }
+
+            // Redact[secret](): consume a Moltenized/Secret value and return a
+            // fixed "***" Str. The inner value is never revealed.
+            "Redact" => {
+                if type_args.len() != 1 {
+                    return Err(RuntimeError {
+                        message: "Redact requires exactly 1 type argument: Redact[secret]".into(),
+                    });
+                }
+                match self.eval_expr(&type_args[0])? {
+                    Signal::Value(_) => {}
+                    other => return Ok(Some(other)),
+                }
+                Ok(Some(Signal::Value(Value::str("***".to_string()))))
+            }
+
+            // F56 Phase 4: HmacSha256[secret, message]() -> Str. A secret-aware
+            // consumer — the key bytes are read by reference from the sealed
+            // buffer and fed straight to the HMAC primitive, so the secret is
+            // used without being revealed to a plain `Str`. The MAC is public.
+            "HmacSha256" => {
+                if type_args.len() != 2 {
+                    return Err(RuntimeError {
+                        message: "HmacSha256 requires 2 type arguments: \
+                                  HmacSha256[secret, message]"
+                            .into(),
+                    });
+                }
+                let secret = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let message = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let key = sealed_secret_bytes(&secret, "HmacSha256")?;
+                let data = plain_consumer_bytes(&message, "HmacSha256 message")?;
+                let mac = crate::crypto::hmac_sha256_hex(key, data);
+                Ok(Some(Signal::Value(Value::str(mac))))
+            }
+
+            // F56 Phase 4: ConstantTimeEq[secret, candidate]() -> Bool. Compares
+            // a sealed secret against a candidate in constant time, reading the
+            // secret bytes by reference (no plaintext round-trip). Use this — not
+            // `==` (a compile sink) — to verify a secret.
+            "ConstantTimeEq" => {
+                if type_args.len() != 2 {
+                    return Err(RuntimeError {
+                        message: "ConstantTimeEq requires 2 type arguments: \
+                                  ConstantTimeEq[secret, candidate]"
+                            .into(),
+                    });
+                }
+                let secret = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let candidate = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let a = sealed_secret_bytes(&secret, "ConstantTimeEq")?;
+                let b = plain_consumer_bytes(&candidate, "ConstantTimeEq candidate")?;
+                Ok(Some(Signal::Value(Value::Bool(
+                    crate::crypto::constant_time_eq(a, b),
+                ))))
+            }
+
+            // F56 Phase 4: Reveal[secret, consumer]() — the explicit escape
+            // hatch. Apply `consumer: T => R` to the revealed plaintext and
+            // return `R`. The plaintext is passed by reference (Reveal itself
+            // makes no copy); the consumer's parameter binding scopes it to the
+            // call. This weakens the sealing — prefer the secret-aware consumers
+            // (`HmacSha256` / `ConstantTimeEq`) where they suffice.
+            "Reveal" => {
+                if type_args.len() != 2 {
+                    return Err(RuntimeError {
+                        message: "Reveal requires 2 type arguments: Reveal[secret, consumer]"
+                            .into(),
+                    });
+                }
+                let sealed = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let consumer = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Function(f)) => f,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "Reveal: the second argument must be a consumer function, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let Value::Moltenized { value, .. } = &sealed else {
+                    return Err(RuntimeError {
+                        message: "Reveal expects a sealed Secret as its first argument".into(),
+                    });
+                };
+                let result =
+                    self.call_function_with_values(&consumer, std::slice::from_ref(value.reveal()))?;
+                Ok(Some(Signal::Value(result)))
+            }
+
+            // F56 Phase 2: MoltenizeSecretFromEnv[name]() -> Lax[Secret[Str]].
+            // Reads an environment variable straight into a sealed carrier — the
+            // value is sealed at the boundary instead of living as a plain `Str`.
+            // The sealed buffer is held behind `SealedCell` and zeroized on drop
+            // (Phase 3, Level 1). The OS-owned `environ` copy is outside our heap.
+            "MoltenizeSecretFromEnv" => {
+                if type_args.len() != 1 {
+                    return Err(RuntimeError {
+                        message:
+                            "MoltenizeSecretFromEnv requires 1 type argument: \
+                             MoltenizeSecretFromEnv[name]"
+                                .into(),
+                    });
+                }
+                let var_name = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => Value::str_take(s),
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "MoltenizeSecretFromEnv: name must be a string, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let seal = |inner: String| Value::Moltenized {
+                    value: SealedCell::new(Value::str(inner)),
+                    reveal_type: "Str".to_string(),
+                    policy: "Secret".to_string(),
+                };
+                let lax = match std::env::var(&var_name) {
+                    Ok(val) => super::os::make_lax_success_pub(seal(val)),
+                    // Not present / not-unicode: a sealed empty-string default on
+                    // the Lax failure channel (never a plain `Str`).
+                    Err(_) => super::os::make_lax_failure_pub(seal(String::new())),
+                };
+                Ok(Some(Signal::Value(lax)))
+            }
+
+            // F56 Phase 2: MoltenizeSecretFromInput[prompt]() ->
+            // Async[Lax[Secret[Str]]]. Reads a line of stdin into a sealed
+            // carrier zeroized on drop (Phase 3, Level 1). No-echo / masked
+            // terminal input is a separate TTY concern (not in F56 scope).
+            "MoltenizeSecretFromInput" => {
+                use rustyline::{DefaultEditor, error::ReadlineError};
+                let prompt = match type_args.first() {
+                    Some(arg) => match self.eval_expr(arg)? {
+                        Signal::Value(v) => v.to_display_string(),
+                        other => return Ok(Some(other)),
+                    },
+                    None => String::new(),
+                };
+                let seal = |inner: String| Value::Moltenized {
+                    value: SealedCell::new(Value::str(inner)),
+                    reveal_type: "Str".to_string(),
+                    policy: "Secret".to_string(),
+                };
+                let inner = match DefaultEditor::new() {
+                    Ok(mut rl) => match rl.readline(&prompt) {
+                        Ok(line) => super::os::make_lax_success_pub(seal(line)),
+                        Err(ReadlineError::Eof)
+                        | Err(ReadlineError::Interrupted)
+                        | Err(_) => super::os::make_lax_failure_pub(seal(String::new())),
+                    },
+                    Err(_) => super::os::make_lax_failure_pub(seal(String::new())),
+                };
+                Ok(Some(Signal::Value(Value::Async(AsyncValue {
+                    status: AsyncStatus::Fulfilled,
+                    value: Box::new(inner),
+                    error: Box::new(Value::Unit),
+                    task: None,
+                }))))
+            }
+
+            // F56 Phase 2: MoltenizeSecretFromFile[path]() ->
+            // Async[Lax[Secret[Bytes]]]. Reads a file's bytes into a sealed
+            // carrier. Synchronous read wrapped in a fulfilled Async (the `>=>`
+            // await returns immediately), mirroring `stdinLine`'s shape.
+            "MoltenizeSecretFromFile" => {
+                let path = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => Value::str_take(s),
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "MoltenizeSecretFromFile: path must be a string, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                let seal = |inner: Vec<u8>| Value::Moltenized {
+                    value: SealedCell::new(Value::bytes(inner)),
+                    reveal_type: "Bytes".to_string(),
+                    policy: "Secret".to_string(),
+                };
+                let inner = match std::fs::read(&path) {
+                    Ok(bytes) => super::os::make_lax_success_pub(seal(bytes)),
+                    Err(_) => super::os::make_lax_failure_pub(seal(Vec::new())),
+                };
+                Ok(Some(Signal::Value(Value::Async(AsyncValue {
+                    status: AsyncStatus::Fulfilled,
+                    value: Box::new(inner),
+                    error: Box::new(Value::Unit),
+                    task: None,
+                }))))
             }
 
             // Gorillax[T](): create Gorillax.

@@ -64,6 +64,17 @@ pub enum MoldArgKind {
     List,
     ListOrStream,
     Numeric,
+    /// F56 Phase 4: any sealed carrier (`Secret[T]` / `Moltenized[T]`). Used for
+    /// `Reveal`'s first argument (the consumer handles any `T`).
+    Sealed,
+    /// F56 Phase 4: a sealed carrier whose inner type is `Str` / `Bytes`. Used
+    /// for the secret-aware consumers' key argument so the checker rejects (on
+    /// all four backends) a non-sealed key or a `Secret` wrapping a non-byte
+    /// payload — the runtime divergence the review found.
+    SealedBytes,
+    /// F56 Phase 4: a non-secret `Str` / `Bytes` (the HMAC message / comparison
+    /// candidate). Rejects a sealed second argument.
+    StrOrBytes,
 }
 
 /// Whether a builtin mold can cross a CPU worker boundary.
@@ -202,6 +213,10 @@ impl MoldReturnKind {
 
 const ANY1: &[MoldArgKind] = &[MoldArgKind::Any];
 const ANY2: &[MoldArgKind] = &[MoldArgKind::Any, MoldArgKind::Any];
+// F56 Phase 4: secret-aware-consumer / Reveal argument contracts.
+const SEALED_BYTES_AND_STR_OR_BYTES: &[MoldArgKind] =
+    &[MoldArgKind::SealedBytes, MoldArgKind::StrOrBytes];
+const SEALED_AND_FUNCTION: &[MoldArgKind] = &[MoldArgKind::Sealed, MoldArgKind::Function];
 const ANY3: &[MoldArgKind] = &[MoldArgKind::Any, MoldArgKind::Any, MoldArgKind::Any];
 const ANY4: &[MoldArgKind] = &[
     MoldArgKind::Any,
@@ -371,6 +386,62 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::range("Optional", 0, Some(1), ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("Molten", 0, &[], MoldReturnKind::Pack)
         .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    // F56: opaque secret carriers. A sealed value must not cross a CPU
+    // worker boundary (it would expose the inner value), mirroring `Molten`.
+    MoldSpec::exact("Moltenize", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
+    MoldSpec::exact("MoltenizeSecret", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
+    MoldSpec::exact("Redact", 1, ANY1, MoldReturnKind::Str)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
+    // F56 Phase 2: source-side secret producers — read a secret directly from an
+    // OS source into a sealed carrier (canonical ingestion: the value is sealed
+    // at the boundary rather than wrapped after living as a plain `Str`). All
+    // return failure-channel-wrapped sealed carriers; none may cross a worker
+    // boundary. `FromEnv` is synchronous (`Lax[Secret[Str]]`); `FromInput` /
+    // `FromFile` are `Async[Lax[Secret[_]]]`.
+    MoldSpec::exact("MoltenizeSecretFromEnv", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
+    MoldSpec::exact("MoltenizeSecretFromInput", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
+    MoldSpec::exact("MoltenizeSecretFromFile", 1, ANY1, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
+    // F56 Phase 4: secret-aware consumers. Each accepts a sealed `Secret`/
+    // `Moltenized` as its first argument and consumes the sealed bytes directly
+    // (read by reference from the sealed buffer — no plaintext `Str` round-trip),
+    // so a secret can be used without being revealed. `HmacSha256[secret, msg]`
+    // returns the MAC as a public `Str`; `ConstantTimeEq[secret, candidate]`
+    // returns a `Bool`. Host-bound (a secret never crosses a worker boundary).
+    MoldSpec::exact(
+        "HmacSha256",
+        2,
+        SEALED_BYTES_AND_STR_OR_BYTES,
+        MoldReturnKind::Str,
+    )
+    .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+    .enforce_checker(),
+    MoldSpec::exact(
+        "ConstantTimeEq",
+        2,
+        SEALED_BYTES_AND_STR_OR_BYTES,
+        MoldReturnKind::Bool,
+    )
+    .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+    .enforce_checker(),
+    // F56 Phase 4: Reveal[secret, consumer]() is the explicit escape hatch —
+    // it applies `consumer: T => R` to the revealed plaintext and returns `R`.
+    // It weakens the sealing (the plaintext enters the consumer's scope), so the
+    // secret-aware consumers above are preferred; `Reveal` is for cases they do
+    // not cover. The return kind is dynamic (`R`), resolved by checker inference.
+    MoldSpec::exact("Reveal", 2, SEALED_AND_FUNCTION, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary)
+        .enforce_checker(),
     MoldSpec::exact("Stub", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::range("TODO", 0, Some(4), ANY4, MoldReturnKind::Pack).with_options(TODO_OPTIONS),
     MoldSpec::exact("Cage", 2, ANY2, MoldReturnKind::Pack)
