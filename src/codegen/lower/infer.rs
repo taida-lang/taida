@@ -552,6 +552,36 @@ impl Lowering {
         self.shadow_kind_vars.insert(target.to_string());
     }
 
+    /// QF-34 / F58B-003: record the assignment-time inner type for
+    /// `x <= Mold[...]()` so a later `x >=> val` can land `val` in the
+    /// right typed set. For `Lax[arg]()` the *inner* kind is recorded
+    /// when statically known — the mold name "Lax" alone carries no
+    /// inner type and left the unmold result on the polymorphic path.
+    pub(super) fn record_lax_inner_type(&mut self, target: &str, value: &Expr) {
+        if let Expr::MoldInst(mold_name, type_args, _, _) = value {
+            let inner_kind = if mold_name == "Lax" && type_args.len() == 1 {
+                let arg = &type_args[0];
+                if self.expr_is_int(arg) {
+                    Some("Int")
+                } else if self.expr_returns_float(arg) {
+                    Some("Float")
+                } else if self.expr_is_string_full(arg) {
+                    Some("Str")
+                } else if self.expr_is_bool(arg) {
+                    Some("Bool")
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            self.lax_inner_types.insert(
+                target.to_string(),
+                inner_kind.map_or_else(|| mold_name.clone(), str::to_string),
+            );
+        }
+    }
+
     /// Unmold 先の変数に型情報を伝播する
     /// MoldInst("Str",...) >=> x の場合、x を string_vars に追加
     pub(super) fn track_unmold_type(&mut self, target: &str, source: &Expr) {
@@ -569,6 +599,30 @@ impl Lowering {
                     && type_args.iter().any(|a| self.expr_returns_float(a)) =>
             {
                 self.float_vars.insert(target.to_string());
+            }
+            // F58B-003: all-Int Div/Mod produce Lax[Int], so the unmold
+            // result is an Int. Landing it in int_vars keeps follow-up
+            // arithmetic on the typed taida_int_* path instead of the
+            // polymorphic runtime dispatch.
+            Expr::MoldInst(name, type_args, _, _)
+                if (name == "Div" || name == "Mod")
+                    && type_args.iter().all(|a| self.expr_is_int(a)) =>
+            {
+                self.int_vars.insert(target.to_string());
+            }
+            // F58B-003: `Lax[x]() >=> v` — propagate x's statically known
+            // kind to v (same rationale as the Div/Mod arms above).
+            Expr::MoldInst(name, type_args, _, _) if name == "Lax" && type_args.len() == 1 => {
+                let arg = &type_args[0];
+                if self.expr_is_int(arg) {
+                    self.int_vars.insert(target.to_string());
+                } else if self.expr_returns_float(arg) {
+                    self.float_vars.insert(target.to_string());
+                } else if self.expr_is_string_full(arg) {
+                    self.string_vars.insert(target.to_string());
+                } else if self.expr_is_bool(arg) {
+                    self.bool_vars.insert(target.to_string());
+                }
             }
             Expr::MoldInst(name, _, _, _) => self.track_unmold_type_by_mold_name(target, name),
             // QF-34: Ident source — look up lax_inner_types to propagate type through unmold
@@ -634,6 +688,11 @@ impl Lowering {
             }
             "Float" => {
                 self.float_vars.insert(target.to_string());
+            }
+            // F58B-003: logical inner-type name recorded by the assignment
+            // tracker for `x <= Lax[intExpr]()` (and the Int mold itself).
+            "Int" => {
+                self.int_vars.insert(target.to_string());
             }
             // C26B-011 (Phase 11): math molds return Float per
             // `src/types/mold_specs.rs`. Previously `Sqrt[-1.0]() >=> nan`

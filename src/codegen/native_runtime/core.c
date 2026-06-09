@@ -171,6 +171,16 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 #define TAIDA_STR_ROPE_MAGIC 0x5441494452505400LL // "TAIDRPT\0"
 #define TAIDA_CLOSURE_MAGIC 0x54414944434C4F00LL // "TAIDCLO\0"
 
+// A single static empty-string *value* carrying the hidden 16-byte header
+// ([magic][len=0] | "\0"). Runtime sites that need an empty Str in the
+// Taida value space (Lax defaults, empty pack fields) must use this
+// instead of casting a raw C "" literal: string-value identification is
+// positive (hidden-header magic), so a header-less char* would not be
+// recognised as a Str by taida_is_string_value / the polymorphic
+// operators.
+static const taida_val taida_empty_str_obj[3] = { TAIDA_STR_STATIC_MAGIC, 0, 0 };
+#define TAIDA_EMPTY_STR ((taida_val)(intptr_t)&taida_empty_str_obj[2])
+
 // Type tags for BuchiPack field values (A-4a)
 #define TAIDA_TAG_INT     0
 #define TAIDA_TAG_FLOAT   1
@@ -971,6 +981,7 @@ static const char *taida_os_error_kind(int err_code, const char *err_msg);
 static taida_val taida_make_io_error(int err_code, const char *err_msg);
 static int taida_ptr_is_readable(taida_val ptr, size_t bytes);
 static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_len);
+static int taida_is_string_value(taida_val v);
 static int taida_str_byte_len(const char *s, size_t *out_len);
 static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
@@ -1302,11 +1313,11 @@ static taida_val taida_digit_to_char(taida_val digit) {
 }
 
 taida_val taida_to_radix(taida_val value, taida_val base) {
-    if (base < 2 || base > 36) return taida_lax_empty((taida_val)"");
+    if (base < 2 || base > 36) return taida_lax_empty(TAIDA_EMPTY_STR);
     if (value == 0) {
         char *out = taida_str_alloc(1);
         out[0] = '0';
-        return taida_lax_new((taida_val)out, (taida_val)"");
+        return taida_lax_new((taida_val)out, TAIDA_EMPTY_STR);
     }
 
     uint64_t mag = value < 0
@@ -1325,7 +1336,7 @@ taida_val taida_to_radix(taida_val value, taida_val base) {
     for (size_t i = 0; i < pos; i++) {
         out[i] = tmp[pos - 1 - i];
     }
-    return taida_lax_new((taida_val)out, (taida_val)"");
+    return taida_lax_new((taida_val)out, TAIDA_EMPTY_STR);
 }
 // FNV-1a hashes for error field names
 #define HASH_TYPE    0xa79439ef7bfa9c2dULL
@@ -2100,16 +2111,16 @@ taida_val taida_mod_mold_f(double a, double b) {
 
 // Str[x]() — always succeeds
 taida_val taida_str_mold_int(taida_val v) {
-    return taida_lax_tag_value_default(taida_lax_new(taida_str_from_int(v), (taida_val)""), TAIDA_TAG_STR);
+    return taida_lax_tag_value_default(taida_lax_new(taida_str_from_int(v), TAIDA_EMPTY_STR), TAIDA_TAG_STR);
 }
 taida_val taida_str_mold_float(double v) {
-    return taida_lax_tag_value_default(taida_lax_new(taida_str_from_float(v), (taida_val)""), TAIDA_TAG_STR);
+    return taida_lax_tag_value_default(taida_lax_new(taida_str_from_float(v), TAIDA_EMPTY_STR), TAIDA_TAG_STR);
 }
 taida_val taida_str_mold_bool(taida_val v) {
-    return taida_lax_tag_value_default(taida_lax_new(taida_str_from_bool(v), (taida_val)""), TAIDA_TAG_STR);
+    return taida_lax_tag_value_default(taida_lax_new(taida_str_from_bool(v), TAIDA_EMPTY_STR), TAIDA_TAG_STR);
 }
 taida_val taida_str_mold_str(taida_val v) {
-    return taida_lax_tag_value_default(taida_lax_new(v, (taida_val)""), TAIDA_TAG_STR);
+    return taida_lax_tag_value_default(taida_lax_new(v, TAIDA_EMPTY_STR), TAIDA_TAG_STR);
 }
 
 // C23-2: generic Str[x]() entry for non-primitive values (List/Pack/Lax/Result/…).
@@ -2122,7 +2133,7 @@ taida_val taida_str_mold_str(taida_val v) {
 // molds above.
 taida_val taida_str_mold_any(taida_val v) {
     taida_val str = taida_stdout_display_string(v);
-    return taida_lax_tag_value_default(taida_lax_new(str, (taida_val)""), TAIDA_TAG_STR);
+    return taida_lax_tag_value_default(taida_lax_new(str, TAIDA_EMPTY_STR), TAIDA_TAG_STR);
 }
 
 // Int[x]() — Str parse can fail
@@ -2158,7 +2169,7 @@ taida_val taida_int_mold_auto(taida_val v) {
     }
 
     size_t len = 0;
-    if (taida_read_cstr_len_safe((const char*)v, 4096, &len)) {
+    if (taida_is_string_value(v) && taida_read_cstr_len_safe((const char*)v, 4096, &len)) {
         return taida_int_mold_str(v);
     }
 
@@ -2496,27 +2507,27 @@ static int taida_utf8_single_scalar(const unsigned char *buf, size_t len, uint32
 }
 
 taida_val taida_char_mold_int(taida_val value) {
-    if (value < 0 || value > 0x10FFFF) return taida_lax_empty((taida_val)"");
-    if (value >= 0xD800 && value <= 0xDFFF) return taida_lax_empty((taida_val)"");
+    if (value < 0 || value > 0x10FFFF) return taida_lax_empty(TAIDA_EMPTY_STR);
+    if (value >= 0xD800 && value <= 0xDFFF) return taida_lax_empty(TAIDA_EMPTY_STR);
     unsigned char utf8[4];
     size_t out_len = 0;
     if (!taida_utf8_encode_scalar((uint32_t)value, utf8, &out_len)) {
-        return taida_lax_empty((taida_val)"");
+        return taida_lax_empty(TAIDA_EMPTY_STR);
     }
     char *out = taida_str_alloc(out_len);
     memcpy(out, utf8, out_len);
-    return taida_lax_new((taida_val)out, (taida_val)"");
+    return taida_lax_new((taida_val)out, TAIDA_EMPTY_STR);
 }
 
 taida_val taida_char_mold_str(taida_val value) {
     const char *s = (const char*)value;
     size_t len = 0;
     if (!taida_read_cstr_len_safe(s, 4096, &len) || len == 0) {
-        return taida_lax_empty((taida_val)"");
+        return taida_lax_empty(TAIDA_EMPTY_STR);
     }
     uint32_t cp = 0;
     if (!taida_utf8_single_scalar((const unsigned char*)s, len, &cp)) {
-        return taida_lax_empty((taida_val)"");
+        return taida_lax_empty(TAIDA_EMPTY_STR);
     }
     return taida_char_mold_int((taida_val)cp);
 }
@@ -2561,7 +2572,7 @@ taida_val taida_bytes_mold(taida_val value, taida_val fill) {
 
     const char *s = (const char*)value;
     size_t slen = 0;
-    if (taida_read_cstr_len_safe(s, 65536, &slen)) {
+    if (taida_is_string_value(value) && taida_read_cstr_len_safe(s, 65536, &slen)) {
         taida_val out = taida_bytes_from_raw((const unsigned char*)s, (taida_val)slen);
         return taida_lax_new(out, taida_bytes_default_value());
     }
@@ -2740,7 +2751,7 @@ taida_val taida_bytes_cursor_u8(taida_val cursor_ptr) {
 taida_val taida_utf8_encode_mold(taida_val value) {
     const char *s = (const char*)value;
     size_t len = 0;
-    if (!taida_read_cstr_len_safe(s, 65536, &len)) {
+    if (!taida_is_string_value(value) || !taida_read_cstr_len_safe(s, 65536, &len)) {
         return taida_lax_empty(taida_bytes_default_value());
     }
     taida_val out = taida_bytes_from_raw((const unsigned char*)s, (taida_val)len);
@@ -2756,7 +2767,7 @@ taida_val taida_utf8_decode_mold(taida_val value) {
     taida_val len = 0;
     if (TAIDA_IS_BYTES_CONTIG(value)) {
         len = taida_bytes_contig_len(value);
-        if (len <= 0) return taida_lax_new((taida_val)taida_str_new_copy(""), (taida_val)"");
+        if (len <= 0) return taida_lax_new((taida_val)taida_str_new_copy(""), TAIDA_EMPTY_STR);
         raw_ptr = taida_bytes_contig_data(value);
     } else if (TAIDA_IS_BYTES(value)) {
         taida_val *bytes = (taida_val*)value;
@@ -2764,12 +2775,12 @@ taida_val taida_utf8_decode_mold(taida_val value) {
         // R-01: Guard against negative length — a corrupted Bytes header could
         // pass a negative len, which would be cast to a huge size_t and trigger
         // a massive malloc followed by OOM abort.
-        if (len <= 0) return taida_lax_new((taida_val)taida_str_new_copy(""), (taida_val)"");
+        if (len <= 0) return taida_lax_new((taida_val)taida_str_new_copy(""), TAIDA_EMPTY_STR);
         raw_owned = (unsigned char*)TAIDA_MALLOC((size_t)len, "bytes_decode");
         for (taida_val i = 0; i < len; i++) raw_owned[i] = (unsigned char)bytes[2 + i];
         raw_ptr = raw_owned;
     } else {
-        return taida_lax_empty((taida_val)"");
+        return taida_lax_empty(TAIDA_EMPTY_STR);
     }
 
     size_t pos = 0;
@@ -2778,7 +2789,7 @@ taida_val taida_utf8_decode_mold(taida_val value) {
         uint32_t cp = 0;
         if (!taida_utf8_decode_one(raw_ptr + pos, (size_t)len - pos, &consumed, &cp)) {
             if (raw_owned) free(raw_owned);
-            return taida_lax_empty((taida_val)"");
+            return taida_lax_empty(TAIDA_EMPTY_STR);
         }
         pos += consumed;
     }
@@ -2786,7 +2797,7 @@ taida_val taida_utf8_decode_mold(taida_val value) {
     char *out = taida_str_alloc((size_t)len);
     memcpy(out, raw_ptr, (size_t)len);
     if (raw_owned) free(raw_owned);
-    return taida_lax_new((taida_val)out, (taida_val)"");
+    return taida_lax_new((taida_val)out, TAIDA_EMPTY_STR);
 }
 
 taida_val taida_int_neg(taida_val a) { return (taida_val)(0ULL - ((uint64_t)a)); }
@@ -2798,35 +2809,28 @@ taida_val taida_int_neq(taida_val a, taida_val b) { return a != b ? 1 : 0; }
 taida_val taida_str_eq(taida_val a, taida_val b)  { return (a && b) ? (strcmp((char*)a, (char*)b) == 0 ? 1 : 0) : (a == b ? 1 : 0); }
 taida_val taida_str_neq(taida_val a, taida_val b) { return (a && b) ? (strcmp((char*)a, (char*)b) != 0 ? 1 : 0) : (a != b ? 1 : 0); }
 static int taida_is_string_value(taida_val v) {
+    // Positive identification via the hidden 16-byte header. A Taida Str
+    // value always points just past its header ([magic|rc][byte_len] |
+    // bytes...), produced by taida_str_alloc (heap / freelist / arena),
+    // the static-literal emitter (TAIDA_STR_STATIC_MAGIC, 8-aligned,
+    // value = data_start + 16) or TAIDA_EMPTY_STR. The previous
+    // heuristic ("mapped page without a container magic at v[0] ->
+    // raw char*") misclassified large Int values as strings the moment
+    // an accumulator crossed into a mapped address range (e.g. the
+    // no-pie ELF load base 0x400000 = 4,194,304), silently turning
+    // polymorphic `+` into string concatenation and `==` into strcmp
+    // on a fabricated pointer. Raw C string literals must never enter
+    // the Taida value space (use TAIDA_EMPTY_STR / taida_str_new_copy).
     if (v == 0 || v == 1 || v < 4096) return 0;
-    // C26B-024 (Round 10 / wepsilon Step 4): arena / heap-range / mincore-
-    // cache fast path. Checks the page this pointer lives on against the
-    // same fast-paths as taida_ptr_is_readable so string-equality hot
-    // paths in poly_eq don't syscall per compare.
-    uintptr_t page = (uintptr_t)v & ~((uintptr_t)4095);
-    int page_mapped;
-    if (taida_arena_contains((void *)(uintptr_t)v)
-        || taida_heap_range_contains((uintptr_t)v)
-        || taida_mincore_cache_hit(page)) {
-        page_mapped = 1;
-    } else {
-        unsigned char vec = 0;
-        if (mincore((void*)page, 4096, &vec) != 0) {
-            page_mapped = 0;
-        } else {
-            taida_mincore_cache_add(page);
-            page_mapped = 1;
-        }
-    }
-    if (!page_mapped) return 0;
-    // Check if 8-byte aligned (heap object) and has magic header
-    if ((v & 0x7) == 0) {
-        taida_val first = ((taida_val*)v)[0];
-        if (taida_has_magic_header(first)) return 0;
-    }
-    // Not a heap object -> treat as raw char* string (already validated
-    // the page is mapped).
-    return 1;
+    // Str data is always 8-byte aligned (16-byte header on a 16-aligned
+    // allocation; static literals are emitted with align(8)).
+    if ((v & 0x7) != 0) return 0;
+    // The two header words live at v-16; require them readable before
+    // dereferencing (arena / heap-range / mincore fast paths inside).
+    if (!taida_ptr_is_readable(v - 16, 16)) return 0;
+    taida_val magic = ((const taida_val *)v)[-2] & TAIDA_MAGIC_MASK;
+    return magic == TAIDA_STR_MAGIC || magic == TAIDA_STR_STATIC_MAGIC
+        || magic == TAIDA_STR_ROPE_MAGIC;
 }
 taida_val taida_poly_eq(taida_val a, taida_val b) {
     // F56: a sealed carrier (Moltenized/Secret) is never equal — not even to
@@ -3195,6 +3199,18 @@ static char* taida_str_alloc(size_t len) {
     char *bytes = (char*)(hdr + 2);
     bytes[len] = '\0';
     return bytes;
+}
+
+// Wrap a malloc'd C-string builder buffer into a Taida Str value (hidden
+// header) and free the original buffer. Builders that grow a raw buffer
+// via TAIDA_REALLOC cannot allocate through taida_str_alloc up front
+// (realloc would have to move the header), so they finish by copying
+// into a header-carrying Str. String values must never enter the Taida
+// value space as raw char* — identification is positive (header magic).
+static taida_val taida_str_adopt_buf(char *buf) {
+    taida_val r = (taida_val)taida_str_new_copy(buf ? buf : "");
+    free(buf);
+    return r;
 }
 
 // Copy a C string into a new heap string with hidden header.
@@ -4434,12 +4450,12 @@ taida_val taida_str_ends_with(const char* s, const char* suffix) {
 }
 
 taida_val taida_str_get(const char* s, taida_val idx) {
-    if (!s) return taida_lax_empty((taida_val)"");
+    if (!s) return taida_lax_empty(TAIDA_EMPTY_STR);
     taida_val len = (taida_val)strlen(s);
-    if (idx < 0 || idx >= len) return taida_lax_empty((taida_val)"");
+    if (idx < 0 || idx >= len) return taida_lax_empty(TAIDA_EMPTY_STR);
     char *r = taida_str_alloc(1);
     r[0] = s[idx];
-    return taida_lax_new((taida_val)r, (taida_val)"");
+    return taida_lax_new((taida_val)r, TAIDA_EMPTY_STR);
 }
 
 taida_val taida_str_to_upper(const char* s) {
@@ -7303,7 +7319,7 @@ taida_val taida_value_hash(taida_val val) {
     size_t len = 0;
     taida_val h = val;
     // Check if it's a valid string pointer
-    if (taida_read_cstr_len_safe((const char*)val, 8192, &len)) {
+    if (taida_is_string_value(val) && taida_read_cstr_len_safe((const char*)val, 8192, &len)) {
         h = taida_str_hash(val);
     }
     // Identity hash for scalars (ints/floats), or FNV-1a for strings.
@@ -9026,7 +9042,7 @@ static int taida_can_throw_payload(taida_val val) {
         return 1;
     }
     size_t sl = 0;
-    return taida_read_cstr_len_safe((const char*)val, 65536, &sl);
+    return taida_is_string_value(val) && taida_read_cstr_len_safe((const char*)val, 65536, &sl);
 }
 
 // ── Result constructors ──
@@ -9247,7 +9263,7 @@ static taida_val taida_throw_to_display_string(taida_val throw_val) {
     // String error message
     const char *s = (const char*)throw_val;
     size_t sl = 0;
-    if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_read_cstr_len_safe(s, 65536, &sl)) {
         return (taida_val)taida_str_new_copy(s);
     }
     return taida_value_to_display_string(throw_val);
@@ -9847,7 +9863,7 @@ static taida_val taida_value_to_display_string(taida_val val) {
     // Check if it's a safely readable string (char*).
     const char *s = (const char*)val;
     size_t sl = 0;
-    if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_read_cstr_len_safe(s, 65536, &sl)) {
         char *r = taida_str_alloc(sl);
         memcpy(r, s, sl);
         return (taida_val)r;
@@ -9880,7 +9896,7 @@ static taida_val taida_value_to_debug_string(taida_val val) {
     // Check for string (quoted in debug output)
     const char *s = (const char*)val;
     size_t sl = 0;
-    if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_read_cstr_len_safe(s, 65536, &sl)) {
         char *r = taida_str_alloc(sl + 2);
         r[0] = '"';
         memcpy(r + 1, s, sl);
@@ -9952,7 +9968,7 @@ static taida_val taida_value_to_debug_string_full(taida_val val) {
     // Quoted string for non-pack Str (same as the short helper).
     const char *s = (const char*)val;
     size_t sl = 0;
-    if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_read_cstr_len_safe(s, 65536, &sl)) {
         char *r = taida_str_alloc(sl + 2);
         r[0] = '"';
         memcpy(r + 1, s, sl);
@@ -10221,7 +10237,7 @@ taida_val taida_typeof(taida_val val, taida_val tag) {
         // Check if it's a string pointer
         const char *s = (const char*)val;
         size_t sl = 0;
-        if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+        if (taida_is_string_value((taida_val)(intptr_t)s) && taida_read_cstr_len_safe(s, 65536, &sl)) {
             return (taida_val)taida_str_new_copy("Str");
         }
     }
@@ -11788,25 +11804,17 @@ taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
 taida_val taida_json_parse(taida_val str_ptr) {
     const char *src = (const char*)str_ptr;
     if (!src) src = "{}";
-    size_t len = strlen(src);
-    char *buf = (char*)TAIDA_MALLOC(len + 1, "json_parse");
-    memcpy(buf, src, len + 1);
-    return (taida_val)buf;
+    return (taida_val)taida_str_new_copy(src);
 }
 
 taida_val taida_json_empty(void) {
-    char *buf = (char*)TAIDA_MALLOC(3, "json_empty");
-    buf[0] = '{'; buf[1] = '}'; buf[2] = '\0';
-    return (taida_val)buf;
+    return (taida_val)taida_str_new_copy("{}");
 }
 
 taida_val taida_json_from_int(taida_val value) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%" PRId64 "", value);
-    size_t len = strlen(buf);
-    char *result = (char*)TAIDA_MALLOC(len + 1, "json_from_int");
-    memcpy(result, buf, len + 1);
-    return (taida_val)result;
+    return (taida_val)taida_str_new_copy(buf);
 }
 
 taida_val taida_json_from_str(taida_val str_ptr) {
@@ -11819,16 +11827,13 @@ taida_val taida_json_from_str(taida_val str_ptr) {
     memcpy(buf + 1, src, src_len);
     buf[new_len - 1] = '"';
     buf[new_len] = '\0';
-    return (taida_val)buf;
+    return taida_str_adopt_buf(buf);
 }
 
 taida_val taida_json_unmold(taida_val json_ptr) {
     const char *src = (const char*)json_ptr;
-    if (!src) { char *e = (char*)TAIDA_MALLOC(1, "json_unmold_empty"); e[0]='\0'; return (taida_val)e; }
-    size_t len = strlen(src);
-    char *buf = (char*)TAIDA_MALLOC(len + 1, "json_unmold");
-    memcpy(buf, src, len + 1);
-    return (taida_val)buf;
+    if (!src) src = "";
+    return (taida_val)taida_str_new_copy(src);
 }
 
 taida_val taida_json_stringify(taida_val json_ptr) {
@@ -12235,6 +12240,7 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
                 size_t __slen = 0;
                 if (value_slot_val > 0 &&
                     value_slot_val > 4096 &&
+                    taida_is_string_value(value_slot_val) &&
                     taida_read_cstr_len_safe((const char*)value_slot_val, 65536, &__slen)) {
                     lax_default_force_type = 3;
                 } else if (value_slot_val == 0 ||
@@ -12290,7 +12296,7 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
             // Str-forced value with val=0: replace with an empty-string
             // pointer so json_serialize_typed doesn't deref NULL.
             if (ftype == 3 && field_val == 0) {
-                field_val = (taida_val)"";
+                field_val = TAIDA_EMPTY_STR;
             }
         }
         // C18B-003 fix: prefer per-pack descriptor (keyed by pack_ptr +
@@ -12483,7 +12489,7 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val
 
     // Default: only serialize as string when safely readable.
     size_t str_len = 0;
-    if (taida_read_cstr_len_safe((const char*)val, 65536, &str_len)) {
+    if (taida_is_string_value(val) && taida_read_cstr_len_safe((const char*)val, 65536, &str_len)) {
         json_append_escaped_str(buf, cap, len, (const char*)val);
     } else {
         // Not a safe C-string pointer — treat as integer
@@ -12499,7 +12505,7 @@ taida_val taida_json_encode(taida_val val) {
     char *buf = (char*)TAIDA_MALLOC(cap, "json_encode");
     buf[0] = '\0';
     json_serialize_typed(&buf, &cap, &len, val, 0, 0, 0);
-    return (taida_val)buf;
+    return taida_str_adopt_buf(buf);
 }
 
 taida_val taida_json_pretty(taida_val val) {
@@ -12508,7 +12514,7 @@ taida_val taida_json_pretty(taida_val val) {
     char *buf = (char*)TAIDA_MALLOC(cap, "json_pretty");
     buf[0] = '\0';
     json_serialize_typed(&buf, &cap, &len, val, 2, 0, 0);
-    return (taida_val)buf;
+    return taida_str_adopt_buf(buf);
 }
 
 // ── taida-lang/abi native handler JSON bridge ─────────────
@@ -13036,7 +13042,7 @@ taida_val taida_abi_web_store_response_json_native(taida_val response) {
     json_append(&out, &cap, &out_len, "\"}");
 
     if (body_owner) taida_str_release(body_owner);
-    return (taida_val)out;
+    return taida_str_adopt_buf(out);
 }
 
 // ── stdlib I/O (native) ───────────────────────────────────
@@ -13493,7 +13499,7 @@ static taida_val taida_sha512_family(taida_val value, const uint64_t iv[8], size
     size_t len = 0;
     if (!taida_crypto_materialize(value, &raw, &len)) {
         unsigned char zero = 0;
-        taida_crypto_materialize((taida_val)"", &raw, &len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &raw, &len);
         (void)zero;
     }
     taida_sha512_ctx ctx;
@@ -13528,7 +13534,7 @@ taida_val taida_crypto_sha224(taida_val value) {
     unsigned char *raw = (unsigned char*)0;
     size_t len = 0;
     if (!taida_crypto_materialize(value, &raw, &len)) {
-        taida_crypto_materialize((taida_val)"", &raw, &len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &raw, &len);
     }
     taida_sha256_ctx ctx;
     ctx.state[0] = 0xc1059ed8U; ctx.state[1] = 0x367cd507U;
@@ -13549,10 +13555,10 @@ taida_val taida_crypto_hmac_sha256(taida_val key_val, taida_val data_val) {
     unsigned char *key = (unsigned char*)0; size_t key_len = 0;
     unsigned char *data = (unsigned char*)0; size_t data_len = 0;
     if (!taida_crypto_materialize(key_val, &key, &key_len)) {
-        taida_crypto_materialize((taida_val)"", &key, &key_len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &key, &key_len);
     }
     if (!taida_crypto_materialize(data_val, &data, &data_len)) {
-        taida_crypto_materialize((taida_val)"", &data, &data_len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &data, &data_len);
     }
     unsigned char key_block[64];
     memset(key_block, 0, 64);
@@ -13588,10 +13594,10 @@ taida_val taida_crypto_constant_time_equals(taida_val a_val, taida_val b_val) {
     unsigned char *a = (unsigned char*)0; size_t a_len = 0;
     unsigned char *b = (unsigned char*)0; size_t b_len = 0;
     if (!taida_crypto_materialize(a_val, &a, &a_len)) {
-        taida_crypto_materialize((taida_val)"", &a, &a_len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &a, &a_len);
     }
     if (!taida_crypto_materialize(b_val, &b, &b_len)) {
-        taida_crypto_materialize((taida_val)"", &b, &b_len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &b, &b_len);
     }
     unsigned char diff = (a_len != b_len) ? 1 : 0;
     for (size_t i = 0; i < a_len; i++) {
@@ -13639,7 +13645,7 @@ taida_val taida_constant_time_eq_secret(taida_val secret_ptr, taida_val cand_val
 taida_val taida_crypto_hex_encode(taida_val value) {
     unsigned char *raw = (unsigned char*)0; size_t len = 0;
     if (!taida_crypto_materialize(value, &raw, &len)) {
-        taida_crypto_materialize((taida_val)"", &raw, &len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &raw, &len);
     }
     taida_val out = taida_crypto_hex_str(raw, len);
     if (raw) free(raw);
@@ -13683,7 +13689,7 @@ static const char TAIDA_B64_ALPHABET[64] =
 taida_val taida_crypto_base64_encode(taida_val value) {
     unsigned char *raw = (unsigned char*)0; size_t len = 0;
     if (!taida_crypto_materialize(value, &raw, &len)) {
-        taida_crypto_materialize((taida_val)"", &raw, &len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &raw, &len);
     }
     size_t out_len = ((len + 2) / 3) * 4;
     char *out = taida_str_alloc(out_len);
@@ -14056,7 +14062,7 @@ static taida_val taida_io_stdin_line_failure(void) {
 static taida_val taida_io_stdin_line_success(const char *buf, size_t n) {
     char *r = taida_str_alloc(n);
     if (n > 0) memcpy(r, buf, n);
-    return taida_io_stdin_line_async_wrap(taida_lax_new((taida_val)r, (taida_val)""));
+    return taida_io_stdin_line_async_wrap(taida_lax_new((taida_val)r, TAIDA_EMPTY_STR));
 }
 
 // Fallback: non-TTY (pipe / redirect). Use getline semantics shared with

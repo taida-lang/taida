@@ -597,11 +597,8 @@ impl Lowering {
                         }
                     }
                 }
-                // QF-34: MoldInst の Lax 内部型を追跡（unmold 時の型推定用）
-                if let Expr::MoldInst(mold_name, _, _, _) = &assign.value {
-                    self.lax_inner_types
-                        .insert(assign.target.clone(), mold_name.clone());
-                }
+                // QF-34 / F58B-003: MoldInst の Lax 内部型を追跡（unmold 時の型推定用）
+                self.record_lax_inner_type(&assign.target, &assign.value);
                 // QF-10: TypeInst の変数に TypeDef 名を記録
                 if let Expr::TypeInst(type_name, _, _) = &assign.value {
                     self.var_type_names
@@ -1543,11 +1540,8 @@ impl Lowering {
                 {
                     self.enum_vars.insert(assign.target.clone(), src_enum);
                 }
-                // QF-34: MoldInst の Lax 内部型を追跡（unmold 時の型推定用）
-                if let Expr::MoldInst(mold_name, _, _, _) = &assign.value {
-                    self.lax_inner_types
-                        .insert(assign.target.clone(), mold_name.clone());
-                }
+                // QF-34 / F58B-003: MoldInst の Lax 内部型を追跡（unmold 時の型推定用）
+                self.record_lax_inner_type(&assign.target, &assign.value);
                 // QF-10: TypeInst の変数に TypeDef 名を記録（フィールド型解決用）
                 if let Expr::TypeInst(type_name, _, _) = &assign.value {
                     self.var_type_names

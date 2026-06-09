@@ -1115,7 +1115,12 @@ int64_t taida_generic_unmold(int64_t val) {
    Small integer values (< 1024) are never treated as string pointers to avoid
    false positives from small numeric literals. */
 static int _wasm_is_string_ptr(int64_t v) {
-    if (v <= 1024 || v > 0xFFFFFFFFLL) return 0;
+    /* F58B-003: `v < 1024`, not `<= 1024` — wasm-ld places the data
+       segment at global-base 1024, so the very first static string
+       literal sits AT address 1024 and the old guard rejected it
+       (poly_add then stringified the pointer value: "x"+"y" -> "x1024").
+       Addresses 0..1023 stay rejected (null-guard region, never data). */
+    if (v < 1024 || v > 0xFFFFFFFFLL) return 0;
     unsigned int addr = (unsigned int)(uint64_t)v;
     /* Check within wasm linear memory bounds */
     unsigned int mem_bytes = (unsigned int)__builtin_wasm_memory_size(0) * 65536u;

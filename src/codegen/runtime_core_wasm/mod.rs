@@ -140,7 +140,13 @@ mod tests {
         //   (04_json_async.inc.c). Compiled in only with -DTAIDA_PERF_COUNTERS
         //   (env-gated dev build; participates in the runtime .o cache key).
         //   459,122 -> 461,141.
-        const EXPECTED_TOTAL_LEN: usize = 461_141;
+        // 2026-06-10 F58 _wasm_is_string_ptr off-by-one fix: +353 bytes
+        //   (01_core.inc.c — `v < 1024` instead of `<= 1024` + rationale
+        //   comment). wasm-ld places the data segment at global-base 1024,
+        //   so the first static string literal sits AT 1024 and the old
+        //   guard rejected it: `"x" + "y"` via untyped params concatenated
+        //   the pointer value instead ("x1024"). 461,141 -> 461,494.
+        const EXPECTED_TOTAL_LEN: usize = 461_494;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),
