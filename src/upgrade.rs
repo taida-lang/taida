@@ -1275,10 +1275,7 @@ mod tests {
         // `env_test_lock` (also held by auth/token.rs, pkg/provider.rs,
         // addon/prebuild_fetcher.rs) prevents `cargo test`'s thread
         // pool from racing HOME / PATH / TAIDA_* across modules.
-        let _guard = match crate::util::env_test_lock().lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
+        let _guard = crate::util::env_test_guard();
         let prev_path = std::env::var("PATH").ok();
         let prev_api = std::env::var("TAIDA_GITHUB_API_URL").ok();
         let prev_home = std::env::var("HOME").ok();
