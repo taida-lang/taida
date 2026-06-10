@@ -1033,6 +1033,10 @@ impl TypeChecker {
         // resolution to call time and stay legal (mutual recursion).
         self.check_toplevel_forward_function_references(program);
 
+        // [E1540]: the six value-absence words are reserved — reads
+        // already fail as undefined variables, this closes bindings.
+        self.check_reserved_absence_words(program);
+
         if self.typed_expr_table.has_residual_unknown() {
             let residuals = self
                 .typed_expr_table

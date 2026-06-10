@@ -113,10 +113,23 @@ int64_t taida_throw(int64_t error_val) {
             iov[n].buf = (int32_t)(intptr_t)ty; iov[n].len = wasm_strlen(ty); n++;
             iov[n].buf = (int32_t)(intptr_t)"]: "; iov[n].len = 3; n++;
             iov[n].buf = (int32_t)(intptr_t)m; iov[n].len = wasm_strlen(m); n++;
-        } else {
-            int64_t msg = _wasm_throw_to_display_string(error_val);
-            const char *ms = msg ? (const char *)(intptr_t)msg : "error";
+        } else if (error_val && _looks_like_string(error_val)) {
+            const char *ms = (const char *)(intptr_t)error_val;
             iov[n].buf = (int32_t)(intptr_t)ms; iov[n].len = wasm_strlen(ms); n++;
+        } else {
+            /* Bare scalar throw (`throw(42)`): a local decimal render
+               keeps this cold path from pulling the whole polymorphic
+               display machinery into every binary (the size gate caught
+               exactly that — +16KB on pi.wasm). */
+            static char dec[24];
+            int64_t v = error_val;
+            int neg = v < 0;
+            uint64_t u = neg ? (uint64_t)(-(v + 1)) + 1ULL : (uint64_t)v;
+            int p = 23;
+            dec[p] = '\0';
+            do { dec[--p] = (char)('0' + (u % 10)); u /= 10; } while (u && p > 1);
+            if (neg && p > 0) dec[--p] = '-';
+            iov[n].buf = (int32_t)(intptr_t)(dec + p); iov[n].len = wasm_strlen(dec + p); n++;
         }
         iov[n].buf = (int32_t)(intptr_t)"\n"; iov[n].len = 1; n++;
         /* One iovec per call — the single-iovec shape is the only one
@@ -125,9 +138,17 @@ int64_t taida_throw(int64_t error_val) {
             int32_t nwritten;
             __wasi_fd_write(2, &iov[i], 1, &nwritten);
         }
+#ifdef TAIDA_WASM_PROFILE_EDGE
+        /* The edge profile runs as an exported handler under a host that
+           provides no WASI proc_exit; a trap surfaces to the host as a
+           catchable WebAssembly.RuntimeError, which is that runtime's
+           uncaught-throw contract. */
+        __builtin_trap();
+#else
         extern void proc_exit(int code)
             __attribute__((import_module("wasi_snapshot_preview1"), import_name("proc_exit")));
         proc_exit(1);
+#endif
     }
     return 0;
 }

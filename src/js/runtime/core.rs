@@ -345,18 +345,30 @@ function __taida_throw(obj) {
 if (typeof process !== 'undefined' && typeof process.on === 'function') {
   const __taida_report_unhandled = (e) => {
     if (e instanceof __TaidaError) {
+      // Internal runtime panics (type 'RuntimeError', empty fields)
+      // report like the reference's RuntimeError — no Unhandled prefix.
+      if (e.type === 'RuntimeError') {
+        console.error(`Runtime error: ${e.message}`);
+        process.exit(1);
+      }
       let detail;
       const f = e.fields;
       if (f === null || f === undefined) {
         detail = e.message || 'error';
       } else if (typeof f !== 'object') {
         detail = String(f); // bare value throw: throw("boom") / throw(42)
-      } else {
+      } else if ((typeof f.type === 'string' && f.type)
+          || (typeof f.__type === 'string' && f.__type)
+          || (typeof f.message === 'string' && f.message)) {
         const ty = (typeof f.type === 'string' && f.type)
           || (typeof f.__type === 'string' && f.__type)
           || 'AnonymousError';
         const msg = (typeof f.message === 'string' && f.message) || 'Unknown';
         detail = `Error[${ty}]: ${msg}`;
+      } else if (e.message) {
+        detail = e.message; // internal throw shapes with empty fields
+      } else {
+        detail = 'Error[AnonymousError]: Unknown';
       }
       console.error(`Runtime error: Unhandled error: ${detail}`);
     } else if (e instanceof globalThis.Error) {

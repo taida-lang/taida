@@ -226,7 +226,16 @@ mod tests {
         //   synthetic full-form renderers are removed — every display
         //   path routes HashMap / Set through `HashMap({...})` /
         //   `Set({...})`. 486,760 -> 482,417.
-        const EXPECTED_TOTAL_LEN: usize = 482_417;
+        // 2026-06-11 throw-report DCE fix (02_containers.inc.c): the
+        //   unhandled report renders strings/scalars locally instead of
+        //   referencing the polymorphic display machinery, which pulled
+        //   ~16KB into every binary (wasm_min_size_gate caught it).
+        //   482,417 -> 483,119.
+        // 2026-06-11 edge-profile throw exit (02_containers.inc.c): the
+        //   edge handler host provides no WASI proc_exit, so the
+        //   unhandled report traps there (catchable RuntimeError) and
+        //   proc_exits(1) on the WASI profiles. 483,119 -> 483,445.
+        const EXPECTED_TOTAL_LEN: usize = 483_445;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

@@ -1463,3 +1463,158 @@ impl TypeChecker {
         }
     }
 }
+
+impl TypeChecker {
+    /// [E1540] The six value-absence words (`null` / `undefined` /
+    /// `none` / `nil` / `unit` / `void`) are reserved: they must not be
+    /// introduced as identifiers or type names. The lexer deliberately
+    /// keeps them plain identifiers (no keyword tokens — see the BT-2
+    /// lexer tests), so reads already fail as undefined variables; this
+    /// pass closes the remaining gap where a *binding* would succeed
+    /// (`null <= 42`) and resurrect the value-absence vocabulary.
+    pub(super) fn check_reserved_absence_words(&mut self, program: &Program) {
+        for stmt in &program.statements {
+            self.scan_stmt_reserved_words(stmt);
+        }
+    }
+
+    fn reserved_absence_word(name: &str) -> bool {
+        matches!(
+            name,
+            "null" | "undefined" | "none" | "nil" | "unit" | "void"
+        )
+    }
+
+    fn push_reserved_word_error(&mut self, name: &str, span: &Span) {
+        self.errors.push(TypeError {
+            message: format!(
+                "[E1540] '{}' is reserved as a value-absence word and cannot be used as an identifier or type name. Every Taida type has a default value — name the binding after what it holds instead.",
+                name
+            ),
+            span: span.clone(),
+        });
+    }
+
+    fn scan_stmt_reserved_words(&mut self, stmt: &Statement) {
+        match stmt {
+            Statement::Assignment(a) => {
+                if Self::reserved_absence_word(&a.target) {
+                    self.push_reserved_word_error(&a.target, &a.span);
+                }
+                self.scan_expr_reserved_words(&a.value);
+            }
+            Statement::UnmoldForward(u) => {
+                if Self::reserved_absence_word(&u.target) {
+                    self.push_reserved_word_error(&u.target, &u.span);
+                }
+                self.scan_expr_reserved_words(&u.source);
+            }
+            Statement::UnmoldBackward(u) => {
+                if Self::reserved_absence_word(&u.target) {
+                    self.push_reserved_word_error(&u.target, &u.span);
+                }
+                self.scan_expr_reserved_words(&u.source);
+            }
+            Statement::FuncDef(fd) => {
+                if Self::reserved_absence_word(&fd.name) {
+                    self.push_reserved_word_error(&fd.name, &fd.span);
+                }
+                for p in &fd.params {
+                    if Self::reserved_absence_word(&p.name) {
+                        self.push_reserved_word_error(&p.name, &p.span);
+                    }
+                }
+                for st in &fd.body {
+                    self.scan_stmt_reserved_words(st);
+                }
+            }
+            Statement::EnumDef(ed) => {
+                if Self::reserved_absence_word(&ed.name) {
+                    self.push_reserved_word_error(&ed.name, &ed.span);
+                }
+            }
+            Statement::ClassLikeDef(cl) => {
+                if Self::reserved_absence_word(&cl.name) {
+                    self.push_reserved_word_error(&cl.name, &cl.span);
+                }
+            }
+            Statement::Import(imp) => {
+                for sym in &imp.symbols {
+                    let bound = sym.alias.as_deref().unwrap_or(sym.name.as_str());
+                    if Self::reserved_absence_word(bound) {
+                        self.push_reserved_word_error(bound, &imp.span);
+                    }
+                }
+            }
+            Statement::Expr(e) => self.scan_expr_reserved_words(e),
+            Statement::ErrorCeiling(ec) => {
+                for st in &ec.handler_body {
+                    self.scan_stmt_reserved_words(st);
+                }
+            }
+            Statement::Export(_) => {}
+        }
+    }
+
+    fn scan_expr_reserved_words(&mut self, e: &Expr) {
+        match e {
+            Expr::Lambda(params, body, _) => {
+                for p in params {
+                    if Self::reserved_absence_word(&p.name) {
+                        self.push_reserved_word_error(&p.name, &p.span);
+                    }
+                }
+                self.scan_expr_reserved_words(body);
+            }
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                for f in fields {
+                    self.scan_expr_reserved_words(&f.value);
+                }
+            }
+            Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+                for i in items {
+                    self.scan_expr_reserved_words(i);
+                }
+            }
+            Expr::BinaryOp(l, _, r, _) => {
+                self.scan_expr_reserved_words(l);
+                self.scan_expr_reserved_words(r);
+            }
+            Expr::UnaryOp(_, x, _) | Expr::Unmold(x, _) | Expr::Throw(x, _) => {
+                self.scan_expr_reserved_words(x);
+            }
+            Expr::FuncCall(c, args, _) => {
+                self.scan_expr_reserved_words(c);
+                for a in args {
+                    self.scan_expr_reserved_words(a);
+                }
+            }
+            Expr::MethodCall(recv, _, args, _) => {
+                self.scan_expr_reserved_words(recv);
+                for a in args {
+                    self.scan_expr_reserved_words(a);
+                }
+            }
+            Expr::FieldAccess(x, _, _) => self.scan_expr_reserved_words(x),
+            Expr::CondBranch(arms, _) => {
+                for arm in arms {
+                    if let Some(c) = &arm.condition {
+                        self.scan_expr_reserved_words(c);
+                    }
+                    for st in &arm.body {
+                        self.scan_stmt_reserved_words(st);
+                    }
+                }
+            }
+            Expr::MoldInst(_, targs, fields, _) => {
+                for t in targs {
+                    self.scan_expr_reserved_words(t);
+                }
+                for f in fields {
+                    self.scan_expr_reserved_words(&f.value);
+                }
+            }
+            _ => {}
+        }
+    }
+}
