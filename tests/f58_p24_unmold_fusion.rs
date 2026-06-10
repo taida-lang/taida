@@ -130,3 +130,50 @@ stdout(s.length())
     assert_eq!(out, "payload\n7");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// User-defined molds must unmold on every backend. The WASM runtime
+/// rejected every emitted `__type` literal with a low-address guard
+/// (the data segment starts at global-base 1024, the guard cut at
+/// 4096), so `boxed >=> v` silently returned the carrier pack instead
+/// of the value — for every user mold, ever. String headers made the
+/// `__type` slot exactly identifiable and the guard now requires the
+/// string magic instead.
+#[test]
+fn user_mold_unmold_works_on_every_backend() {
+    let dir = unique_temp_dir("f58_p24_user_mold");
+    let out = assert_parity(
+        &dir,
+        "user_mold",
+        r#"Mold[T] => SmallMold[T] = @(
+  a <= 1,
+  b <= 2
+)
+
+boxed <= SmallMold[777]()
+boxed >=> v
+stdout(v)
+"#,
+    );
+    assert_eq!(out, "777");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A user mold may legitimately carry hundreds of fields; the unmold
+/// pack-shape validation must scale with the field count (it verifies
+/// the tail sentinel in-bounds) rather than capping it — a cap would
+/// silently skip the unmold on wasm only. The assertion goes through
+/// `v == 4242` because the *display* of an untagged Int still runs
+/// layout-dependent heuristics on WASM (containers carry magics that
+/// the display dispatch does not yet require — tracked separately).
+#[test]
+fn large_field_count_mold_unmold_not_skipped() {
+    let dir = unique_temp_dir("f58_p24_large_mold");
+    let fields: Vec<String> = (1..=256).map(|i| format!("  f{i} <= {i}")).collect();
+    let source = format!(
+        "Mold[T] => BigMold[T] = @(\n{}\n)\n\nboxed <= BigMold[4242]()\nboxed >=> v\nstdout(v == 4242)\n",
+        fields.join(",\n")
+    );
+    let out = assert_parity(&dir, "large_mold", &source);
+    assert_eq!(out, "true");
+    let _ = std::fs::remove_dir_all(&dir);
+}

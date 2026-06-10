@@ -410,7 +410,7 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
         writeln!(
             c,
             "static const struct {{ int64_t m; char s[{}]; }} __taida_sl_{} = {{ 0x5441494453545300LL, {} }};",
-            s.as_bytes().len() + 1,
+            s.len() + 1,
             i,
             c_string_literal(s)
         )

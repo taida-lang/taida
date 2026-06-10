@@ -3293,8 +3293,10 @@ taida_val taida_release(taida_ptr ptr) {
 // ── Heap String helpers (A-4k) ────────────────────────────
 // Hidden header layout: [magic+rc (8 bytes), len (8 bytes)] + [bytes...\0]
 // The returned char* points to the bytes area (header + 16).
-// Static strings (string literals, ConstStr) have no header and are
-// identified by the absence of TAIDA_STR_MAGIC at ptr - 16.
+// Static strings (string literals, ConstStr) carry the same 16-byte
+// header with TAIDA_STR_STATIC_MAGIC instead of TAIDA_STR_MAGIC; the
+// magic distinguishes the RC paths (static strings are never
+// retained/released or freed).
 
 // Allocate a heap string with room for `len` characters (+ \0).
 // Returns pointer to the bytes area.  Caller must fill the bytes.

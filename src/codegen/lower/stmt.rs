@@ -1259,7 +1259,14 @@ impl Lowering {
         // (unlike taida_register_pack_field_enum, which stays excluded).
         "taida_register_field_name",
         "taida_register_field_type",
-        // collection construction local to the iteration
+        // collection construction local to the iteration.
+        // taida_list_push relies on a NON-LOCAL invariant: pushing an
+        // arena pointer into a list that outlives the scope would dangle
+        // on reset, but every list visible inside an iter-scope body is
+        // necessarily built inside that same iteration — the all-scalar
+        // parameter gate means no list can enter through the back-edge,
+        // and GlobalSet / MakeClosure / CallUser exclusion means none
+        // can enter from outside the loop body.
         "taida_list_new",
         "taida_list_push",
         "taida_list_note_push_ekind",
@@ -1368,6 +1375,13 @@ impl Lowering {
             IrInst::CondBranch(_, arms) => arms
                 .iter()
                 .all(|arm| Self::iter_scope_insts_safe(&arm.body)),
+            // CAUTION: this catch-all treats every other instruction as
+            // safe, which is correct for the current IrInst set (loads,
+            // stores, consts, locals, branches, Return/TailCall). If a
+            // new IrInst variant can publish a pointer beyond the
+            // iteration (registry write, global cache, thread handoff),
+            // it MUST be added to the deny arms above — the watermark
+            // reset would otherwise dangle it.
             _ => true,
         })
     }

@@ -871,7 +871,11 @@ mod tests {
         // 2026-06-10 F58 P2-2: iteration-scope watermark (core.c, F1).
         // 2026-06-10 F58 P2-4: divisor-proven exact div/mod helpers (core.c,
         //   F1; mirrored on WASM). 1,310,405 -> 1,310,758.
-        const EXPECTED_TOTAL_LEN: usize = 1_310_758;
+        // 2026-06-10 F58 stale-comment refresh (core.c, F1): the heap-string
+        //   helper header described static strings as header-less; they have
+        //   carried a TAIDA_STR_STATIC_MAGIC header since the F58 rework.
+        //   +103. 1,310,758 -> 1,310,861.
+        const EXPECTED_TOTAL_LEN: usize = 1_310_861;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1606,7 +1610,10 @@ mod tests {
         //   all before the marker. F1 -> 402,606.
         // 2026-06-10 F58 P2-4: taida_div_exact / taida_mod_exact (next to
         //   div_mold, before the marker). +353. F1 402,606 -> 402,959.
-        const F1_LEN: usize = 402_959;
+        // 2026-06-10 F58 stale-comment refresh: the heap-string helper
+        //   header comment now matches the static-string header reality
+        //   (before the marker). +103. F1 402,959 -> 403,062.
+        const F1_LEN: usize = 403_062;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

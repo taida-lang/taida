@@ -155,7 +155,16 @@ mod tests {
         //   + 63 allocation-site conversions + magic-required _wasm_is_string_ptr
         //   + the generic_unmold string/field-count guards + the
         //   _looks_like_string magic fast path. -> 464,779.
-        const EXPECTED_TOTAL_LEN: usize = 464_779;
+        // 2026-06-10 F58 generic_unmold validation rework (01_core.inc.c):
+        //   the arbitrary `fc_chk > 256` cap is replaced by tail-sentinel
+        //   verification (in-bounds `WASM_PACK_MAGIC` at data[1+fc*3], magic
+        //   define hoisted before generic_unmold), and the user-mold
+        //   `type_ptr` guard switches from a low-address cutoff — which
+        //   rejected every data-segment `__type` literal — to
+        //   _wasm_is_string_ptr. Plus the pack/list section headers now
+        //   describe the trailing-magic layouts instead of "no magic".
+        //   -> 466,461.
+        const EXPECTED_TOTAL_LEN: usize = 466_461;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

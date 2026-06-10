@@ -635,6 +635,11 @@ static int _looks_like_pack(int64_t val);
    bump arena and point at a zero int64_t chunk were mis-rendered as
    `@()`. */
 #define WASM_EMPTY_PACK_MAGIC 0x5441494450414B55LL  /* "TAIDPAKU" (U=Unit) */
+/* Tail sentinel that taida_pack_new stamps after the last field slot of
+   every NON-empty pack (definition site of the layout lives with
+   taida_pack_new below; the constant is hoisted here so the unmold
+   guard can verify pack shape positively). */
+#define WASM_PACK_MAGIC 0x54414944504B4B00LL  /* "TAIDPKK\0" (non-empty) */
 static int _looks_like_empty_pack(int64_t val);
 static int _looks_like_list(int64_t ptr);
 static int _is_wasm_hashmap(int64_t ptr);
@@ -1121,13 +1126,24 @@ int64_t taida_generic_unmold(int64_t val) {
        A non-pack heap object reaching this point (a List from
        `Split[...]() >=> parts`, Bytes, a hash map...) would read its own
        first word as a huge count and walk far out of bounds — latent for
-       years because the misread count was layout-dependent. Require a
-       sane count and a fully in-bounds slot range before any walk. */
+       years because the misread count was layout-dependent. Validate the
+       pack shape positively instead: an in-bounds slot range and the
+       WASM_PACK_MAGIC tail sentinel that taida_pack_new stamps on every
+       non-empty pack. No arbitrary field-count cap — a user-defined mold
+       may legitimately carry hundreds of fields, and capping silently
+       skipped their unmold. Empty packs (fc == 0) have nothing to walk
+       and return as-is, exactly like every other non-monadic value. */
     {
         int64_t *p_chk = (int64_t *)(intptr_t)val;
         int64_t fc_chk = p_chk[0];
-        if (fc_chk < 0 || fc_chk > 256) return val;
-        if (!_wasm_is_valid_ptr(val, (unsigned int)((1 + fc_chk * 3) * 8))) return val;
+        if (fc_chk <= 0) return val;
+        /* Reject counts whose slot range cannot possibly fit in linear
+           memory before computing byte sizes (overflow guard). */
+        if (fc_chk > 0x0FFFFFFFLL) return val;
+        unsigned int mem_chk = (unsigned int)__builtin_wasm_memory_size(0) * 65536u;
+        uint64_t need_chk = (uint64_t)(2 + fc_chk * 3) * 8ULL;
+        if ((uint64_t)(unsigned int)val + need_chk > (uint64_t)mem_chk) return val;
+        if (p_chk[1 + fc_chk * 3] != WASM_PACK_MAGIC) return val;
     }
     /* BE-WASM-1: TODO mold unmold — return unm channel, fallback to sol/__default/__value.
        Matches native_runtime.c taida_generic_unmold TODO branch. */
@@ -1148,8 +1164,14 @@ int64_t taida_generic_unmold(int64_t val) {
                 (int64_t)(intptr_t)"Cannot unmold a sealed carrier (Moltenized/Secret) directly. Use a secret-aware consumer.");
             return taida_throw(error);
         }
-        /* Guard: ensure type_ptr looks like a valid pointer (> WASM_MIN_HEAP_ADDR) */
-        if ((intptr_t)type_ptr <= WASM_MIN_HEAP_ADDR) return val;
+        /* The __type slot must reference a string; the magic word
+           identifies one exactly. The previous guard rejected every
+           address <= 4096, but emitted literals live in the data
+           segment from global-base 1024 — so EVERY user-defined mold's
+           __type was rejected here and its unmold silently returned the
+           carrier pack instead of the value (wasm-only; interp / JS /
+           native all unmolded correctly). */
+        if (!_wasm_is_string_ptr(type_ptr)) return val;
         const char *type_str = (const char *)(intptr_t)type_ptr;
         if (type_str != 0 && type_str[0] == 'T' && type_str[1] == 'O' &&
             type_str[2] == 'D' && type_str[3] == 'O' && type_str[4] == '\0') {
@@ -1640,7 +1662,6 @@ int64_t taida_list_length(int64_t list_ptr);
 #define WASM_LIST_MAGIC 0x544149444C535400LL  /* "TAIDLST\0" */
 #define WASM_SET_MAGIC  0x5441494453455400LL  /* "TAIDSET\0" */
 #define WASM_HM_MAGIC   0x54414944484D5000LL  /* "TAIDHMP\0" */
-#define WASM_PACK_MAGIC 0x54414944504B4B00LL  /* "TAIDPKK\0" (non-empty) */
 /* D29B-016 / Phase 10-E (Track-θ, 2026-04-27): Rope-backed string sentinel.
    Reserved for a future rope-aware `_wf_str_concat` polymorphic dispatch.
    The interpreter side (Lock-K verdict V-1) implements transparent rope
@@ -2872,11 +2893,15 @@ static int64_t _wasm_lookup_field_type(int64_t hash) {
     return -1;
 }
 
-/* ── W-4: BuchiPack runtime (bump allocator, no RC/magic) ── */
-/* Layout: [field_count, field0_hash, field0_tag, field0_value, field1_hash, ...]
-   Same as native_runtime.c but without magic header and refcount.
+/* ── W-4: BuchiPack runtime (bump allocator, no RC) ── */
+/* Layout: [field_count, field0_hash, field0_tag, field0_value, ...,
+            WASM_PACK_MAGIC]
+   No refcount and no leading header (unlike native_runtime.c), but a
+   trailing WASM_PACK_MAGIC sentinel at slot [1 + field_count * 3]
+   positively identifies non-empty packs (empty packs store
+   WASM_EMPTY_PACK_MAGIC at slot [1] instead).
    Each field occupies 3 int64_t slots: hash, tag, value.
-   Total allocation: (1 + field_count * 3) * sizeof(int64_t) */
+   Total allocation: (2 + field_count * 3) * sizeof(int64_t) */
 
 int64_t taida_pack_new(int64_t field_count) {
     /* C23B-003 reopen 4 (2026-04-22): empty packs (`@()` / `Value::Unit`)
@@ -3064,9 +3089,11 @@ int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash) {
     return 0;
 }
 
-/* ── W-4: List runtime (bump allocator, no RC/magic) ── */
-/* Layout: [capacity, length, elem_type_tag, elem0, elem1, ...]
-   Same concept as native_runtime.c but without magic header and refcount.
+/* ── W-4: List runtime (bump allocator, no RC) ── */
+/* Layout: [capacity, length, elem_type_tag, elem0, ..., trailing magic]
+   No refcount and no leading header (unlike native_runtime.c), but a
+   trailing magic at slot [WASM_LIST_ELEMS + capacity] positively
+   identifies lists (see taida_list_new / _is_wasm_hashmap).
    Note: bump allocator cannot realloc, so we use copy-on-grow. */
 
 int64_t taida_list_new(void) {
