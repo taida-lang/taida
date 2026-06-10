@@ -564,3 +564,44 @@ fn unhandled_throw_reports_identically_everywhere() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Definition order is the language semantics: a top-level statement
+/// that calls a function defined later in the file is rejected at check
+/// time ([E1539]) — the interpreter would fail at runtime while the
+/// compiled backends hoist and silently succeed, making program success
+/// backend-dependent. Mutual recursion (forward references from inside
+/// function bodies) stays legal.
+#[test]
+fn toplevel_forward_function_reference_is_rejected() {
+    let dir = unique_temp_dir("f61_forward_ref");
+    let bad = dir.join("forward.td");
+    std::fs::write(&bad, "stdout(double(21))\ndouble x: Int = x * 2 => :Int\n")
+        .expect("write fixture");
+    let out = Command::new(taida_bin())
+        .arg(&bad)
+        .output()
+        .expect("taida runs");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("[E1539]"),
+        "forward call must be E1539, got: {combined}"
+    );
+
+    let ok = dir.join("mutual.td");
+    std::fs::write(
+        &ok,
+        "f x: Int = g(x) => :Int\ng x: Int = x + 1 => :Int\nstdout(f(1))\n",
+    )
+    .expect("write fixture");
+    let out = assert_parity(
+        &dir,
+        "mutual",
+        "f x: Int = g(x) => :Int\ng x: Int = x + 1 => :Int\nstdout(f(1))\n",
+    );
+    assert_eq!(out, "2");
+    let _ = std::fs::remove_dir_all(&dir);
+}

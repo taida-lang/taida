@@ -1024,6 +1024,15 @@ impl TypeChecker {
         // docs/reference/tail_recursion.md).
         self.check_mutual_recursion_errors(program);
 
+        // [E1539]: top-level executable code must not reference a
+        // function defined later in the file. The interpreter executes
+        // statements in order (definition order is the language
+        // semantics), while the compiled backends hoist definitions —
+        // without this check the same program succeeds or fails
+        // depending on the backend. Function/lambda bodies defer
+        // resolution to call time and stay legal (mutual recursion).
+        self.check_toplevel_forward_function_references(program);
+
         if self.typed_expr_table.has_residual_unknown() {
             let residuals = self
                 .typed_expr_table

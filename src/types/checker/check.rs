@@ -1311,3 +1311,155 @@ impl TypeChecker {
         }
     }
 }
+
+impl TypeChecker {
+    /// [E1539] Top-level executable statements must not reference a
+    /// function that is only defined later in the file. The interpreter
+    /// executes statements in order — a forward call is an
+    /// undefined-variable error at runtime — while the compiled
+    /// backends hoist definitions and would silently succeed, so
+    /// program success would depend on the backend. References from
+    /// inside function and lambda bodies resolve at call time and stay
+    /// legal (that is how mutual recursion is written).
+    pub(super) fn check_toplevel_forward_function_references(&mut self, program: &Program) {
+        let mut later_funcs: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for stmt in &program.statements {
+            if let Statement::FuncDef(fd) = stmt {
+                later_funcs.insert(fd.name.as_str());
+            }
+        }
+        if later_funcs.is_empty() {
+            return;
+        }
+        let mut defined: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for stmt in &program.statements {
+            match stmt {
+                Statement::FuncDef(fd) => {
+                    defined.insert(fd.name.as_str());
+                }
+                Statement::Import(imp) => {
+                    // Imported names are bound when the import executes;
+                    // a same-named later FuncDef must not flag uses in
+                    // between.
+                    for sym in &imp.symbols {
+                        defined.insert(sym.alias.as_deref().unwrap_or(sym.name.as_str()));
+                    }
+                }
+                Statement::Assignment(a) => {
+                    self.scan_expr_forward_refs(&a.value, &later_funcs, &defined);
+                    // A top-level value binding shadows a later function
+                    // of the same name for subsequent statements.
+                    defined.insert(a.target.as_str());
+                }
+                Statement::Expr(e) => self.scan_expr_forward_refs(e, &later_funcs, &defined),
+                Statement::UnmoldForward(u) => {
+                    self.scan_expr_forward_refs(&u.source, &later_funcs, &defined);
+                    defined.insert(u.target.as_str());
+                }
+                Statement::UnmoldBackward(u) => {
+                    self.scan_expr_forward_refs(&u.source, &later_funcs, &defined);
+                    defined.insert(u.target.as_str());
+                }
+                // Definitions and module plumbing are not executable
+                // expressions; ErrorCeiling handler bodies run only on a
+                // throw and defer resolution like function bodies.
+                _ => {}
+            }
+        }
+    }
+
+    fn scan_expr_forward_refs(
+        &mut self,
+        e: &Expr,
+        later_funcs: &std::collections::HashSet<&str>,
+        defined: &std::collections::HashSet<&str>,
+    ) {
+        match e {
+            Expr::Ident(name, span) => {
+                if later_funcs.contains(name.as_str()) && !defined.contains(name.as_str()) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1539] Function '{}' is used before its definition. Top-level code runs in order, so move this statement below the definition of '{}' (references from inside function bodies resolve at call time and may stay).",
+                            name, name
+                        ),
+                        span: span.clone(),
+                    });
+                }
+            }
+            // Deferred-execution bodies: resolution happens at call time.
+            Expr::Lambda(..) => {}
+            Expr::IntLit(..)
+            | Expr::FloatLit(..)
+            | Expr::StringLit(..)
+            | Expr::TemplateLit(..)
+            | Expr::BoolLit(..)
+            | Expr::Gorilla(..)
+            | Expr::Placeholder(..)
+            | Expr::Hole(..)
+            | Expr::TypeLiteral(..)
+            | Expr::EnumVariant(..) => {}
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                for f in fields {
+                    self.scan_expr_forward_refs(&f.value, later_funcs, defined);
+                }
+            }
+            Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+                for i in items {
+                    self.scan_expr_forward_refs(i, later_funcs, defined);
+                }
+            }
+            Expr::BinaryOp(l, _, r, _) => {
+                self.scan_expr_forward_refs(l, later_funcs, defined);
+                self.scan_expr_forward_refs(r, later_funcs, defined);
+            }
+            Expr::UnaryOp(_, x, _) | Expr::Unmold(x, _) | Expr::Throw(x, _) => {
+                self.scan_expr_forward_refs(x, later_funcs, defined);
+            }
+            Expr::FuncCall(callee, args, _) => {
+                self.scan_expr_forward_refs(callee, later_funcs, defined);
+                for a in args {
+                    self.scan_expr_forward_refs(a, later_funcs, defined);
+                }
+            }
+            Expr::MethodCall(recv, _, args, _) => {
+                self.scan_expr_forward_refs(recv, later_funcs, defined);
+                for a in args {
+                    self.scan_expr_forward_refs(a, later_funcs, defined);
+                }
+            }
+            Expr::FieldAccess(x, _, _) => self.scan_expr_forward_refs(x, later_funcs, defined),
+            Expr::CondBranch(arms, _) => {
+                for arm in arms {
+                    if let Some(c) = &arm.condition {
+                        self.scan_expr_forward_refs(c, later_funcs, defined);
+                    }
+                    for st in &arm.body {
+                        match st {
+                            Statement::Expr(e) => {
+                                self.scan_expr_forward_refs(e, later_funcs, defined)
+                            }
+                            Statement::Assignment(a) => {
+                                self.scan_expr_forward_refs(&a.value, later_funcs, defined)
+                            }
+                            Statement::UnmoldForward(u) => {
+                                self.scan_expr_forward_refs(&u.source, later_funcs, defined)
+                            }
+                            Statement::UnmoldBackward(u) => {
+                                self.scan_expr_forward_refs(&u.source, later_funcs, defined)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Expr::MoldInst(_, targs, fields, _) => {
+                for t in targs {
+                    self.scan_expr_forward_refs(t, later_funcs, defined);
+                }
+                for f in fields {
+                    self.scan_expr_forward_refs(&f.value, later_funcs, defined);
+                }
+            }
+        }
+    }
+}

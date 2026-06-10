@@ -161,6 +161,7 @@
 | `E1536` | 封印キャリア (`Moltenized[T]` / `Secret[T]`) を二項演算のオペランドに使ったか、`assert` で観測した。`+` 連結は値を漏らし、`==` / `!=` や `assert` の成否は等値オラクルになる。内容比較は `ConstantTimeEq[secret, candidate]()` のみで行う。 | TypeChecker |
 | `E1537` | `Num` を値型注釈 (戻り型 `=> :Num` / 引数 `x: Num`、ネスト形含む) に使った。`Num` はジェネリック制約マーカー (`[T <= :Num]`) であり wire 上の実値型ではない。具体型 (`:Int` / `:Float`) を注釈するか、`[T <= :Num] ... => :T` のジェネリック関数にする。制約位置と型クエリ (`TypeIs[x, :Num]` / `TypeExtends[:Int, :Num]`) は引き続き有効。 | TypeChecker |
 | `E1538` | プリミティブ値型名 (`Int` / `Float` / `Str` / `Bool` / `Bytes` / `Num` / `Unit` / `Void` と正式別綴り `Integer` / `String` / `Boolean`) でクラスライク / Mold / Enum を定義した。注釈位置の解決は常に組み込みが勝つため、この定義は参照不能になる (silent 罠)。別名を選ぶこと。コンテナ / モールド名 (`Lax` / `Result` / `Async` 等) は対象外。 | TypeChecker |
+| `E1539` | トップレベルの実行文が、同一ファイル内でその文より後に定義される関数を参照した。トップレベル文は定義順に実行される (前方参照は実行時に未定義) ため、該当文を関数定義の後に移動する。関数本体・lambda 本体内からの参照は呼び出し時に解決されるため対象外 (相互再帰はこの形で書く)。 | TypeChecker |
 
 `E1512`〜`E1519` は **`Cage` / `CageRilla` 診断範囲**。`Cage[subject, runner]()` の型規則、および `CageRilla[Branch, Out]` の子系統 (`JSRilla` / `JSONRilla` / `BuildRilla` / `FileRilla`) が守る境界規約を扱う。`E1513` は将来の実行時検証用に予約している。
 
