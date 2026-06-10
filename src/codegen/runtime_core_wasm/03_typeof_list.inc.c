@@ -900,6 +900,24 @@ int64_t taida_list_none(int64_t list_ptr, int64_t fn_ptr) {
 
 /* ── WC-3b: List operation functions (all profiles) ── */
 
+/* Ordering for Sort[] (native twin: taida_sort_gt): FLOAT kinds
+   compare as f64, strings by byte content via their positive header,
+   Int<->Float pairs cross over. Raw i64 order made negative-Float
+   order invert and turned Sort[] on a Str list into pointer order. */
+static int _wasm_sort_gt(int64_t a, uint32_t eka, int64_t b, uint32_t ekb) {
+    int a_f = WASM_EKIND_KIND(eka) == WASM_TAG_FLOAT;
+    int b_f = WASM_EKIND_KIND(ekb) == WASM_TAG_FLOAT;
+    if (a_f || b_f) {
+        double da, db;
+        if (a_f) __builtin_memcpy(&da, &a, sizeof(double)); else da = (double)a;
+        if (b_f) __builtin_memcpy(&db, &b, sizeof(double)); else db = (double)b;
+        return da > db;
+    }
+    if (_wasm_is_string_ptr(a) && _wasm_is_string_ptr(b))
+        return _wf_strcmp((const char *)(intptr_t)a, (const char *)(intptr_t)b) > 0;
+    return a > b;
+}
+
 int64_t taida_list_sort(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
@@ -915,12 +933,14 @@ int64_t taida_list_sort(int64_t list_ptr) {
         items[i] = list[WASM_LIST_ELEMS + i];
         if (eks) eks[i] = _wasm_elem_kind_at(list, i);
     }
-    /* Insertion sort ascending */
+    /* Insertion sort ascending — kind-aware (homogeneous lists carry
+       their kind in the single elem tag). */
+    uint32_t homog_ek = elem_tag >= 0 ? WASM_EKIND((uint32_t)elem_tag, 0) : WASM_EKIND_UNKNOWN;
     for (int64_t i = 1; i < len; i++) {
         int64_t key = items[i];
-        uint32_t kek = eks ? eks[i] : 0;
+        uint32_t kek = eks ? eks[i] : homog_ek;
         int64_t j = i - 1;
-        while (j >= 0 && items[j] > key) {
+        while (j >= 0 && _wasm_sort_gt(items[j], eks ? eks[j] : homog_ek, key, kek)) {
             items[j+1] = items[j];
             if (eks) eks[j+1] = eks[j];
             j--;
@@ -948,12 +968,13 @@ int64_t taida_list_sort_desc(int64_t list_ptr) {
         items[i] = list[WASM_LIST_ELEMS + i];
         if (eks) eks[i] = _wasm_elem_kind_at(list, i);
     }
-    /* Insertion sort descending */
+    /* Insertion sort descending — kind-aware, see _wasm_sort_gt. */
+    uint32_t homog_ek = elem_tag >= 0 ? WASM_EKIND((uint32_t)elem_tag, 0) : WASM_EKIND_UNKNOWN;
     for (int64_t i = 1; i < len; i++) {
         int64_t key = items[i];
-        uint32_t kek = eks ? eks[i] : 0;
+        uint32_t kek = eks ? eks[i] : homog_ek;
         int64_t j = i - 1;
-        while (j >= 0 && items[j] < key) {
+        while (j >= 0 && _wasm_sort_gt(key, kek, items[j], eks ? eks[j] : homog_ek)) {
             items[j+1] = items[j];
             if (eks) eks[j+1] = eks[j];
             j--;
@@ -1522,6 +1543,33 @@ int64_t taida_list_max(int64_t list_ptr) {
 int64_t taida_list_sum(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
+    /* A Float element's payload is its f64 bit pattern — a raw i64 +=
+       would add the bit patterns as garbage integers (native twin has
+       the same split). Any FLOAT-kind element switches the whole sum
+       to f64; Int-only lists keep the exact i64 accumulation. */
+    int has_float = 0;
+    for (int64_t i = 0; i < len; i++) {
+        if (WASM_EKIND_KIND(_wasm_elem_kind_at(list, i)) == WASM_TAG_FLOAT) {
+            has_float = 1;
+            break;
+        }
+    }
+    if (has_float) {
+        double dsum = 0.0;
+        for (int64_t i = 0; i < len; i++) {
+            int64_t v = list[WASM_LIST_ELEMS + i];
+            if (WASM_EKIND_KIND(_wasm_elem_kind_at(list, i)) == WASM_TAG_FLOAT) {
+                double d;
+                __builtin_memcpy(&d, &v, sizeof(double));
+                dsum += d;
+            } else {
+                dsum += (double)v;
+            }
+        }
+        int64_t bits;
+        __builtin_memcpy(&bits, &dsum, sizeof(double));
+        return bits;
+    }
     int64_t sum = 0;
     for (int64_t i = 0; i < len; i++) {
         sum += list[WASM_LIST_ELEMS + i];
@@ -1537,7 +1585,10 @@ int64_t taida_list_contains(int64_t list_ptr, int64_t item) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     for (int64_t i = 0; i < len; i++) {
-        if (list[WASM_LIST_ELEMS + i] == item) return 1;
+        /* Structural equality (native twin: taida_list_contains): raw `==`
+           only matched by bit pattern, so a computed string or an equal
+           pack/list was never "contained" — unlike `==` / setOf / interp. */
+        if (_wasm_value_eq(list[WASM_LIST_ELEMS + i], item)) return 1;
     }
     return 0;
 }
@@ -1550,7 +1601,8 @@ int64_t taida_list_index_of(int64_t list_ptr, int64_t item) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     for (int64_t i = 0; i < len; i++) {
-        if (list[WASM_LIST_ELEMS + i] == item) return i;
+        /* Structural equality — see taida_list_contains. */
+        if (_wasm_value_eq(list[WASM_LIST_ELEMS + i], item)) return i;
     }
     return -1;
 }
@@ -1560,7 +1612,8 @@ int64_t taida_list_last_index_of(int64_t list_ptr, int64_t item) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     for (int64_t i = len - 1; i >= 0; i--) {
-        if (list[WASM_LIST_ELEMS + i] == item) return i;
+        /* Structural equality — see taida_list_contains. */
+        if (_wasm_value_eq(list[WASM_LIST_ELEMS + i], item)) return i;
     }
     return -1;
 }

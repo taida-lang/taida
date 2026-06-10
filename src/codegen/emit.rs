@@ -2734,7 +2734,7 @@ impl Emitter {
         self.module
             .define_function(func_id, &mut self.ctx)
             .map_err(|e| EmitError {
-                message: format!("define_function failed: {}", e),
+                message: format!("define_function failed: {:?}", e),
             })?;
 
         self.module.clear_context(&mut self.ctx);
@@ -2944,6 +2944,20 @@ impl Emitter {
                                 || result_type == ectx.abi.fn_ptr_ty())
                         {
                             builder.ins().uextend(ectx.value_ty, result)
+                        } else if result_type == types::F64 && ectx.value_ty != types::F64 {
+                            // F64 return → boxed value. The val_map invariant
+                            // (every IrVar resolves to boxed value_ty — the
+                            // same one ConstFloat enforces) must hold here
+                            // too: specialised consumers like PackSet pass
+                            // values through untyped, and a raw f64 reaching
+                            // an i64 slot is a Cranelift verifier error
+                            // (e.g. a negative Float literal in a pack field,
+                            // whose value arrives via taida_float_neg).
+                            // F64-expecting params bitcast back on the way
+                            // in, so the round-trip is value-preserving.
+                            builder
+                                .ins()
+                                .bitcast(ectx.value_ty, clif::MemFlags::new(), result)
                         } else {
                             result
                         };

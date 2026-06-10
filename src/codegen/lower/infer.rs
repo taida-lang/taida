@@ -65,7 +65,7 @@ impl Lowering {
             // match the `Float` entries in `src/types/mold_specs.rs`
             // so nested calls (`Sqrt[Pow[2.0, 3]()]`) skip the
             // int→float widening in the outer mold's lowering.
-            Expr::MoldInst(name, _, _, _) => {
+            Expr::MoldInst(name, type_args, _, _) => {
                 matches!(
                     name.as_str(),
                     "Sqrt"
@@ -85,8 +85,31 @@ impl Lowering {
                         | "Sinh"
                         | "Cosh"
                         | "Tanh"
-                )
+                ) ||
+                // Sum over a Float list returns a Float: the runtime
+                // switches to f64 accumulation when any element kind
+                // is FLOAT, so the result's display/consumers must
+                // treat it as one (statically visible for a float-list
+                // literal or a tracked @[Float] variable).
+                (name == "Sum"
+                    && type_args.first().is_some_and(|a| self.expr_is_float_list(a)))
             }
+            _ => false,
+        }
+    }
+
+    /// Statically-known Float list: a literal whose every element is a
+    /// Float expression, or a variable tracked as `@[Float]` (literal
+    /// binding or parameter annotation) via `list_element_types`.
+    pub(crate) fn expr_is_float_list(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::ListLit(items, _) => {
+                !items.is_empty() && items.iter().all(|i| self.expr_returns_float(i))
+            }
+            Expr::Ident(name, _) => self
+                .list_element_types
+                .get(name)
+                .is_some_and(|t| t == "Float"),
             _ => false,
         }
     }

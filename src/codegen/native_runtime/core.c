@@ -1117,6 +1117,9 @@ static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
 static taida_val taida_throw_to_display_string(taida_val throw_val);
 static int taida_safe_cstr(taida_val ptr, size_t max_len);
+// List membership compares by structure (strings/bytes/lists/packs recurse) —
+// defined with the Set/unique equality family further down.
+static int taida_value_struct_eq(taida_val a, taida_val b);
 static taida_val taida_error_info_pack_from_error(taida_val error);
 static taida_val taida_make_error_with_kind_code(const char *error_type, const char *error_msg, const char *error_kind, taida_val error_code);
 // E34B-017: `taida_result_map_error` materialises the mapped value's
@@ -4192,6 +4195,34 @@ taida_val taida_list_last(taida_val list_ptr) {
 taida_val taida_list_sum(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
+    // A Float element's payload is its f64 bit pattern — a raw i64 +=
+    // would add the bit patterns as garbage integers. Mirror the
+    // reference implementation: any FLOAT-kind element switches the
+    // whole sum to f64 (Int elements are lifted), and the result is a
+    // Float. Int-only lists keep the exact i64 accumulation.
+    int has_float = 0;
+    for (taida_val i = 0; i < len; i++) {
+        if (TAIDA_EKIND_KIND(taida_elem_kind_at(list, i)) == TAIDA_TAG_FLOAT) {
+            has_float = 1;
+            break;
+        }
+    }
+    if (has_float) {
+        double dsum = 0.0;
+        for (taida_val i = 0; i < len; i++) {
+            taida_val v = list[4 + i];
+            if (TAIDA_EKIND_KIND(taida_elem_kind_at(list, i)) == TAIDA_TAG_FLOAT) {
+                double d;
+                memcpy(&d, &v, sizeof(double));
+                dsum += d;
+            } else {
+                dsum += (double)v;
+            }
+        }
+        taida_val bits;
+        memcpy(&bits, &dsum, sizeof(double));
+        return bits;
+    }
     taida_val sum = 0;
     for (taida_val i = 0; i < len; i++) {
         sum += list[4 + i];
@@ -4226,7 +4257,11 @@ taida_val taida_list_contains(taida_val list_ptr, taida_val item) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     for (taida_val i = 0; i < len; i++) {
-        if (list[4 + i] == item) return 1;
+        // Structural equality: a raw `==` only matched by bit pattern, so
+        // a computed string (different pointer, same bytes) or an equal
+        // pack/list was never "contained" — unlike `==`, setOf and the
+        // interpreter, which all compare by value.
+        if (taida_value_struct_eq(list[4 + i], item)) return 1;
     }
     return 0;
 }
@@ -6030,7 +6065,8 @@ taida_val taida_list_index_of(taida_val list_ptr, taida_val item) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     for (taida_val i = 0; i < len; i++) {
-        if (list[4 + i] == item) return i;
+        // Structural equality — see taida_list_contains.
+        if (taida_value_struct_eq(list[4 + i], item)) return i;
     }
     return -1;
 }
@@ -6040,7 +6076,8 @@ taida_val taida_list_last_index_of(taida_val list_ptr, taida_val item) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     for (taida_val i = len - 1; i >= 0; i--) {
-        if (list[4 + i] == item) return i;
+        // Structural equality — see taida_list_contains.
+        if (taida_value_struct_eq(list[4 + i], item)) return i;
     }
     return -1;
 }
@@ -6227,6 +6264,26 @@ taida_val taida_list_join(taida_val list_ptr, const char* sep) {
     return (taida_val)r;
 }
 
+// Ordering for Sort[]: FLOAT kinds compare as f64 (the raw i64 bit
+// pattern inverts the order of negative floats), strings compare by
+// byte content (raw order was pointer order, making Sort[] on a Str
+// list a no-op), and an Int↔Float pair crosses over like the
+// interpreter's Value ordering. Strings are recognised by their
+// positive header even when the element kind is unrecorded.
+static int taida_sort_gt(taida_val a, uint32_t eka, taida_val b, uint32_t ekb) {
+    int a_f = TAIDA_EKIND_KIND(eka) == TAIDA_TAG_FLOAT;
+    int b_f = TAIDA_EKIND_KIND(ekb) == TAIDA_TAG_FLOAT;
+    if (a_f || b_f) {
+        double da, db;
+        if (a_f) memcpy(&da, &a, sizeof(double)); else da = (double)a;
+        if (b_f) memcpy(&db, &b, sizeof(double)); else db = (double)b;
+        return da > db;
+    }
+    if (taida_is_string_value(a) && taida_is_string_value(b))
+        return strcmp((const char*)a, (const char*)b) > 0;
+    return a > b;
+}
+
 taida_val taida_list_sort(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
@@ -6246,12 +6303,14 @@ taida_val taida_list_sort(taida_val list_ptr) {
         for (taida_val i = 0; i < len; i++) eks[i] = taida_elem_kind_at(list, i);
     }
     for (taida_val i = 0; i < len; i++) items[i] = list[4 + i];
-    // Simple insertion sort
+    // Simple insertion sort. Homogeneous lists carry their kind in the
+    // single elem tag; array carriers ride per-element kinds.
+    uint32_t homog_ek = elem_tag >= 0 ? TAIDA_EKIND((uint32_t)elem_tag, 0) : TAIDA_EKIND_UNKNOWN;
     for (taida_val i = 1; i < len; i++) {
         taida_val key = items[i];
-        uint32_t kek = eks ? eks[i] : 0;
+        uint32_t kek = eks ? eks[i] : homog_ek;
         taida_val j = i - 1;
-        while (j >= 0 && items[j] > key) {
+        while (j >= 0 && taida_sort_gt(items[j], eks ? eks[j] : homog_ek, key, kek)) {
             items[j+1] = items[j];
             if (eks) eks[j+1] = eks[j];
             j--;
@@ -6991,12 +7050,13 @@ taida_val taida_list_sort_desc(taida_val list_ptr) {
         for (taida_val i = 0; i < len; i++) eks[i] = taida_elem_kind_at(list, i);
     }
     for (taida_val i = 0; i < len; i++) items[i] = list[4 + i];
-    // Insertion sort descending
+    // Insertion sort descending — kind-aware, see taida_sort_gt.
+    uint32_t homog_ek = elem_tag >= 0 ? TAIDA_EKIND((uint32_t)elem_tag, 0) : TAIDA_EKIND_UNKNOWN;
     for (taida_val i = 1; i < len; i++) {
         taida_val key = items[i];
-        uint32_t kek = eks ? eks[i] : 0;
+        uint32_t kek = eks ? eks[i] : homog_ek;
         taida_val j = i - 1;
-        while (j >= 0 && items[j] < key) {
+        while (j >= 0 && taida_sort_gt(key, kek, items[j], eks ? eks[j] : homog_ek)) {
             items[j+1] = items[j];
             if (eks) eks[j+1] = eks[j];
             j--;

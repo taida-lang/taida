@@ -278,3 +278,82 @@ stdout(p(1) + p(2))
     assert_eq!(out, "20000");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Negative Float literals in pack fields: the F64 return of a runtime
+/// call (taida_float_neg) used to escape into the val_map unboxed and
+/// reach taida_pack_set's i64 slot — a Cranelift verifier error that
+/// made `@(z <= -0.5)` fail to BUILD on native.
+#[test]
+fn negative_float_pack_field_builds_and_runs() {
+    let dir = unique_temp_dir("f61_neg_float_pack");
+    let out = assert_parity(
+        &dir,
+        "neg_pack",
+        r#"p <= @(z <= -0.5)
+stdout(p)
+nested <= @(inner <= @(w <= -1.5))
+stdout(nested)
+"#,
+    );
+    assert_eq!(out, "@(z <= -0.5)\n@(inner <= @(w <= -1.5))");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Sum over Float lists: the payload of a Float element is its f64 bit
+/// pattern, which the raw i64 accumulation added as garbage integers.
+/// Pins the f64 switch (literal, tracked variable, parameter) and the
+/// exact i64 path for Int-only lists.
+#[test]
+fn sum_over_float_lists_accumulates_as_f64() {
+    let dir = unique_temp_dir("f61_sum_float");
+    let out = assert_parity(
+        &dir,
+        "sum_float",
+        r#"stdout(Sum[@[1.0, 2.0]]().toString())
+fl <= @[2.5, 1.5, 0.5]
+stdout(Sum[fl]().toString())
+ints <= @[1, 2, 3]
+stdout(Sum[ints]().toString())
+sumIt xs: @[Float] = Sum[xs]() => :Float
+stdout(sumIt(@[0.5, 0.25]).toString())
+"#,
+    );
+    assert_eq!(out, "3.0\n4.5\n6\n0.75");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Sort[] and list membership compare by VALUE: raw i64 comparison
+/// made Sort[] on a Str list a pointer-order no-op, inverted the order
+/// of negative Floats, and contains/indexOfLax never matched a computed
+/// string or an equal pack/nested list.
+#[test]
+fn sort_and_membership_compare_by_value() {
+    let dir = unique_temp_dir("f61_sort_membership");
+    let out = assert_parity(
+        &dir,
+        "sort_member",
+        r#"w <= @["cherry", "apple", "banana"]
+stdout(Sort[w]())
+stdout(Sort[@["b", "c", "a"]](reverse <= true))
+nf <= @[1.5, -0.5, 0.5, -1.5]
+stdout(Sort[nf]())
+stdout(Sort[nf](reverse <= true))
+needle <= "a" + "a"
+ws <= @["aa", "bb"]
+stdout(ws.contains(needle))
+ws.indexOfLax("bb").getOrDefault(-1) >=> i1
+stdout(i1)
+ps <= @[@(a <= 1), @(a <= 2)]
+stdout(ps.contains(@(a <= 2)))
+ls <= @[@[1, 2], @[3]]
+ls.indexOfLax(@[1, 2]).getOrDefault(-1) >=> i2
+stdout(i2)
+stdout(@["x"].lastIndexOf("x"))
+"#,
+    );
+    assert_eq!(
+        out,
+        "@[\"apple\", \"banana\", \"cherry\"]\n@[\"c\", \"b\", \"a\"]\n@[-1.5, -0.5, 0.5, 1.5]\n@[1.5, 0.5, -0.5, -1.5]\ntrue\n1\ntrue\n0\n0"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
