@@ -875,7 +875,9 @@ mod tests {
         //   helper header described static strings as header-less; they have
         //   carried a TAIDA_STR_STATIC_MAGIC header since the F58 rework.
         //   +103. 1,310,758 -> 1,310,861.
-        const EXPECTED_TOTAL_LEN: usize = 1_310_861;
+        // 2026-06-10 consume-variant Append (core.c, F1): +912.
+        //   1,310,861 -> 1,311,773.
+        const EXPECTED_TOTAL_LEN: usize = 1_311_773;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1613,7 +1615,11 @@ mod tests {
         // 2026-06-10 F58 stale-comment refresh: the heap-string helper
         //   header comment now matches the static-string header reality
         //   (before the marker). +103. F1 402,959 -> 403,062.
-        const F1_LEN: usize = 403_062;
+        // 2026-06-10 consume-variant Append (core.c, before the marker):
+        //   taida_list_append_consume — in-place push once the
+        //   tail-recursive build loop owns its accumulator (ownership
+        //   bit threaded by the emitter). +912. F1 403,062 -> 403,974.
+        const F1_LEN: usize = 403_974;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

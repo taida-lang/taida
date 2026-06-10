@@ -203,7 +203,9 @@ mod tests {
         //   silently reject as invalid — a 10k-append loop run twice
         //   returned an empty second list) and on memory.grow failure
         //   (used to return NULL into constructors). -> 468,580.
-        const EXPECTED_TOTAL_LEN: usize = 468_580;
+        // 2026-06-10 consume-variant Append (03_typeof_list.inc.c):
+        //   taida_list_append_consume — see the native twin. -> 469,140.
+        const EXPECTED_TOTAL_LEN: usize = 469_140;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

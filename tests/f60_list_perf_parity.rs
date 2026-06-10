@@ -83,3 +83,94 @@ stdout(joinIt(1))
     assert_eq!(out, "6\n2");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The consume-append rewrite: a tail-recursive `f(n-1, Append[acc, x]())`
+/// pushes in place once the loop owns its accumulator. The FIRST
+/// activation must NOT consume — the accumulator may be the caller's
+/// list. This is the pin for that detach.
+#[test]
+fn consume_append_detaches_callers_list() {
+    let dir = unique_temp_dir("f60_consume_detach");
+    let out = assert_parity(
+        &dir,
+        "consume_detach",
+        r#"build n: Int acc: @[Int] =
+  | n == 0 |> acc
+  | _ |> build(n - 1, Append[acc, n]())
+=> :@[Int]
+
+xs <= @[100]
+ys <= build(3, xs)
+stdout(xs)
+stdout(ys)
+zs <= build(2, xs)
+stdout(xs)
+stdout(zs)
+"#,
+    );
+    assert_eq!(out, "@[100]\n@[100, 3, 2, 1]\n@[100]\n@[100, 2, 1]");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Fail-closed shapes: anything that could observe the old list keeps
+/// the copy semantics on every backend.
+#[test]
+fn consume_append_fails_closed_on_unsafe_shapes() {
+    let dir = unique_temp_dir("f60_consume_failclosed");
+    // acc used twice in the recursive arm (second use after the append).
+    let out = assert_parity(
+        &dir,
+        "twice",
+        r#"build n: Int acc: @[Int] =
+  | n == 0 |> acc
+  | _ |>
+    grown <= Append[acc, n]()
+    last <= acc.length()
+    build(n - 1, Append[grown, last]())
+=> :@[Int]
+
+stdout(build(2, @[7]).length())
+"#,
+    );
+    assert_eq!(out, "5");
+    // Append[p, p-derived] — the item reads the accumulator.
+    let out2 = assert_parity(
+        &dir,
+        "self_item",
+        r#"build n: Int acc: @[Int] =
+  | n == 0 |> acc
+  | _ |> build(n - 1, Append[acc, acc.length()]())
+=> :@[Int]
+
+stdout(build(3, @[]))
+"#,
+    );
+    assert_eq!(out2, "@[0, 1, 2]");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Large sequential builds complete on wasm (the O(n^2) copies used to
+/// exhaust the 2GB boxed-value address space on the second call) and
+/// agree across backends.
+#[test]
+fn large_sequential_build_completes_everywhere() {
+    let dir = unique_temp_dir("f60_consume_large");
+    let out = assert_parity(
+        &dir,
+        "large",
+        r#"build n: Int acc: @[Int] =
+  | n == 0 |> acc
+  | _ |> build(n - 1, Append[acc, n]())
+=> :@[Int]
+
+p u: Int =
+  nums <= build(10000, @[])
+  nums.length()
+=> :Int
+
+stdout(p(1) + p(2))
+"#,
+    );
+    assert_eq!(out, "20000");
+    let _ = std::fs::remove_dir_all(&dir);
+}

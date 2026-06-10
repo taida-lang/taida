@@ -477,6 +477,7 @@ const DIVERGENT_CONTAINER_ALLOC_RC: &[&str] = &[
     "taida_list_all",
     "taida_list_any",
     "taida_list_append",
+    "taida_list_append_consume",
     "taida_list_concat",
     "taida_list_contains",
     "taida_list_count",

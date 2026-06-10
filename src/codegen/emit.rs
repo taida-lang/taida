@@ -755,6 +755,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Val],
             returns: &[Ptr],
         },
+        "taida_list_append_consume" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
         "taida_list_prepend" => RuntimeAbi {
             params: &[Ptr, Val],
             returns: &[Ptr],
@@ -2112,6 +2116,11 @@ struct EmitCtx {
     str_globals: HashMap<IrVar, clif::GlobalValue>,
     /// TCO: ループ先頭ブロック（末尾再帰用）
     tco_loop_block: Option<clif::Block>,
+    /// Ownership bit for the consume-append rewrite (loop machinery:
+    /// 0 on entry, 1 after every self tail-call). A Cranelift Variable
+    /// because it mutates across the loop back-edge — named IR vars
+    /// resolve statically here and cannot carry that.
+    tco_owned_var: Option<cranelift_frontend::Variable>,
     /// TCO: パラメータ Variable のリスト（引数の再代入用）
     tco_param_vars: Vec<cranelift_frontend::Variable>,
     /// ターゲットの呼出規約（CallIndirect 等で使用）
@@ -2651,6 +2660,7 @@ impl Emitter {
                 func_refs,
                 str_globals,
                 tco_loop_block: None,
+                tco_owned_var: None,
                 tco_param_vars: Vec::new(),
                 call_conv: self.abi.call_conv(),
                 value_ty: self.abi.value_ty(),
@@ -2669,6 +2679,13 @@ impl Emitter {
                     // IrVar のマッピングも設定
                     ectx.val_map.insert(i as IrVar, block_params[i]);
                     ectx.named_vars.insert(param_name.clone(), block_params[i]);
+                }
+
+                if ir_func.append_consume_owned {
+                    let owned = builder.declare_var(types::I64);
+                    let zero = builder.ins().iconst(types::I64, 0);
+                    builder.def_var(owned, zero);
+                    ectx.tco_owned_var = Some(owned);
                 }
 
                 // ループブロック（エントリから無条件ジャンプ）
@@ -2841,6 +2858,19 @@ impl Emitter {
             IrInst::Call(dst, func_name, args) => {
                 // ── Integer/Bool intrinsics: emit native instructions instead of call ──
                 if let Some(result) = Self::try_emit_intrinsic(builder, ectx, func_name, args) {
+                    ectx.val_map.insert(*dst, result);
+                } else if func_name == "taida_list_append_consume" && args.len() == 2 {
+                    // The consume-append's ownership argument is loop
+                    // machinery (see tco_owned_var), not an IR value.
+                    let owned_val = match ectx.tco_owned_var {
+                        Some(owned) => builder.use_var(owned),
+                        None => builder.ins().iconst(types::I64, 0),
+                    };
+                    let func_ref = ectx.func_refs[func_name.as_str()];
+                    let a = ectx.val_map[&args[0]];
+                    let b = ectx.val_map[&args[1]];
+                    let call = builder.ins().call(func_ref, &[a, b, owned_val]);
+                    let result = builder.inst_results(call)[0];
                     ectx.val_map.insert(*dst, result);
                 } else {
                     // W-0f: runtime_func_signature_for() で ectx.abi ベースの解決に統一
@@ -3063,6 +3093,13 @@ impl Emitter {
                         if i < ectx.tco_param_vars.len() {
                             builder.def_var(ectx.tco_param_vars[i], *val);
                         }
+                    }
+
+                    if let Some(owned) = ectx.tco_owned_var {
+                        // From here on the accumulator is this loop's
+                        // own list (consume-append machinery).
+                        let one = builder.ins().iconst(types::I64, 1);
+                        builder.def_var(owned, one);
                     }
 
                     builder.ins().jump(loop_block, &[]);

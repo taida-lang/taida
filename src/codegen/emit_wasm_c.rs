@@ -1133,6 +1133,10 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_list_append" | "taida_list_prepend" => {
             format!("int64_t {}(int64_t list, int64_t item);", name)
         }
+        "taida_list_append_consume" => {
+            "int64_t taida_list_append_consume(int64_t list, int64_t item, int64_t owned);"
+                .to_string()
+        }
         "taida_list_take" | "taida_list_drop" => {
             format!("int64_t {}(int64_t list, int64_t n);", name)
         }
@@ -1702,6 +1706,7 @@ struct FuncContext<'a> {
     global_map: &'a HashMap<i64, String>,
     func_user_arity: &'a HashMap<String, usize>,
     str_index: &'a HashMap<String, usize>,
+    append_consume_owned: bool,
 }
 
 /// 単一関数を C コードに変換
@@ -1760,11 +1765,19 @@ fn emit_function(
         global_map,
         func_user_arity,
         str_index,
+        append_consume_owned: func.append_consume_owned,
     };
 
     // 末尾再帰のサポート: TailCall を含む場合はループで囲む
     let has_tail_call = contains_tail_call(&func.body);
     if has_tail_call {
+        if func.append_consume_owned {
+            // Ownership bit for the consume-append rewrite: 0 on entry
+            // (the accumulator may alias the caller's list — detach via
+            // the copy path), set to 1 by every self tail-call. Lives
+            // OUTSIDE the loop: anything inside resets every iteration.
+            writeln!(c, "    int64_t __tco_owned = 0;").unwrap();
+        }
         writeln!(c, "    while (1) {{").unwrap();
         emit_insts(c, &func.body, "        ", &fctx)?;
         writeln!(c, "    }}").unwrap();
@@ -1942,6 +1955,17 @@ fn emit_inst(
             // small-int lift (_to_double), which is value semantics.
             if let Some(expr) = try_emit_scalar_intrinsic_c(name, args) {
                 writeln!(c, "{}v_{} = {};", indent, dst, expr).unwrap();
+                return Ok(());
+            }
+            // The consume-append's ownership argument is loop machinery
+            // (see the __tco_owned declaration), not an IR value.
+            if name == "taida_list_append_consume" && args.len() == 2 {
+                writeln!(
+                    c,
+                    "{}v_{} = taida_list_append_consume(v_{}, v_{}, __tco_owned);",
+                    indent, dst, args[0], args[1]
+                )
+                .unwrap();
                 return Ok(());
             }
             // Return-tag access: a plain swap on a module global,
@@ -2206,6 +2230,10 @@ fn emit_inst(
                     )
                     .unwrap();
                 }
+            }
+            if fctx.append_consume_owned {
+                // From here on the accumulator is this loop's own list.
+                writeln!(c, "{}__tco_owned = 1;", indent).unwrap();
             }
             writeln!(c, "{}continue;", indent).unwrap();
         }

@@ -1244,6 +1244,18 @@ int64_t taida_list_append(int64_t list_ptr, int64_t item) {
     return new_list;
 }
 
+/* Consume-variant Append — see the native twin for the ownership
+   contract (owned=0 detaches via the copy variant; owned=1 pushes in
+   place, the lowering having proven no other reference exists). */
+int64_t taida_list_append_consume(int64_t list_ptr, int64_t item, int64_t owned) {
+    if (!owned) return taida_list_append(list_ptr, item);
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    if (_wasm_elem_slot_is_array(list[2])) {
+        _wasm_elem_tags_note_push_ek(list, WASM_EKIND_UNKNOWN);
+    }
+    return taida_list_push(list_ptr, item);
+}
+
 int64_t taida_list_prepend(int64_t list_ptr, int64_t item) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];

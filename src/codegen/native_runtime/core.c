@@ -6858,6 +6858,23 @@ taida_val taida_list_append(taida_val list_ptr, taida_val item) {
     return new_list;
 }
 
+/* Consume-variant Append for the tail-recursive build pattern: the
+   lowering proves the source list's ONLY remaining use is this call
+   and threads an ownership bit — 0 on the first activation (the list
+   came from the caller and may be aliased there: detach via the copy
+   variant), 1 after any self tail-call (the list was produced by this
+   loop and nothing else can reach it: push in place, amortized O(1)).
+   Without this, sequential Append construction copies the whole list
+   per element — O(n^2), ~1.2GB of traffic for a 10k build. */
+taida_val taida_list_append_consume(taida_val list_ptr, taida_val item, taida_val owned) {
+    if (!owned) return taida_list_append(list_ptr, item);
+    taida_val *list = (taida_val*)list_ptr;
+    if (taida_elem_slot_is_array(list[3])) {
+        taida_elem_tags_note_push_ek(list, TAIDA_EKIND_UNKNOWN);
+    }
+    return taida_list_push(list_ptr, item);
+}
+
 taida_val taida_list_prepend(taida_val list_ptr, taida_val item) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
