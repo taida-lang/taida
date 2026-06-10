@@ -1170,6 +1170,25 @@ int64_t taida_list_reverse(int64_t list_ptr) {
     return new_list;
 }
 
+/* Kind-aware element rendering for the list display paths. The list
+   records each element's kind, but the display paths used to funnel
+   every element through the tag-blind polymorphic heuristics — a Float
+   element rendered as its raw f64 bit pattern and a Bool as 0/1,
+   because neither payload can be identified from the value alone.
+   Every other kind keeps the existing fallback. */
+static int64_t _wasm_elem_to_string_kinded(int64_t item, uint32_t ek) {
+    uint32_t k = WASM_EKIND_KIND(ek);
+    if (k == WASM_TAG_FLOAT) return taida_float_to_str(item);
+    if (k == WASM_TAG_BOOL) {
+        const char *s = item ? "true" : "false";
+        unsigned int sl = item ? 4u : 5u;
+        char *r = _wasm_str_alloc(sl + 1);
+        _wf_memcpy(r, s, (int)(sl + 1));
+        return (int64_t)r;
+    }
+    return taida_polymorphic_to_string(item);
+}
+
 int64_t taida_list_join(int64_t list_ptr, int64_t sep_raw) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
@@ -1178,12 +1197,24 @@ int64_t taida_list_join(int64_t list_ptr, int64_t sep_raw) {
     if (!sep) sep = "";
     int sep_len = _wf_strlen(sep);
 
-    /* Convert each element through polymorphic_to_string */
+    /* String elements (the dominant case: Split/Map outputs) are
+       borrowed in place — materialising a per-element copy through
+       polymorphic_to_string just to memcpy it once is pure allocation
+       traffic. Non-string elements keep the shared toString path.
+       Lengths are scanned once and reused for the copy pass. */
     const char **strs = (const char **)wasm_alloc((unsigned int)(len * sizeof(const char *)));
+    int *lens = (int *)wasm_alloc((unsigned int)(len * sizeof(int)));
     int total = 0;
     for (int64_t i = 0; i < len; i++) {
-        strs[i] = (const char *)(intptr_t)taida_polymorphic_to_string(list[WASM_LIST_ELEMS + i]);
-        total += _wf_strlen(strs[i]);
+        int64_t elem = list[WASM_LIST_ELEMS + i];
+        if (_wasm_is_string_ptr(elem)) {
+            strs[i] = (const char *)(intptr_t)elem;
+        } else {
+            strs[i] = (const char *)(intptr_t)_wasm_elem_to_string_kinded(
+                elem, _wasm_elem_kind_at(list, i));
+        }
+        lens[i] = _wf_strlen(strs[i]);
+        total += lens[i];
         if (i > 0) total += sep_len;
     }
 
@@ -1191,9 +1222,8 @@ int64_t taida_list_join(int64_t list_ptr, int64_t sep_raw) {
     char *dst = r;
     for (int64_t i = 0; i < len; i++) {
         if (i > 0 && sep_len > 0) { _wf_memcpy(dst, sep, sep_len); dst += sep_len; }
-        int sl = _wf_strlen(strs[i]);
-        _wf_memcpy(dst, strs[i], sl);
-        dst += sl;
+        _wf_memcpy(dst, strs[i], lens[i]);
+        dst += lens[i];
     }
     *dst = '\0';
     return (int64_t)r;
@@ -1393,7 +1423,8 @@ int64_t taida_list_to_display_string(int64_t list_ptr) {
     const char **strs = (const char **)wasm_alloc((unsigned int)(len * sizeof(const char *)));
     int total = 3; /* "@[" + "]" */
     for (int64_t i = 0; i < len; i++) {
-        strs[i] = (const char *)(intptr_t)taida_polymorphic_to_string(list[WASM_LIST_ELEMS + i]);
+        strs[i] = (const char *)(intptr_t)_wasm_elem_to_string_kinded(
+            list[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(list, i));
         total += _wf_strlen(strs[i]);
         if (i > 0) total += 2; /* ", " */
     }

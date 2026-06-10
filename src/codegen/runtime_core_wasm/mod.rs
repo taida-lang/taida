@@ -205,7 +205,7 @@ mod tests {
         //   (used to return NULL into constructors). -> 468,580.
         // 2026-06-10 consume-variant Append (03_typeof_list.inc.c):
         //   taida_list_append_consume — see the native twin. -> 469,140.
-        const EXPECTED_TOTAL_LEN: usize = 470_021;
+        const EXPECTED_TOTAL_LEN: usize = 471_465;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

@@ -181,6 +181,43 @@ stdout(Div[-17, 5]().unmold())
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Float and Bool list display/join: the containers record element
+/// kinds, but the native/wasm display paths used to render through
+/// tag-blind value heuristics — a Float element printed as its raw f64
+/// bit pattern and a Bool as 0/1. Pins the kind-aware rendering plus
+/// the borrowed-string join (string elements joined without per-element
+/// materialisation) against the interpreter.
+#[test]
+fn list_display_and_join_render_kinds() {
+    let dir = unique_temp_dir("f60_kind_display");
+    let out = assert_parity(
+        &dir,
+        "kinds",
+        r#"fl <= @[1.5, 2.5]
+stdout(fl)
+bl <= @[true, false]
+stdout(bl)
+Join[fl, ";"]() >=> jf
+stdout(jf)
+Join[bl, ","]() >=> jb
+stdout(jb)
+sl <= @["a", "bb"]
+stdout(sl)
+Join[sl, "-"]() >=> js
+stdout(js)
+nested <= @[@[1.5], @[2.5]]
+stdout(nested)
+Join[@[1, 2, 3], ""]() >=> jn
+stdout(jn)
+"#,
+    );
+    assert_eq!(
+        out,
+        "@[1.5, 2.5]\n@[true, false]\n1.5;2.5\ntrue,false\n@[\"a\", \"bb\"]\na-bb\n@[@[1.5], @[2.5]]\n123"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Large sequential builds complete on wasm (the O(n^2) copies used to
 /// exhaust the 2GB boxed-value address space on the second call) and
 /// agree across backends.

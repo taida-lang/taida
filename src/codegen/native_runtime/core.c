@@ -6143,6 +6143,26 @@ taida_val taida_list_concat(taida_val list1, taida_val list2) {
     return new_list;
 }
 
+// Kind-aware element rendering for the container display paths. The
+// container records each element's kind (homogeneous tag or per-element
+// array), but the display paths used to funnel every element through
+// the tag-blind value heuristics — a Float element rendered as its raw
+// f64 bit pattern and a Bool as 0/1, because neither payload can be
+// identified from the value alone. Every other kind keeps the existing
+// fallback (strings/containers carry their own positive headers).
+static taida_val taida_elem_to_debug_string_kinded(taida_val item, uint32_t ek) {
+    uint32_t k = TAIDA_EKIND_KIND(ek);
+    if (k == TAIDA_TAG_FLOAT) {
+        double d;
+        memcpy(&d, &item, sizeof(double));
+        return taida_float_to_str(d);
+    }
+    if (k == TAIDA_TAG_BOOL) {
+        return (taida_val)taida_str_new_copy(item ? "true" : "false");
+    }
+    return taida_value_to_debug_string(item);
+}
+
 taida_val taida_list_join(taida_val list_ptr, const char* sep) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
@@ -6150,16 +6170,39 @@ taida_val taida_list_join(taida_val list_ptr, const char* sep) {
     if (!sep) sep = "";
     size_t sep_len = strlen(sep);
 
-    // Convert each element through the shared toString path.
-    // This avoids pointer heuristics and keeps behavior consistent.
+    // Flat string elements (the dominant case: Split/Map outputs) are
+    // borrowed in place via their hidden length header — materialising
+    // a per-element copy through the toString path just to memcpy and
+    // free it dominated the string-pipeline benchmark. Ropes and
+    // non-string elements keep the shared toString materialisation.
     // M-06: Overflow guard on len * sizeof + NULL check.
     size_t strs_size = taida_safe_mul((size_t)len, sizeof(const char*), "list_join strs");
     const char **strs = (const char**)TAIDA_MALLOC(strs_size, "list_join_strs");
+    size_t lens_size = taida_safe_mul((size_t)len, sizeof(size_t), "list_join lens");
+    size_t *lens = (size_t*)TAIDA_MALLOC(lens_size, "list_join_lens");
+    unsigned char *owned = (unsigned char*)TAIDA_MALLOC((size_t)len, "list_join_owned");
     // M-16: Use size_t for total with overflow guards to prevent wrap-around.
     size_t total = 0;
     for (taida_val i = 0; i < len; i++) {
-        strs[i] = (const char*)taida_value_to_display_string(list[4 + i]);
-        total = taida_safe_add(total, strlen(strs[i]), "list_join total");
+        taida_val elem = list[4 + i];
+        size_t el;
+        if (taida_is_string_value(elem)
+            && ((((const taida_val*)elem)[-2] & TAIDA_MAGIC_MASK) != TAIDA_STR_ROPE_MAGIC)) {
+            strs[i] = (const char*)elem;
+            el = (size_t)((const taida_val*)elem)[-1];
+            owned[i] = 0;
+        } else {
+            uint32_t k = TAIDA_EKIND_KIND(taida_elem_kind_at(list, i));
+            if (k == TAIDA_TAG_FLOAT || k == TAIDA_TAG_BOOL) {
+                strs[i] = (const char*)taida_elem_to_debug_string_kinded(elem, TAIDA_EKIND(k, 0));
+            } else {
+                strs[i] = (const char*)taida_value_to_display_string(elem);
+            }
+            el = strlen(strs[i]);
+            owned[i] = 1;
+        }
+        lens[i] = el;
+        total = taida_safe_add(total, el, "list_join total");
         if (i > 0) total = taida_safe_add(total, sep_len, "list_join sep");
     }
 
@@ -6167,16 +6210,18 @@ taida_val taida_list_join(taida_val list_ptr, const char* sep) {
     char *dst = r;
     for (taida_val i = 0; i < len; i++) {
         if (i > 0 && sep_len > 0) { memcpy(dst, sep, sep_len); dst += sep_len; }
-        taida_val sl = (taida_val)strlen(strs[i]);
-        memcpy(dst, strs[i], sl);
-        dst += sl;
+        memcpy(dst, strs[i], lens[i]);
+        dst += lens[i];
     }
     *dst = '\0';
 
-    // Free temporary strings
+    // Free only the materialised temporaries (borrowed elements stay
+    // owned by the list).
     for (taida_val i = 0; i < len; i++) {
-        taida_str_release((taida_val)strs[i]);
+        if (owned[i]) taida_str_release((taida_val)strs[i]);
     }
+    free(owned);
+    free(lens);
     free(strs);
 
     return (taida_val)r;
@@ -9715,7 +9760,8 @@ static taida_val taida_list_to_display_string(taida_val list_ptr) {
             const char *s = ", "; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0';
         }
         taida_val item = list[4 + i];
-        taida_val item_str = taida_value_to_debug_string(item);
+        taida_val item_str =
+            taida_elem_to_debug_string_kinded(item, taida_elem_kind_at(list, i));
         const char *is = (const char*)item_str;
         if (is) {
             size_t sl = strlen(is); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); } memcpy(buf + len, is, sl); len += sl; buf[len] = '\0';
