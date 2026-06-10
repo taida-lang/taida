@@ -1483,8 +1483,16 @@ impl Lowering {
                 }
                 match Self::arm_append_consume_shape(&arm.body, pname, idx, &param_names) {
                     Some(true) => saw_consume_arm = true,
-                    Some(false) => {} // pass-through arm: fine
-                    None => {
+                    // A pass-through arm hands the CALLER's list to the
+                    // next iteration unchanged, but the emitters set the
+                    // ownership bit after EVERY self tail-call (the bit
+                    // is loop machinery, not per-arm) — a subsequent
+                    // consume would then mutate a list the caller still
+                    // owns. Fail closed on the whole param. (Today's
+                    // lowering also rejects this shape incidentally via
+                    // the param write-back plumbing; this arm makes the
+                    // invariant explicit rather than emergent.)
+                    Some(false) | None => {
                         actrace!("param {} rejected by arm shape", pname);
                         continue 'params;
                     }
@@ -1536,12 +1544,14 @@ impl Lowering {
                 .expect("shape-checked: TailCall present");
             let append_pos = body[..tail_pos]
                 .iter()
-                .rposition(|i| matches!(i, IrInst::Call(_, name, _) if name == "taida_list_append"))
+                .rposition(
+                    |i| matches!(i, IrInst::Call(_, name, _) if name == "taida_list_append_k"),
+                )
                 .expect("shape-checked: append present");
             let IrInst::Call(dst, _, args) = body[append_pos].clone() else {
                 unreachable!("shape-checked");
             };
-            body[append_pos] = IrInst::Call(dst, "taida_list_append_consume".to_string(), args);
+            body[append_pos] = IrInst::Call(dst, "taida_list_append_consume_k".to_string(), args);
             new_arms.push(crate::codegen::ir::CondArm {
                 condition: arm.condition,
                 body,
@@ -1693,7 +1703,7 @@ impl Lowering {
         for inst in &body[..n - 1] {
             match inst {
                 IrInst::Call(_, name, _) => {
-                    let ok = name == "taida_list_append"
+                    let ok = name == "taida_list_append_k"
                         || name.starts_with("taida_int_")
                         || name.starts_with("taida_float_")
                         || name.starts_with("taida_bool_");
@@ -1780,9 +1790,9 @@ impl Lowering {
         // Consume shape: a trailing append followed only by the TCO
         // save/restore machinery (UseVar / DefVar-to-params / consts)
         // before the tail call — no calls may intervene.
-        let append_pos = body[..n - 1]
-            .iter()
-            .rposition(|i| matches!(i, IrInst::Call(_, name, _) if name == "taida_list_append"))?;
+        let append_pos = body[..n - 1].iter().rposition(
+            |i| matches!(i, IrInst::Call(_, name, _) if name == "taida_list_append_k"),
+        )?;
         for inst in &body[append_pos + 1..n - 1] {
             match inst {
                 IrInst::ConstInt(_, _) | IrInst::UseVar(_, _) => {}
@@ -1809,8 +1819,8 @@ impl Lowering {
         let IrInst::Call(append_dst, append_name, append_args) = &body[append_pos] else {
             return None;
         };
-        if append_name != "taida_list_append" || append_args.len() != 2 {
-            shtrace!("trailing call is not a 2-arg append");
+        if append_name != "taida_list_append_k" || append_args.len() != 3 {
+            shtrace!("trailing call is not a 3-arg kind-supplying append");
             return None;
         }
         if append_args[0] != p_var {

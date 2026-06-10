@@ -877,7 +877,7 @@ mod tests {
         //   +103. 1,310,758 -> 1,310,861.
         // 2026-06-10 consume-variant Append (core.c, F1): +912.
         //   1,310,861 -> 1,311,773.
-        const EXPECTED_TOTAL_LEN: usize = 1_313_947;
+        const EXPECTED_TOTAL_LEN: usize = 1_316_249;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1619,7 +1619,7 @@ mod tests {
         //   taida_list_append_consume — in-place push once the
         //   tail-recursive build loop owns its accumulator (ownership
         //   bit threaded by the emitter). +912. F1 403,062 -> 403,974.
-        const F1_LEN: usize = 406_101;
+        const F1_LEN: usize = 407_671;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1662,7 +1662,11 @@ mod tests {
             // element renderer next to it land before the marker (F1
             // 403,974 -> 406,101); the list-display loop's switch to that
             // renderer adds +47 after the marker. F2 227,400 -> 227,447.
-            F1_LEN + 227_447,
+            // Kind-supplying append (note_appended_kind + the _k entry
+            // points) lands before the marker (F1 406,101 -> 407,671);
+            // the full-form list renderers' kind wiring adds +732 after
+            // it. F2 227,447 -> 228,179.
+            F1_LEN + 228_179,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

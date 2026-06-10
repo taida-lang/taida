@@ -1133,8 +1133,11 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_list_append" | "taida_list_prepend" => {
             format!("int64_t {}(int64_t list, int64_t item);", name)
         }
-        "taida_list_append_consume" => {
-            "int64_t taida_list_append_consume(int64_t list, int64_t item, int64_t owned);"
+        "taida_list_append_k" => {
+            "int64_t taida_list_append_k(int64_t list, int64_t item, int64_t item_ek);".to_string()
+        }
+        "taida_list_append_consume_k" => {
+            "int64_t taida_list_append_consume_k(int64_t list, int64_t item, int64_t item_ek, int64_t owned);"
                 .to_string()
         }
         "taida_list_take" | "taida_list_drop" => {
@@ -1957,13 +1960,13 @@ fn emit_inst(
                 writeln!(c, "{}v_{} = {};", indent, dst, expr).unwrap();
                 return Ok(());
             }
-            // The consume-append's ownership argument is loop machinery
-            // (see the __tco_owned declaration), not an IR value.
-            if name == "taida_list_append_consume" && args.len() == 2 {
+            // The consume-append's trailing ownership argument is loop
+            // machinery (see the __tco_owned declaration), not an IR value.
+            if name == "taida_list_append_consume_k" && args.len() == 3 {
                 writeln!(
                     c,
-                    "{}v_{} = taida_list_append_consume(v_{}, v_{}, __tco_owned);",
-                    indent, dst, args[0], args[1]
+                    "{}v_{} = taida_list_append_consume_k(v_{}, v_{}, v_{}, __tco_owned);",
+                    indent, dst, args[0], args[1], args[2]
                 )
                 .unwrap();
                 return Ok(());

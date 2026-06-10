@@ -755,8 +755,12 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Val],
             returns: &[Ptr],
         },
-        "taida_list_append_consume" => RuntimeAbi {
+        "taida_list_append_k" => RuntimeAbi {
             params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_list_append_consume_k" => RuntimeAbi {
+            params: &[Ptr, Val, Val, Val],
             returns: &[Ptr],
         },
         "taida_list_prepend" => RuntimeAbi {
@@ -2859,9 +2863,9 @@ impl Emitter {
                 // ── Integer/Bool intrinsics: emit native instructions instead of call ──
                 if let Some(result) = Self::try_emit_intrinsic(builder, ectx, func_name, args) {
                     ectx.val_map.insert(*dst, result);
-                } else if func_name == "taida_list_append_consume" && args.len() == 2 {
-                    // The consume-append's ownership argument is loop
-                    // machinery (see tco_owned_var), not an IR value.
+                } else if func_name == "taida_list_append_consume_k" && args.len() == 3 {
+                    // The consume-append's trailing ownership argument is
+                    // loop machinery (see tco_owned_var), not an IR value.
                     let owned_val = match ectx.tco_owned_var {
                         Some(owned) => builder.use_var(owned),
                         None => builder.ins().iconst(types::I64, 0),
@@ -2869,7 +2873,8 @@ impl Emitter {
                     let func_ref = ectx.func_refs[func_name.as_str()];
                     let a = ectx.val_map[&args[0]];
                     let b = ectx.val_map[&args[1]];
-                    let call = builder.ins().call(func_ref, &[a, b, owned_val]);
+                    let ek = ectx.val_map[&args[2]];
+                    let call = builder.ins().call(func_ref, &[a, b, ek, owned_val]);
                     let result = builder.inst_results(call)[0];
                     ectx.val_map.insert(*dst, result);
                 } else {

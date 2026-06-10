@@ -219,20 +219,29 @@ void *wasm_alloc(unsigned int size) {
     }
 
     unsigned int result = bump_ptr;
-    bump_ptr += size;
+    unsigned int next = result + size; /* may wrap; tested below */
     WASM_PERF_INC(wasm_perf_alloc_calls);
     WASM_PERF_ADD(wasm_perf_alloc_bytes, size);
 
-    /* Ceiling / page-growth check (see wasm_alloc_slow). The ceiling
-       must be tested on every allocation, not only when a grow is
-       due: TAIDA_WASM_INITIAL_PAGES can pre-size memory past 2GB, in
-       which case the bump pointer crosses the boundary without ever
-       needing a grow. */
-    unsigned int pages_needed = (bump_ptr + 65535) / 65536;
-    if (__builtin_expect(
-            bump_ptr > 0x7FFF0000u || pages_needed > __builtin_wasm_memory_size(0), 0)) {
+    /* Ceiling / wrap / page-growth check, one unlikely branch (see
+       wasm_alloc_slow). `next < result` detects the unsigned wrap a
+       huge size could take — a wrapped bump pointer would otherwise
+       slip back into the valid range. The ceiling is tested on every
+       allocation, not only when a grow is due:
+       TAIDA_WASM_INITIAL_PAGES can pre-size memory past 2GB, in which
+       case the bump pointer crosses the boundary without ever needing
+       a grow. */
+    unsigned int pages_needed = (next + 65535) / 65536;
+    if (__builtin_expect(next > 0x7FFF0000u || next < result
+                             || pages_needed > __builtin_wasm_memory_size(0),
+                         0)) {
+        /* Saturate on ceiling/wrap so the slow path's test fires (it
+           traps; only the page-growth case returns). */
+        bump_ptr = (next > 0x7FFF0000u || next < result) ? 0x7FFF0008u : next;
         wasm_alloc_slow();
+        return (void *)(unsigned long)result;
     }
+    bump_ptr = next;
 
     return (void *)(unsigned long)result;
 }

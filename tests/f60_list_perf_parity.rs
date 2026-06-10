@@ -218,6 +218,41 @@ stdout(jn)
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Appending into an empty (kindless) list must establish the element
+/// kind: `Append[@[], 1.5]()` and the tail-recursive `build(n, @[])`
+/// pattern used to leave the result list untagged, so Float/Bool
+/// elements displayed as raw bits even after the renderer learned to
+/// read kinds. Also pins the full-form pack rendering of a nested
+/// Float list (a separate display path from the plain list renderer).
+#[test]
+fn append_establishes_element_kind() {
+    let dir = unique_temp_dir("f60_append_kind");
+    let out = assert_parity(
+        &dir,
+        "append_kind",
+        r#"a <= Append[@[], 1.5]()
+stdout(a)
+build n: Int acc: @[Float] =
+  | n == 0 |> acc
+  | _ |> build(n - 1, Append[acc, 1.5]())
+=> :@[Float]
+fl <= build(3, @[])
+stdout(fl)
+Join[fl, ";"]() >=> j
+stdout(j)
+bb <= Append[@[], true]()
+stdout(bb)
+p <= @(xs <= @[1.5, 2.5], ok <= true)
+stdout(p)
+"#,
+    );
+    assert_eq!(
+        out,
+        "@[1.5]\n@[1.5, 1.5, 1.5]\n1.5;1.5;1.5\n@[true]\n@(xs <= @[1.5, 2.5], ok <= true)"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Large sequential builds complete on wasm (the O(n^2) copies used to
 /// exhaust the 2GB boxed-value address space on the second call) and
 /// agree across backends.

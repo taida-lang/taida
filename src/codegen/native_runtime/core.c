@@ -6880,7 +6880,34 @@ taida_val taida_list_min(taida_val list_ptr) {
 
 // ── Additional List mold operations ──────────────────────
 
-taida_val taida_list_append(taida_val list_ptr, taida_val item) {
+/* Record the kind of a value about to be pushed by an append. Array
+   carriers note the entry verbatim. Homogeneous-tag lists only act in
+   one case: an EMPTY list with no established tag adopts the item's
+   kind (this is how `Append[@[], 1.5]()` and the tail-recursive
+   `build(n, @[])` pattern earn a Float tag — without it the result
+   list stayed kindless and Float/Bool elements displayed as raw
+   bits). A non-empty list keeps its tag untouched: the checker
+   guarantees element homogeneity, and a kindless non-empty list has
+   unknown provenance, so adopting a tag there could mislabel the
+   existing elements. */
+static void taida_list_note_appended_kind(taida_val *nl, uint32_t item_ek) {
+    if (taida_elem_slot_is_array(nl[3])) {
+        taida_elem_tags_note_push_ek(nl, item_ek);
+        return;
+    }
+    uint32_t k = TAIDA_EKIND_KIND(item_ek);
+    if (k == TAIDA_EKIND_UNKNOWN) return;
+    if (nl[2] == 0 && nl[3] == TAIDA_TAG_UNKNOWN && k != TAIDA_TAG_ENUM) {
+        /* Enum homogeneous tags cannot carry the type-id aux, so enum
+           items keep the legacy untagged state rather than losing it. */
+        nl[3] = (taida_val)k;
+    }
+}
+
+/* Kind-supplying append: codegen passes the appended item's statically
+   known kind (the same encoding as taida_list_map_k). UNKNOWN leaves
+   every tag exactly as the legacy entry point did. */
+taida_val taida_list_append_k(taida_val list_ptr, taida_val item, taida_val item_ek) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     int src_tagged = taida_elem_slot_is_array(list[3]);
@@ -6895,12 +6922,14 @@ taida_val taida_list_append(taida_val list_ptr, taida_val item) {
             new_list = taida_list_push(new_list, list[4 + i]);
         }
     }
-    // New item: no retain (ownership transferred from caller). The
-    // appended value's kind is unknown at this boundary — record it as
-    // such so an array-carrying result stays honest.
-    if (src_tagged) taida_elem_tags_note_push_ek((taida_val*)new_list, TAIDA_EKIND_UNKNOWN);
+    // New item: no retain (ownership transferred from caller).
+    taida_list_note_appended_kind((taida_val*)new_list, (uint32_t)item_ek);
     new_list = taida_list_push(new_list, item);
     return new_list;
+}
+
+taida_val taida_list_append(taida_val list_ptr, taida_val item) {
+    return taida_list_append_k(list_ptr, item, TAIDA_EKIND_UNKNOWN);
 }
 
 /* Consume-variant Append for the tail-recursive build pattern: the
@@ -6911,13 +6940,16 @@ taida_val taida_list_append(taida_val list_ptr, taida_val item) {
    loop and nothing else can reach it: push in place, amortized O(1)).
    Without this, sequential Append construction copies the whole list
    per element — O(n^2), ~1.2GB of traffic for a 10k build. */
-taida_val taida_list_append_consume(taida_val list_ptr, taida_val item, taida_val owned) {
-    if (!owned) return taida_list_append(list_ptr, item);
+taida_val taida_list_append_consume_k(taida_val list_ptr, taida_val item, taida_val item_ek,
+                                      taida_val owned) {
+    if (!owned) return taida_list_append_k(list_ptr, item, item_ek);
     taida_val *list = (taida_val*)list_ptr;
-    if (taida_elem_slot_is_array(list[3])) {
-        taida_elem_tags_note_push_ek(list, TAIDA_EKIND_UNKNOWN);
-    }
+    taida_list_note_appended_kind(list, (uint32_t)item_ek);
     return taida_list_push(list_ptr, item);
+}
+
+taida_val taida_list_append_consume(taida_val list_ptr, taida_val item, taida_val owned) {
+    return taida_list_append_consume_k(list_ptr, item, TAIDA_EKIND_UNKNOWN, owned);
 }
 
 taida_val taida_list_prepend(taida_val list_ptr, taida_val item) {
@@ -10178,7 +10210,12 @@ static taida_val taida_value_to_debug_string_full(taida_val val) {
                 const char *s = ", "; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0';
             }
             taida_val item = list[4 + i];
-            taida_val item_str = taida_value_to_debug_string_full(item);
+            // Float/Bool payloads are only identifiable via the recorded
+            // element kind (same wiring as the short-form list renderer).
+            uint32_t ek = TAIDA_EKIND_KIND(taida_elem_kind_at(list, i));
+            taida_val item_str = (ek == TAIDA_TAG_FLOAT || ek == TAIDA_TAG_BOOL)
+                ? taida_elem_to_debug_string_kinded(item, TAIDA_EKIND(ek, 0))
+                : taida_value_to_debug_string_full(item);
             const char *is = (const char*)item_str;
             if (is) {
                 size_t sl = strlen(is); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, is, sl); len += sl; buf[len] = '\0';
@@ -10433,7 +10470,12 @@ taida_val taida_stdout_display_string(taida_val obj) {
                 const char *s = ", "; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0';
             }
             taida_val item = list[4 + i];
-            taida_val item_str = taida_value_to_debug_string_full(item);
+            // Float/Bool payloads are only identifiable via the recorded
+            // element kind (same wiring as the short-form list renderer).
+            uint32_t ek = TAIDA_EKIND_KIND(taida_elem_kind_at(list, i));
+            taida_val item_str = (ek == TAIDA_TAG_FLOAT || ek == TAIDA_TAG_BOOL)
+                ? taida_elem_to_debug_string_kinded(item, TAIDA_EKIND(ek, 0))
+                : taida_value_to_debug_string_full(item);
             const char *is = (const char*)item_str;
             if (is) {
                 size_t sl = strlen(is); while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string_full"); } memcpy(buf + len, is, sl); len += sl; buf[len] = '\0';

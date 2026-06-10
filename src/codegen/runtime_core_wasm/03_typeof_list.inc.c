@@ -1201,10 +1201,13 @@ int64_t taida_list_join(int64_t list_ptr, int64_t sep_raw) {
        borrowed in place — materialising a per-element copy through
        polymorphic_to_string just to memcpy it once is pure allocation
        traffic. Non-string elements keep the shared toString path.
-       Lengths are scanned once and reused for the copy pass. */
+       Lengths are scanned once and reused for the copy pass. The
+       total runs in 64 bits and oversize results are steered into the
+       allocator's loud heap-ceiling trap rather than wrapping the
+       32-bit allocation size. */
     const char **strs = (const char **)wasm_alloc((unsigned int)(len * sizeof(const char *)));
     int *lens = (int *)wasm_alloc((unsigned int)(len * sizeof(int)));
-    int total = 0;
+    int64_t total = 0;
     for (int64_t i = 0; i < len; i++) {
         int64_t elem = list[WASM_LIST_ELEMS + i];
         if (_wasm_is_string_ptr(elem)) {
@@ -1217,6 +1220,7 @@ int64_t taida_list_join(int64_t list_ptr, int64_t sep_raw) {
         total += lens[i];
         if (i > 0) total += sep_len;
     }
+    if (total + 1 > 0x7FFF0000LL) total = 0x7FFF0000LL; /* trap in the allocator */
 
     char *r = _wasm_str_alloc((unsigned int)(total + 1));
     char *dst = r;
@@ -1255,7 +1259,32 @@ int64_t taida_list_concat(int64_t list1, int64_t list2) {
     return new_list;
 }
 
-int64_t taida_list_append(int64_t list_ptr, int64_t item) {
+/* Record the kind of a value about to be pushed by an append (native
+   twin: taida_list_note_appended_kind). Array carriers note the entry
+   verbatim. Homogeneous-tag lists only act in one case: an EMPTY list
+   with no established tag adopts the item's kind — this is how
+   `Append[@[], 1.5]()` and the tail-recursive `build(n, @[])` pattern
+   earn a Float tag; without it the result list stayed kindless and
+   Float/Bool elements displayed as raw bits. A non-empty list keeps
+   its tag untouched (the checker guarantees homogeneity; a kindless
+   non-empty list has unknown provenance). Enum kinds keep the legacy
+   untagged state — the homogeneous slot cannot carry the type-id aux. */
+static void _wasm_list_note_appended_kind(int64_t *nl, uint32_t item_ek) {
+    if (_wasm_elem_slot_is_array(nl[2])) {
+        _wasm_elem_tags_note_push_ek(nl, item_ek);
+        return;
+    }
+    uint32_t k = WASM_EKIND_KIND(item_ek);
+    if (k == WASM_EKIND_UNKNOWN) return;
+    if (nl[1] == 0 && nl[2] == WASM_TAG_UNKNOWN && k != WASM_TAG_ENUM) {
+        nl[2] = (int64_t)k;
+    }
+}
+
+/* Kind-supplying append: codegen passes the appended item's statically
+   known kind (same encoding as taida_list_map_k). UNKNOWN leaves every
+   tag exactly as the legacy entry point did. */
+int64_t taida_list_append_k(int64_t list_ptr, int64_t item, int64_t item_ek) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     int src_tagged = _wasm_elem_slot_is_array(list[2]);
@@ -1269,21 +1298,28 @@ int64_t taida_list_append(int64_t list_ptr, int64_t item) {
             new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
         }
     }
-    if (src_tagged) _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_list, WASM_EKIND_UNKNOWN);
+    _wasm_list_note_appended_kind((int64_t *)(intptr_t)new_list, (uint32_t)item_ek);
     new_list = taida_list_push(new_list, item);
     return new_list;
+}
+
+int64_t taida_list_append(int64_t list_ptr, int64_t item) {
+    return taida_list_append_k(list_ptr, item, WASM_EKIND_UNKNOWN);
 }
 
 /* Consume-variant Append — see the native twin for the ownership
    contract (owned=0 detaches via the copy variant; owned=1 pushes in
    place, the lowering having proven no other reference exists). */
-int64_t taida_list_append_consume(int64_t list_ptr, int64_t item, int64_t owned) {
-    if (!owned) return taida_list_append(list_ptr, item);
+int64_t taida_list_append_consume_k(int64_t list_ptr, int64_t item, int64_t item_ek,
+                                    int64_t owned) {
+    if (!owned) return taida_list_append_k(list_ptr, item, item_ek);
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
-    if (_wasm_elem_slot_is_array(list[2])) {
-        _wasm_elem_tags_note_push_ek(list, WASM_EKIND_UNKNOWN);
-    }
+    _wasm_list_note_appended_kind(list, (uint32_t)item_ek);
     return taida_list_push(list_ptr, item);
+}
+
+int64_t taida_list_append_consume(int64_t list_ptr, int64_t item, int64_t owned) {
+    return taida_list_append_consume_k(list_ptr, item, WASM_EKIND_UNKNOWN, owned);
 }
 
 int64_t taida_list_prepend(int64_t list_ptr, int64_t item) {
@@ -1419,15 +1455,18 @@ int64_t taida_list_to_display_string(int64_t list_ptr) {
         _wf_memcpy(result, "@[]", 4);
         return (int64_t)result;
     }
-    /* Build "@[elem, elem, ...]" */
+    /* Build "@[elem, elem, ...]" — the total runs in 64 bits and an
+       oversize result is steered into the allocator's loud
+       heap-ceiling trap rather than wrapping the 32-bit size. */
     const char **strs = (const char **)wasm_alloc((unsigned int)(len * sizeof(const char *)));
-    int total = 3; /* "@[" + "]" */
+    int64_t total = 3; /* "@[" + "]" */
     for (int64_t i = 0; i < len; i++) {
         strs[i] = (const char *)(intptr_t)_wasm_elem_to_string_kinded(
             list[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(list, i));
         total += _wf_strlen(strs[i]);
         if (i > 0) total += 2; /* ", " */
     }
+    if (total + 1 > 0x7FFF0000LL) total = 0x7FFF0000LL; /* trap in the allocator */
     char *r = _wasm_str_alloc((unsigned int)(total + 1));
     r[0] = '@'; r[1] = '[';
     char *dst = r + 2;

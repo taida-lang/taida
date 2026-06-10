@@ -1380,11 +1380,18 @@ impl Lowering {
                 }
                 let list = self.lower_expr(func, &type_args[0])?;
                 let val = self.lower_expr(func, &type_args[1])?;
+                // Value-tag track: supply the appended item's statically
+                // known kind so an empty / array-carrying list records the
+                // element identity (a Float pushed into `@[]` used to leave
+                // the list kindless and display as raw f64 bits). UNKNOWN
+                // keeps the legacy tag behaviour.
+                let ek_var = func.alloc_var();
+                func.push(IrInst::ConstInt(ek_var, self.expr_ekind(&type_args[1])));
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
-                    "taida_list_append".to_string(),
-                    vec![list, val],
+                    "taida_list_append_k".to_string(),
+                    vec![list, val, ek_var],
                 ));
                 Ok(result)
             }
