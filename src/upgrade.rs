@@ -186,11 +186,17 @@ pub fn resolve_version(
     candidates.sort_unstable_by(|a, b| b.cmp(a));
 
     if let Some(best) = candidates.into_iter().next() {
-        // Check if it's the same as current
+        // Same tag — or anything at/below the running version — is not
+        // an upgrade. Without the ordering guard, a binary newer than
+        // every published release (one built ahead of its release run,
+        // or left ahead by a release rollback) would happily "upgrade"
+        // onto the older artefact: a silent, correctly-signed
+        // downgrade. Explicit `--version` requests stay available as
+        // the deliberate rollback path.
         if let Some(cur) = current
-            && cur.tag == best.tag
+            && best <= *cur
         {
-            return Ok(None); // already up to date
+            return Ok(None); // already up to date (or ahead of releases)
         }
         Ok(Some(best))
     } else {
@@ -1614,6 +1620,38 @@ exit 2
         };
         let result = resolve_version(&tags, &filter, Some(&current)).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_current_ahead_of_releases_is_up_to_date() {
+        // A binary newer than every published release (built ahead of
+        // its release run, or left ahead by a rollback) must not be
+        // offered the older artefact as an "upgrade" — that would be a
+        // silent, correctly-signed downgrade.
+        let tags = vec!["@f.49".to_string(), "@e.40.stable".to_string()];
+        let current = TaidaVersion::parse("@f.61").unwrap();
+        let filter = VersionFilter {
+            generation: None,
+            label: None,
+            exact: None,
+        };
+        let result = resolve_version(&tags, &filter, Some(&current)).unwrap();
+        assert!(result.is_none(), "got {:?}", result);
+    }
+
+    #[test]
+    fn resolve_exact_still_allows_deliberate_rollback() {
+        // `--version` names a tag explicitly; that path stays available
+        // for intentional rollbacks.
+        let tags = vec!["@f.49".to_string()];
+        let current = TaidaVersion::parse("@f.61").unwrap();
+        let filter = VersionFilter {
+            generation: None,
+            label: None,
+            exact: Some("@f.49".to_string()),
+        };
+        let result = resolve_version(&tags, &filter, Some(&current)).unwrap();
+        assert_eq!(result.unwrap().tag, "@f.49");
     }
 
     #[test]
