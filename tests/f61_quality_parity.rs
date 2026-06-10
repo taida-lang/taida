@@ -337,3 +337,102 @@ stdout(result.length())
     assert_eq!(interp, "100000");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Float-bearing Set semantics across all four backends: ±0.0 collapses
+/// to one element (native used to dedup homogeneous Float sets by raw
+/// bit pattern and report 2), the Int↔Float crossing holds through
+/// membership, and union/intersect/diff agree. The same fixture pins
+/// the JS runtime (SameValueZero already collapses ±0.0 there).
+#[test]
+fn float_set_semantics_agree_on_all_backends() {
+    let dir = unique_temp_dir("f61_float_set");
+    let src = r#"a <= setOf(@[0.0, -0.0])
+stdout(a.size())
+b <= setOf(@[1.0, 2.0])
+c <= setOf(@[1, 2])
+stdout(b.has(1))
+stdout(c.has(1.0))
+stdout(Unique[@[1.5, 2.5, 1.5]]())
+u <= setOf(@[1.5, 2.5]).union(setOf(@[2.5, 3.5]))
+stdout(u.size())
+x <= setOf(@[1.5, 2.5]).intersect(setOf(@[2.5, 3.5]))
+stdout(x.size())
+d <= setOf(@[1.5, 2.5]).diff(setOf(@[2.5, 3.5]))
+stdout(d.size())
+"#;
+    let expected = "1\ntrue\ntrue\n@[1.5, 2.5]\n3\n1\n1";
+    let out = assert_parity(&dir, "float_set", src);
+    assert_eq!(out, expected);
+    if node_available() {
+        let td = dir.join("float_set.td");
+        let mjs = dir.join("float_set.mjs");
+        let status = Command::new(taida_bin())
+            .args(["build", "js"])
+            .arg(&td)
+            .arg("-o")
+            .arg(&mjs)
+            .status()
+            .expect("taida build js runs");
+        assert!(status.success(), "js build failed");
+        let jsout = Command::new("node").arg(&mjs).output().expect("node runs");
+        assert!(jsout.status.success(), "js run failed");
+        assert_eq!(
+            String::from_utf8_lossy(&jsout.stdout).trim_end(),
+            expected,
+            "js float set semantics"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Float Set operations leave the O(n²) linear fallback: 16k-element
+/// union/intersect/diff complete in milliseconds on native (the old
+/// tagged linear scan needed ~1.2s and doubled 3.8× per size doubling).
+/// The accumulator build uses the consume path with the Append in the
+/// FIRST argument slot — the IR analysis now tolerates the scalar-pure
+/// evaluation of later tail-call arguments between the append and the
+/// hand-off, which that argument order produces.
+#[test]
+fn float_set_ops_scale_linearly_on_native() {
+    use std::time::{Duration, Instant};
+    let dir = unique_temp_dir("f61_float_set_perf");
+    let td = dir.join("set_perf.td");
+    std::fs::write(
+        &td,
+        r#"mk acc: @[Float] x: Float n: Float =
+  | x >= n |> acc
+  | _ |> mk(Append[acc, x](), x + 1.0, n)
+=> :@[Float]
+a <= setOf(mk(@[], 0.5, 16000.5))
+b <= setOf(mk(@[], 8000.5, 24000.5))
+stdout(a.union(b).size())
+stdout(a.intersect(b).size())
+stdout(a.diff(b).size())
+"#,
+    )
+    .expect("write fixture");
+    let bin = dir.join("set_perf_native");
+    let status = Command::new(taida_bin())
+        .args(["build", "native"])
+        .arg(&td)
+        .arg("-o")
+        .arg(&bin)
+        .status()
+        .expect("taida build native runs");
+    assert!(status.success(), "native build failed");
+    let started = Instant::now();
+    let out = Command::new(&bin).output().expect("native binary runs");
+    let elapsed = started.elapsed();
+    assert!(out.status.success(), "native run failed");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim_end(),
+        "24000\n8000\n8000"
+    );
+    // O(n) finishes in ~10ms; the old fallback needed ~1.2s at this
+    // size. 10s leaves two orders of magnitude for CPU-saturated CI.
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "Float set ops took {elapsed:?} — linear fallback regression?"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

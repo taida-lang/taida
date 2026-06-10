@@ -1801,15 +1801,25 @@ impl Lowering {
             }
             return Some(false);
         }
-        // Consume shape: a trailing append followed only by the TCO
-        // save/restore machinery (UseVar / DefVar-to-params / consts)
-        // before the tail call — no calls may intervene.
+        // Consume shape: an append whose only successors before the
+        // tail call are the TCO save/restore machinery (UseVar /
+        // DefVar-to-params / consts) and the scalar-pure evaluation of
+        // LATER tail-call arguments (`f(Append[p, x](), n + 1)` puts
+        // the increment after the append). Those later calls are safe
+        // exactly when they touch neither p (the substantive-read
+        // check rejects that) nor the consumed result.
         let append_pos = body[..n - 1].iter().rposition(
             |i| matches!(i, IrInst::Call(_, name, _) if name == "taida_list_append_k"),
         )?;
+        let IrInst::Call(append_dst, append_name, append_args) = &body[append_pos] else {
+            return None;
+        };
         for inst in &body[append_pos + 1..n - 1] {
             match inst {
-                IrInst::ConstInt(_, _) | IrInst::UseVar(_, _) => {}
+                IrInst::ConstInt(_, _)
+                | IrInst::ConstFloat(_, _)
+                | IrInst::ConstBool(_, _)
+                | IrInst::UseVar(_, _) => {}
                 // Between the append and the tail call only the TCO
                 // save/restore machinery runs: writes into the
                 // function's own param slots (including the new list
@@ -1824,15 +1834,21 @@ impl Lowering {
                         return None;
                     }
                 }
+                IrInst::Call(_, name, args) => {
+                    let pure = name.starts_with("taida_int_")
+                        || name.starts_with("taida_float_")
+                        || name.starts_with("taida_bool_");
+                    if !pure || args.contains(append_dst) {
+                        shtrace!("unsafe call {} between append and tail", name);
+                        return None;
+                    }
+                }
                 _ => {
                     shtrace!("unsafe inst between append and tail");
                     return None;
                 }
             }
         }
-        let IrInst::Call(append_dst, append_name, append_args) = &body[append_pos] else {
-            return None;
-        };
         if append_name != "taida_list_append_k" || append_args.len() != 3 {
             shtrace!("trailing call is not a 3-arg kind-supplying append");
             return None;

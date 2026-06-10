@@ -205,7 +205,12 @@ mod tests {
         //   (used to return NULL into constructors). -> 468,580.
         // 2026-06-10 consume-variant Append (03_typeof_list.inc.c):
         //   taida_list_append_consume — see the native twin. -> 469,140.
-        const EXPECTED_TOTAL_LEN: usize = 479_244;
+        // 2026-06-11 kind-aware hash path for Float-bearing Set ops /
+        //   unique (01_core / 03_typeof_list): Float fingerprint
+        //   canonicalisation + seen-set wiring in union/intersect/diff,
+        //   tagged linear helpers removed — see the native twin.
+        //   479,244 -> 481,465.
+        const EXPECTED_TOTAL_LEN: usize = 481_465;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

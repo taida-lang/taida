@@ -877,7 +877,11 @@ mod tests {
         //   +103. 1,310,758 -> 1,310,861.
         // 2026-06-10 consume-variant Append (core.c, F1): +912.
         //   1,310,861 -> 1,311,773.
-        const EXPECTED_TOTAL_LEN: usize = 1_322_868;
+        // 2026-06-11 kind-aware hash path for Float-bearing Set ops /
+        //   unique (core.c, F1): Float fingerprint canonicalisation +
+        //   seen-set wiring in union/intersect/diff, tagged linear
+        //   helpers removed. +3,074. 1,322,868 -> 1,325,942.
+        const EXPECTED_TOTAL_LEN: usize = 1_325_942;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1619,7 +1623,9 @@ mod tests {
         //   taida_list_append_consume — in-place push once the
         //   tail-recursive build loop owns its accumulator (ownership
         //   bit threaded by the emitter). +912. F1 403,062 -> 403,974.
-        const F1_LEN: usize = 413_526;
+        // 2026-06-11 kind-aware hash path for Float-bearing Set ops /
+        //   unique (before the marker): +3,074. F1 413,526 -> 416,600.
+        const F1_LEN: usize = 416_600;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

@@ -6691,6 +6691,35 @@ static void taida_fp_accum_k(taida_val v, uint32_t ekind, uint64_t *h) {
             int64_t s = (int64_t)v; taida_fnv_bytes(h, &s, sizeof(s));
             break;
         }
+        case TAIDA_TAG_FLOAT: {
+            // Fingerprint a Float inside its eq-equivalence class: any d
+            // some Int64 i equals under the crossing rule (d == (double)i)
+            // must fingerprint as that Int, or the hash would separate a
+            // pair the equality confirms. (double)INT64_MAX rounds up to
+            // 2^63 exactly, so 2^63 itself maps back to INT64_MAX; the
+            // range checks also keep the int64 cast defined (M19 lesson:
+            // out-of-range float->int casts are UB, not saturation).
+            // -0.0 lands in the integer arm as 0, matching +0.0 == -0.0.
+            // A NaN keeps its raw bits under the Float tag: confirmation
+            // rejects NaN == NaN, so every NaN inserts fresh — exactly
+            // the linear path's behaviour.
+            double d = _l2d(v);
+            int64_t as_int = 0; int int_like = 0;
+            if (d >= -9223372036854775808.0 && d < 9223372036854775808.0) {
+                int64_t t = (int64_t)d;
+                if ((double)t == d) { as_int = t; int_like = 1; }
+            } else if (d == 9223372036854775808.0) {
+                as_int = INT64_MAX; int_like = 1;
+            }
+            if (int_like) {
+                unsigned char tag = 0; taida_fnv_bytes(h, &tag, 1);
+                taida_fnv_bytes(h, &as_int, sizeof(as_int));
+            } else {
+                unsigned char tag = 4; taida_fnv_bytes(h, &tag, 1);
+                int64_t bits = (int64_t)v; taida_fnv_bytes(h, &bits, sizeof(bits));
+            }
+            break;
+        }
         default:
             taida_fp_accum(v, h);
             break;
@@ -6707,8 +6736,14 @@ static int taida_ekind_hashable(taida_val v, uint32_t ekind) {
         case TAIDA_TAG_BOOL:
         case TAIDA_TAG_ENUM:
             return 1;
+        // A recorded Float kind IS hashable: the fingerprint
+        // canonicalises the Int crossing and ±0.0, and confirmation
+        // runs the IEEE equality (NaN inserts fresh, like the linear
+        // path). Only a value-without-kind keeps the linear scan,
+        // because a Float payload cannot be identified from the value
+        // alone.
         case TAIDA_TAG_FLOAT:
-            return 0;
+            return 1;
         case TAIDA_EKIND_UNKNOWN:
             return 0;
         default:
@@ -6841,12 +6876,16 @@ static int taida_list_all_hashable(taida_val *list) {
 taida_val taida_list_unique(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
-    if (taida_elem_slot_is_array(list[3])) {
+    if (taida_elem_slot_is_array(list[3])
+        || taida_elem_tag_for_propagation(list) == TAIDA_TAG_FLOAT) {
         // Kind-aware dedup over (value, recorded kind) pairs. The result
         // rebuilds its own kind entries for the surviving elements (and
         // naturally re-homogenises when only one kind survives). The hash
-        // path engages only when every element kind is hashable — Float
-        // or unknown kinds fall back to the linear pair scan.
+        // path engages only when every element kind is hashable — which
+        // now includes recorded Floats (canonicalised fingerprint + IEEE
+        // confirmation); unknown kinds fall back to the linear pair scan.
+        // Homogeneous Float lists route here too: the legacy path below
+        // would dedup them by raw bit pattern (0.0 != -0.0).
         taida_val new_list = taida_list_new();
         taida_seen_k seen;
         int all_h = 1;
@@ -8389,39 +8428,21 @@ static int taida_tag_is_scalar_domain(taida_val tag) {
 }
 
 // True when a cross-container comparison cannot rely on raw equality /
-// the shared fingerprint engine and must walk the tagged linear path.
-// The interpreter also degrades to a linear scan whenever a Float is in
-// play (Float is not hashable in ValueKey), so the complexity matches.
+// the legacy structural fingerprint and must route through the
+// kind-aware engine (taida_seen_k / taida_set_contains_k), whose
+// fingerprint canonicalises the Int crossing so Float-bearing pairs
+// stay on the O(n) hash path.
 static int taida_set_numeric_cross(taida_val tag_a, taida_val tag_b) {
     if (!taida_tag_is_scalar_domain(tag_a) || !taida_tag_is_scalar_domain(tag_b)) return 0;
     if (tag_a == TAIDA_TAG_FLOAT || tag_b == TAIDA_TAG_FLOAT) return 1;
     return tag_a != tag_b; // INT vs BOOL: raw values collide but must differ
 }
 
-static int taida_tagged_scalar_eq(taida_val a, taida_val tag_a, taida_val b, taida_val tag_b) {
-    // Bool never equals a non-Bool number, no matter the raw value.
-    if ((tag_a == TAIDA_TAG_BOOL) != (tag_b == TAIDA_TAG_BOOL)) return 0;
-    if (tag_a == TAIDA_TAG_FLOAT || tag_b == TAIDA_TAG_FLOAT) {
-        double da = (tag_a == TAIDA_TAG_FLOAT) ? _l2d(a) : (double)a;
-        double db = (tag_b == TAIDA_TAG_FLOAT) ? _l2d(b) : (double)b;
-        return da == db ? 1 : 0;
-    }
-    return a == b ? 1 : 0;
-}
-
-static int taida_tagged_set_contains(const taida_val *container, taida_val container_tag,
-                                     taida_val item, taida_val item_tag) {
-    taida_val len = container[2];
-    for (taida_val i = 0; i < len; i++) {
-        if (taida_tagged_scalar_eq(container[4 + i], container_tag, item, item_tag)) return 1;
-    }
-    return 0;
-}
-
 taida_val taida_set_from_list(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];  // length at index 2
-    if (taida_elem_slot_is_array(list[3])) {
+    if (taida_elem_slot_is_array(list[3])
+        || taida_elem_tag_for_propagation(list) == TAIDA_TAG_FLOAT) {
         // Kind-aware dedup over (value, recorded kind) pairs — see
         // taida_list_unique for the same projection. The resulting Set
         // keeps per-element kinds so later membership tests stay exact.
@@ -8603,42 +8624,51 @@ taida_val taida_set_union(taida_val set_a, taida_val set_b) {
     taida_val a_len = a[2];  // length at index 2
     taida_val b_len = b[2];
     if (taida_elem_slot_is_array(a[3]) || taida_elem_slot_is_array(b[3])
-        || taida_elem_tags_cross(a, b)) {
-        // Kind-aware linear union. Array-carrying sets are literal-sized,
-        // so the O(|a|·|b|) pair scan keeps exact (value, kind) semantics
-        // without a hash path; the result rebuilds its own kind entries.
+        || taida_elem_tags_cross(a, b)
+        || taida_set_numeric_cross(taida_elem_tag_for_propagation(a),
+                                   taida_elem_tag_for_propagation(b))) {
+        // Kind-aware union over (value, kind) pairs. Numeric-crossing
+        // homogeneous sets (Float in play, or Int vs Bool) route here
+        // too: the kind-aware seen-set keeps them O(|a|+|b|) where the
+        // old tagged linear scan was O(|a|*|b|); pairs whose kinds are
+        // not hashable keep the exact linear scan.
         taida_val result = taida_set_new();
+        taida_seen_k seen;
+        int all_h = 1;
+        for (taida_val i = 0; i < a_len && all_h; i++)
+            all_h = taida_ekind_hashable(a[4 + i], taida_elem_kind_at(a, i));
+        for (taida_val i = 0; i < b_len && all_h; i++)
+            all_h = taida_ekind_hashable(b[4 + i], taida_elem_kind_at(b, i));
+        int use_hash = all_h && taida_seen_k_init(&seen, a_len + b_len);
         for (taida_val i = 0; i < a_len; i++) {
             uint32_t ek = taida_elem_kind_at(a, i);
+            if (use_hash) taida_seen_k_add(&seen, a[4 + i], ek);  // a is already unique
             taida_list_elem_retain(a[4 + i], taida_ekind_to_tag(ek));
             taida_elem_tags_note_push_ek((taida_val*)result, ek);
             result = taida_list_push(result, a[4 + i]);
         }
         for (taida_val i = 0; i < b_len; i++) {
             uint32_t ek = taida_elem_kind_at(b, i);
-            if (!taida_set_contains_k(result, b[4 + i], ek)) {
+            int dup = use_hash ? !taida_seen_k_add(&seen, b[4 + i], ek)
+                               : (taida_set_contains_k(result, b[4 + i], ek) != 0);
+            if (!dup) {
                 taida_list_elem_retain(b[4 + i], taida_ekind_to_tag(ek));
                 taida_elem_tags_note_push_ek((taida_val*)result, ek);
                 result = taida_list_push(result, b[4 + i]);
             }
         }
+        if (use_hash) taida_seen_k_free(&seen);
         return result;
     }
     taida_val elem_tag = taida_elem_tag_for_propagation(a);  // NO-2: propagate elem_type_tag from set_a
     taida_val tag_b = taida_elem_tag_for_propagation(b);
-    // F54 tier 2: when the two sets pin different scalar domains (or a
-    // Float domain is in play), dedup across them numerically — b is a
-    // Set, hence already unique, so the dup test only needs "is b[i]
-    // in a". The result starts with the a-side tag; only a b element
-    // that actually lands in the result can make it mixed-domain (the
-    // per-add latch below downgrades via taida_list_set_elem_tag). If
-    // every b element was a numeric dup of an a element, the a-side
-    // tag stays honest and downstream Set ops keep numeric semantics.
-    int numeric_cross = taida_set_numeric_cross(elem_tag, tag_b);
+    // Same-domain homogeneous fast path: the numeric-crossing cases
+    // (and every Float-bearing set) are owned by the kind-aware branch
+    // above, so dedup here is plain structural equality.
     taida_val result = taida_set_new();
     ((taida_val*)result)[3] = elem_tag;
     taida_seen seen;
-    int use_hash = !numeric_cross && taida_list_all_hashable(a) && taida_list_all_hashable(b)
+    int use_hash = taida_list_all_hashable(a) && taida_list_all_hashable(b)
                    && taida_seen_init(&seen, a_len + b_len);
     for (taida_val i = 0; i < a_len; i++) {
         if (use_hash) taida_seen_add(&seen, a[4 + i]);  // a is already unique
@@ -8647,14 +8677,8 @@ taida_val taida_set_union(taida_val set_a, taida_val set_b) {
     }
     // Add items from b that aren't in a
     for (taida_val i = 0; i < b_len; i++) {
-        int dup;
-        if (numeric_cross) {
-            dup = taida_tagged_set_contains(a, elem_tag, b[4 + i], tag_b);
-        } else if (use_hash) {
-            dup = !taida_seen_add(&seen, b[4 + i]);
-        } else {
-            dup = taida_set_contains(result, b[4 + i]);
-        }
+        int dup = use_hash ? !taida_seen_add(&seen, b[4 + i])
+                           : (taida_set_contains(result, b[4 + i]) != 0);
         if (!dup) {
             // F54 tier 2: every actually-added b element stamps its tag
             // through the shared latch — BEFORE the push (the latch's
@@ -8678,41 +8702,51 @@ taida_val taida_set_intersect(taida_val set_a, taida_val set_b) {
     taida_val a_len = a[2];  // length at index 2
     taida_val *b = (taida_val*)set_b;
     if (taida_elem_slot_is_array(a[3]) || taida_elem_slot_is_array(b[3])
-        || taida_elem_tags_cross(a, b)) {
-        // Kind-aware linear intersection (see union above for rationale).
-        // The result holds a-side elements only, projected with their
-        // recorded kinds.
+        || taida_elem_tags_cross(a, b)
+        || taida_set_numeric_cross(taida_elem_tag_for_propagation(a),
+                                   taida_elem_tag_for_propagation(b))) {
+        // Kind-aware intersection (see union above). The b side seeds
+        // the kind-aware seen-set so each a-side membership test is
+        // O(1); non-hashable kinds keep the exact linear scan. The
+        // result holds a-side elements only, with their recorded kinds.
+        taida_val b_len = b[2];
         taida_val result = taida_set_new();
+        taida_seen_k seen;
+        int all_h = 1;
+        for (taida_val i = 0; i < a_len && all_h; i++)
+            all_h = taida_ekind_hashable(a[4 + i], taida_elem_kind_at(a, i));
+        for (taida_val i = 0; i < b_len && all_h; i++)
+            all_h = taida_ekind_hashable(b[4 + i], taida_elem_kind_at(b, i));
+        int use_hash = all_h && taida_seen_k_init(&seen, b_len);
+        if (use_hash)
+            for (taida_val i = 0; i < b_len; i++)
+                taida_seen_k_add(&seen, b[4 + i], taida_elem_kind_at(b, i));
         for (taida_val i = 0; i < a_len; i++) {
             uint32_t ek = taida_elem_kind_at(a, i);
-            if (taida_set_contains_k(set_b, a[4 + i], ek)) {
+            int in_b = use_hash ? !taida_seen_k_add(&seen, a[4 + i], ek)
+                                : (taida_set_contains_k(set_b, a[4 + i], ek) != 0);
+            if (in_b) {
                 taida_list_elem_retain(a[4 + i], taida_ekind_to_tag(ek));
                 taida_elem_tags_note_push_ek((taida_val*)result, ek);
                 result = taida_list_push(result, a[4 + i]);
             }
         }
+        if (use_hash) taida_seen_k_free(&seen);
         return result;
     }
     taida_val elem_tag = taida_elem_tag_for_propagation(a);  // NO-2: propagate elem_type_tag
-    taida_val tag_b = taida_elem_tag_for_propagation(b);
-    // F54 tier 2: tagged numeric membership when scalar domains differ.
-    // The result holds a-side elements only, so the a tag stays honest.
-    int numeric_cross = taida_set_numeric_cross(elem_tag, tag_b);
+    // Same-domain homogeneous fast path: numeric-crossing pairs are
+    // owned by the kind-aware branch above. The result holds a-side
+    // elements only, so the a tag stays honest.
     taida_val result = taida_set_new();
     ((taida_val*)result)[3] = elem_tag;  // NO-2: set elem_type_tag
     taida_seen seen;
-    int use_hash = !numeric_cross && taida_list_all_hashable(a) && taida_list_all_hashable(b)
+    int use_hash = taida_list_all_hashable(a) && taida_list_all_hashable(b)
                    && taida_seen_init(&seen, b[2]);
     if (use_hash) for (taida_val i = 0; i < b[2]; i++) taida_seen_add(&seen, b[4 + i]);
     for (taida_val i = 0; i < a_len; i++) {
-        int in_b;
-        if (numeric_cross) {
-            in_b = taida_tagged_set_contains(b, tag_b, a[4 + i], elem_tag);
-        } else if (use_hash) {
-            in_b = taida_seen_contains(&seen, a[4 + i]);
-        } else {
-            in_b = taida_set_contains(set_b, a[4 + i]);
-        }
+        int in_b = use_hash ? taida_seen_contains(&seen, a[4 + i])
+                            : (taida_set_contains(set_b, a[4 + i]) != 0);
         if (in_b) {
             taida_list_elem_retain(a[4 + i], elem_tag);  // NO-2: retain-on-copy
             result = taida_list_push(result, a[4 + i]);
@@ -8727,38 +8761,48 @@ taida_val taida_set_diff(taida_val set_a, taida_val set_b) {
     taida_val a_len = a[2];  // length at index 2
     taida_val *b = (taida_val*)set_b;
     if (taida_elem_slot_is_array(a[3]) || taida_elem_slot_is_array(b[3])
-        || taida_elem_tags_cross(a, b)) {
-        // Kind-aware linear difference (see union above for rationale).
+        || taida_elem_tags_cross(a, b)
+        || taida_set_numeric_cross(taida_elem_tag_for_propagation(a),
+                                   taida_elem_tag_for_propagation(b))) {
+        // Kind-aware difference (see union above for the hash-path
+        // rationale).
+        taida_val b_len = b[2];
         taida_val result = taida_set_new();
+        taida_seen_k seen;
+        int all_h = 1;
+        for (taida_val i = 0; i < a_len && all_h; i++)
+            all_h = taida_ekind_hashable(a[4 + i], taida_elem_kind_at(a, i));
+        for (taida_val i = 0; i < b_len && all_h; i++)
+            all_h = taida_ekind_hashable(b[4 + i], taida_elem_kind_at(b, i));
+        int use_hash = all_h && taida_seen_k_init(&seen, b_len);
+        if (use_hash)
+            for (taida_val i = 0; i < b_len; i++)
+                taida_seen_k_add(&seen, b[4 + i], taida_elem_kind_at(b, i));
         for (taida_val i = 0; i < a_len; i++) {
             uint32_t ek = taida_elem_kind_at(a, i);
-            if (!taida_set_contains_k(set_b, a[4 + i], ek)) {
+            int in_b = use_hash ? !taida_seen_k_add(&seen, a[4 + i], ek)
+                                : (taida_set_contains_k(set_b, a[4 + i], ek) != 0);
+            if (!in_b) {
                 taida_list_elem_retain(a[4 + i], taida_ekind_to_tag(ek));
                 taida_elem_tags_note_push_ek((taida_val*)result, ek);
                 result = taida_list_push(result, a[4 + i]);
             }
         }
+        if (use_hash) taida_seen_k_free(&seen);
         return result;
     }
     taida_val elem_tag = taida_elem_tag_for_propagation(a);  // NO-2: propagate elem_type_tag
-    taida_val tag_b = taida_elem_tag_for_propagation(b);
-    // F54 tier 2: tagged numeric membership when scalar domains differ.
-    int numeric_cross = taida_set_numeric_cross(elem_tag, tag_b);
+    // Same-domain homogeneous fast path: numeric-crossing pairs are
+    // owned by the kind-aware branch above.
     taida_val result = taida_set_new();
     ((taida_val*)result)[3] = elem_tag;  // NO-2: set elem_type_tag
     taida_seen seen;
-    int use_hash = !numeric_cross && taida_list_all_hashable(a) && taida_list_all_hashable(b)
+    int use_hash = taida_list_all_hashable(a) && taida_list_all_hashable(b)
                    && taida_seen_init(&seen, b[2]);
     if (use_hash) for (taida_val i = 0; i < b[2]; i++) taida_seen_add(&seen, b[4 + i]);
     for (taida_val i = 0; i < a_len; i++) {
-        int in_b;
-        if (numeric_cross) {
-            in_b = taida_tagged_set_contains(b, tag_b, a[4 + i], elem_tag);
-        } else if (use_hash) {
-            in_b = taida_seen_contains(&seen, a[4 + i]);
-        } else {
-            in_b = taida_set_contains(set_b, a[4 + i]);
-        }
+        int in_b = use_hash ? taida_seen_contains(&seen, a[4 + i])
+                            : (taida_set_contains(set_b, a[4 + i]) != 0);
         if (!in_b) {
             taida_list_elem_retain(a[4 + i], elem_tag);  // NO-2: retain-on-copy
             result = taida_list_push(result, a[4 + i]);

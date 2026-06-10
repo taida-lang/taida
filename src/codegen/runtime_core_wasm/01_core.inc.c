@@ -4159,24 +4159,49 @@ static void _wasm_fp_accum_k(int64_t v, uint32_t ekind, uint64_t *h) {
             int64_t s = (int64_t)v; _wasm_fnv_bytes(h, &s, sizeof(s));
             break;
         }
+        case WASM_TAG_FLOAT: {
+            /* Mirror of native: fingerprint a Float inside its
+               eq-equivalence class. Integer-valued payloads fingerprint
+               as the Int they equal (the crossing must collide before
+               equality confirms; -0.0 lands here as 0), with the bounds
+               keeping the int64 cast defined; everything else keeps its
+               raw bits under the Float tag (a NaN never confirms equal,
+               so it inserts fresh — the linear path's behaviour). */
+            double d = _l2d(v);
+            int64_t as_int = 0; int int_like = 0;
+            if (d >= -9223372036854775808.0 && d < 9223372036854775808.0) {
+                int64_t t = (int64_t)d;
+                if ((double)t == d) { as_int = t; int_like = 1; }
+            } else if (d == 9223372036854775808.0) {
+                as_int = 9223372036854775807LL; int_like = 1;
+            }
+            if (int_like) {
+                unsigned char tag = 0; _wasm_fnv_bytes(h, &tag, 1);
+                _wasm_fnv_bytes(h, &as_int, sizeof(as_int));
+            } else {
+                unsigned char tag = 4; _wasm_fnv_bytes(h, &tag, 1);
+                int64_t bits = (int64_t)v; _wasm_fnv_bytes(h, &bits, sizeof(bits));
+            }
+            break;
+        }
         default:
             _wasm_fp_accum(v, h);
             break;
     }
 }
 
-/* Kind-aware hashability gate. Float is never hashable (interp parity:
-   NaN / ±0.0 / Int↔Float crossing force the linear path), and an unknown
-   kind also forces the linear path so legacy-fingerprint values and
-   kind-fingerprint values can never share one seen-set inconsistently. */
+/* Kind-aware hashability gate. A recorded Float kind IS hashable (the
+   fingerprint canonicalises the Int crossing and +/-0.0; confirmation
+   runs the IEEE equality, so a NaN inserts fresh like the linear path).
+   An unknown kind forces the linear path so legacy-fingerprint values
+   and kind-fingerprint values never share one seen-set inconsistently. */
 static int _wasm_ekind_hashable(int64_t v, uint32_t ekind) {
     switch (WASM_EKIND_KIND(ekind)) {
         case WASM_TAG_INT:
         case WASM_TAG_BOOL:
         case WASM_TAG_ENUM:
-            return 1;
         case WASM_TAG_FLOAT:
-            return 0;
+            return 1;
         case WASM_EKIND_UNKNOWN:
             return 0;
         default:
@@ -4369,7 +4394,8 @@ int64_t taida_set_add_tagged(int64_t set_ptr, int64_t item, int64_t ekind) {
 int64_t taida_set_from_list(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    if (_wasm_elem_slot_is_array(list[2])) {
+    if (_wasm_elem_slot_is_array(list[2])
+        || _wasm_elem_tag_for_propagation(list) == WASM_TAG_FLOAT) {
         /* Kind-aware dedup over (value, recorded kind) pairs (mirror of
            native taida_set_from_list). The resulting Set keeps per-element
            kinds so later membership tests stay exact. The hash path engages
@@ -4473,24 +4499,6 @@ static int _wasm_set_numeric_cross(int64_t tag_a, int64_t tag_b) {
     return tag_a != tag_b;
 }
 
-static int _wasm_tagged_scalar_eq(int64_t a, int64_t tag_a, int64_t b, int64_t tag_b) {
-    if ((tag_a == WASM_TAG_BOOL) != (tag_b == WASM_TAG_BOOL)) return 0;
-    if (tag_a == WASM_TAG_FLOAT || tag_b == WASM_TAG_FLOAT) {
-        double da = (tag_a == WASM_TAG_FLOAT) ? _l2d(a) : (double)a;
-        double db = (tag_b == WASM_TAG_FLOAT) ? _l2d(b) : (double)b;
-        return da == db ? 1 : 0;
-    }
-    return a == b ? 1 : 0;
-}
-
-static int _wasm_tagged_set_contains(const int64_t *container, int64_t container_tag,
-                                     int64_t item, int64_t item_tag) {
-    int64_t len = container[1];
-    for (int64_t i = 0; i < len; i++) {
-        if (_wasm_tagged_scalar_eq(container[WASM_LIST_ELEMS + i], container_tag, item, item_tag)) return 1;
-    }
-    return 0;
-}
 
 /* W-4f: Set.union(other) -> new Set with all elements from both */
 int64_t taida_set_union(int64_t set_a, int64_t set_b) {
@@ -4499,20 +4507,32 @@ int64_t taida_set_union(int64_t set_a, int64_t set_b) {
     int64_t a_len = a[1];
     int64_t b_len = b[1];
     if (_wasm_elem_slot_is_array(a[2]) || _wasm_elem_slot_is_array(b[2])
-        || _wasm_elem_tags_cross(a, b)) {
-        /* Kind-aware linear union (mirror of native). Array-carrying sets
-           are literal-sized, so the O(|a|·|b|) pair scan keeps exact
-           (value, kind) semantics without a hash path; the result rebuilds
-           its own kind entries. */
+        || _wasm_elem_tags_cross(a, b)
+        || _wasm_set_numeric_cross(_wasm_elem_tag_for_propagation(a),
+                                   _wasm_elem_tag_for_propagation(b))) {
+        /* Kind-aware union over (value, kind) pairs (mirror of native).
+           Numeric-crossing homogeneous sets (Float in play, or Int vs
+           Bool) route here too: the kind-aware seen-set keeps them
+           O(|a|+|b|); non-hashable kinds keep the exact linear scan. */
         int64_t result = taida_set_new();
+        _wasm_seen_k seen;
+        int all_h = 1;
+        for (int64_t i = 0; i < a_len && all_h; i++)
+            all_h = _wasm_ekind_hashable(a[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(a, i));
+        for (int64_t i = 0; i < b_len && all_h; i++)
+            all_h = _wasm_ekind_hashable(b[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(b, i));
+        int use_hash = all_h && _wasm_seen_k_init(&seen, a_len + b_len);
         for (int64_t i = 0; i < a_len; i++) {
             uint32_t ek = _wasm_elem_kind_at(a, i);
+            if (use_hash) _wasm_seen_k_add(&seen, a[WASM_LIST_ELEMS + i], ek);
             _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)result, ek);
             result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
         }
         for (int64_t i = 0; i < b_len; i++) {
             uint32_t ek = _wasm_elem_kind_at(b, i);
-            if (!_wasm_set_contains_k(result, b[WASM_LIST_ELEMS + i], ek)) {
+            int dup = use_hash ? !_wasm_seen_k_add(&seen, b[WASM_LIST_ELEMS + i], ek)
+                               : _wasm_set_contains_k(result, b[WASM_LIST_ELEMS + i], ek);
+            if (!dup) {
                 _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)result, ek);
                 result = taida_list_push(result, b[WASM_LIST_ELEMS + i]);
             }
@@ -4521,30 +4541,21 @@ int64_t taida_set_union(int64_t set_a, int64_t set_b) {
     }
     int64_t tag_a = _wasm_elem_tag_for_propagation(a);
     int64_t tag_b = _wasm_elem_tag_for_propagation(b);
-    /* F54 tier 2: b is a Set (already unique), so under a numeric-domain
-     * cross the dup test only needs "is b[i] in a", compared in the
-     * numeric domain. The result starts with the a-side tag; only a b
-     * element that actually lands in the result can make it mixed-domain
-     * (per-add latch below, mirroring native taida_set_union). */
-    int numeric_cross = _wasm_set_numeric_cross(tag_a, tag_b);
+    /* Same-domain homogeneous fast path: the numeric-crossing cases
+       (and every Float-bearing set) are owned by the kind-aware branch
+       above (mirrors native taida_set_union). */
     int64_t result = taida_set_new();
     taida_list_set_elem_tag(result, tag_a);
     _wasm_seen seen;
-    int use_hash = !numeric_cross && _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
+    int use_hash = _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
                    && _wasm_seen_init(&seen, a_len + b_len);
     for (int64_t i = 0; i < a_len; i++) {
         if (use_hash) _wasm_seen_add(&seen, a[WASM_LIST_ELEMS + i]);
         result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     for (int64_t i = 0; i < b_len; i++) {
-        int dup;
-        if (numeric_cross) {
-            dup = _wasm_tagged_set_contains(a, tag_a, b[WASM_LIST_ELEMS + i], tag_b);
-        } else if (use_hash) {
-            dup = !_wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i]);
-        } else {
-            dup = taida_set_has(result, b[WASM_LIST_ELEMS + i]);
-        }
+        int dup = use_hash ? !_wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i])
+                           : (taida_set_has(result, b[WASM_LIST_ELEMS + i]) != 0);
         if (!dup) {
             /* F54 tier 2: every actually-added b element stamps its tag
                through the shared latch — BEFORE the push (the latch's
@@ -4566,14 +4577,30 @@ int64_t taida_set_intersect(int64_t set_a, int64_t set_b) {
     int64_t a_len = a[1];
     int64_t *b = (int64_t *)(intptr_t)set_b;
     if (_wasm_elem_slot_is_array(a[2]) || _wasm_elem_slot_is_array(b[2])
-        || _wasm_elem_tags_cross(a, b)) {
-        /* Kind-aware linear intersection (mirror of native; see union for
-           rationale). The result holds a-side elements only, projected with
-           their recorded kinds. */
+        || _wasm_elem_tags_cross(a, b)
+        || _wasm_set_numeric_cross(_wasm_elem_tag_for_propagation(a),
+                                   _wasm_elem_tag_for_propagation(b))) {
+        /* Kind-aware intersection (mirror of native; see union for the
+           hash-path rationale). The b side seeds the kind-aware
+           seen-set so each a-side membership test is O(1). The result
+           holds a-side elements only, with their recorded kinds. */
+        int64_t b_len = b[1];
         int64_t result = taida_set_new();
+        _wasm_seen_k seen;
+        int all_h = 1;
+        for (int64_t i = 0; i < a_len && all_h; i++)
+            all_h = _wasm_ekind_hashable(a[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(a, i));
+        for (int64_t i = 0; i < b_len && all_h; i++)
+            all_h = _wasm_ekind_hashable(b[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(b, i));
+        int use_hash = all_h && _wasm_seen_k_init(&seen, b_len);
+        if (use_hash)
+            for (int64_t i = 0; i < b_len; i++)
+                _wasm_seen_k_add(&seen, b[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(b, i));
         for (int64_t i = 0; i < a_len; i++) {
             uint32_t ek = _wasm_elem_kind_at(a, i);
-            if (_wasm_set_contains_k(set_b, a[WASM_LIST_ELEMS + i], ek)) {
+            int in_b = use_hash ? !_wasm_seen_k_add(&seen, a[WASM_LIST_ELEMS + i], ek)
+                                : _wasm_set_contains_k(set_b, a[WASM_LIST_ELEMS + i], ek);
+            if (in_b) {
                 _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)result, ek);
                 result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
             }
@@ -4581,25 +4608,17 @@ int64_t taida_set_intersect(int64_t set_a, int64_t set_b) {
         return result;
     }
     int64_t tag_a = _wasm_elem_tag_for_propagation(a);
-    int64_t tag_b = _wasm_elem_tag_for_propagation(b);
-    int numeric_cross = _wasm_set_numeric_cross(tag_a, tag_b);
     int64_t result = taida_set_new();
-    /* F54 tier 2: the result holds a-side elements only, so the a tag
-       stays honest (mirrors native taida_set_intersect). */
+    /* Same-domain homogeneous fast path; the result holds a-side
+       elements only, so the a tag stays honest (mirrors native). */
     taida_list_set_elem_tag(result, tag_a);
     _wasm_seen seen;
-    int use_hash = !numeric_cross && _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
+    int use_hash = _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
                    && _wasm_seen_init(&seen, b[1]);
     if (use_hash) for (int64_t i = 0; i < b[1]; i++) _wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i]);
     for (int64_t i = 0; i < a_len; i++) {
-        int in_b;
-        if (numeric_cross) {
-            in_b = _wasm_tagged_set_contains(b, tag_b, a[WASM_LIST_ELEMS + i], tag_a);
-        } else if (use_hash) {
-            in_b = _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i]);
-        } else {
-            in_b = taida_set_has(set_b, a[WASM_LIST_ELEMS + i]);
-        }
+        int in_b = use_hash ? _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i])
+                            : (taida_set_has(set_b, a[WASM_LIST_ELEMS + i]) != 0);
         if (in_b) result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     return result;
@@ -4611,13 +4630,28 @@ int64_t taida_set_diff(int64_t set_a, int64_t set_b) {
     int64_t a_len = a[1];
     int64_t *b = (int64_t *)(intptr_t)set_b;
     if (_wasm_elem_slot_is_array(a[2]) || _wasm_elem_slot_is_array(b[2])
-        || _wasm_elem_tags_cross(a, b)) {
-        /* Kind-aware linear difference (mirror of native; see union for
-           rationale). */
+        || _wasm_elem_tags_cross(a, b)
+        || _wasm_set_numeric_cross(_wasm_elem_tag_for_propagation(a),
+                                   _wasm_elem_tag_for_propagation(b))) {
+        /* Kind-aware difference (mirror of native; see union for the
+           hash-path rationale). */
+        int64_t b_len = b[1];
         int64_t result = taida_set_new();
+        _wasm_seen_k seen;
+        int all_h = 1;
+        for (int64_t i = 0; i < a_len && all_h; i++)
+            all_h = _wasm_ekind_hashable(a[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(a, i));
+        for (int64_t i = 0; i < b_len && all_h; i++)
+            all_h = _wasm_ekind_hashable(b[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(b, i));
+        int use_hash = all_h && _wasm_seen_k_init(&seen, b_len);
+        if (use_hash)
+            for (int64_t i = 0; i < b_len; i++)
+                _wasm_seen_k_add(&seen, b[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(b, i));
         for (int64_t i = 0; i < a_len; i++) {
             uint32_t ek = _wasm_elem_kind_at(a, i);
-            if (!_wasm_set_contains_k(set_b, a[WASM_LIST_ELEMS + i], ek)) {
+            int in_b = use_hash ? !_wasm_seen_k_add(&seen, a[WASM_LIST_ELEMS + i], ek)
+                                : _wasm_set_contains_k(set_b, a[WASM_LIST_ELEMS + i], ek);
+            if (!in_b) {
                 _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)result, ek);
                 result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
             }
@@ -4625,25 +4659,16 @@ int64_t taida_set_diff(int64_t set_a, int64_t set_b) {
         return result;
     }
     int64_t tag_a = _wasm_elem_tag_for_propagation(a);
-    int64_t tag_b = _wasm_elem_tag_for_propagation(b);
-    int numeric_cross = _wasm_set_numeric_cross(tag_a, tag_b);
     int64_t result = taida_set_new();
-    /* F54 tier 2: the result holds a-side elements only, so the a tag
-       stays honest (mirrors native taida_set_diff). */
+    /* Same-domain homogeneous fast path (mirrors native). */
     taida_list_set_elem_tag(result, tag_a);
     _wasm_seen seen;
-    int use_hash = !numeric_cross && _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
+    int use_hash = _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
                    && _wasm_seen_init(&seen, b[1]);
     if (use_hash) for (int64_t i = 0; i < b[1]; i++) _wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i]);
     for (int64_t i = 0; i < a_len; i++) {
-        int in_b;
-        if (numeric_cross) {
-            in_b = _wasm_tagged_set_contains(b, tag_b, a[WASM_LIST_ELEMS + i], tag_a);
-        } else if (use_hash) {
-            in_b = _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i]);
-        } else {
-            in_b = taida_set_has(set_b, a[WASM_LIST_ELEMS + i]);
-        }
+        int in_b = use_hash ? _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i])
+                            : (taida_set_has(set_b, a[WASM_LIST_ELEMS + i]) != 0);
         if (!in_b) result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     return result;

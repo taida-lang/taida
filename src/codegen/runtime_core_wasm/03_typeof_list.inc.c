@@ -1083,7 +1083,8 @@ int64_t taida_list_sort_by(int64_t list_ptr, int64_t fn_ptr) {
 int64_t taida_list_unique(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    if (_wasm_elem_slot_is_array(list[2])) {
+    if (_wasm_elem_slot_is_array(list[2])
+        || _wasm_elem_tag_for_propagation(list) == WASM_TAG_FLOAT) {
         /* Kind-aware dedup over (value, recorded kind) pairs (mirror of
            native taida_list_unique). The result rebuilds its own kind
            entries for the surviving elements (and naturally re-homogenises
