@@ -83,7 +83,7 @@ Mold[T] => Pair[T, U] = @(second: U)
 - 既存言語の `null` / `undefined` / `none` / `nil` / `unit` / `void` の意図で Taida コードに登場することは仕様上ありません。これらは「値の不在」という発想自体を Taida から排除するための予約です。
 - 大文字始まり (`Null`, `None`, `Unit`, `Void`) も同じ意図で書かれることが多いため、型注釈位置 (`:Unit` / `:Void` / `:@()`) の場合は `[E1520]` で reject されます。識別子定義位置は lower-case 6 語を TypeChecker が `[E1540]` で、型位置は `:Unit` / `:Void` / `:@()` を TypeChecker が `[E1520]` で reject、というのが現行の検出範囲です。
 
-```taida
+```taida reject
 // NG: 識別子定義位置 ([E1540])
 null <= 42                       // `null` is reserved for value absence
 unit u: Int = u => :Int          // `unit` is reserved for value absence
@@ -348,7 +348,7 @@ x <= Filter[pilots, _ p = p.is_active]()
 
 ### 略語は避ける
 
-```taida
+```taida fragment
 // Good
 getPilotById id: Int = ...
 calculateTotalPrice items: @[Item] = ...

@@ -462,7 +462,7 @@ createPilot name: Str age: Int =
 
 ### 関数型シグネチャ
 
-```taida
+```taida fragment
 // 関数型は `:引数型 => :戻り型` の形式です
 :Int => :Str      // Int から Str への関数
 :Int :Int => :Int  // Int, Int から Int への関数
