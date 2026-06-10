@@ -12650,14 +12650,18 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
         }
         int ftype = taida_lookup_field_type(field_hash);
         // C25B-028: pull per-slot tag from the pack layout so the
-        // monadic payload uses the correct formatter (Int/Float/Str vs
-        // pointer heuristic). Slot tag of 0 means TAIDA_TAG_INT /
-        // untagged — the caller-level force_int_default_for_lax
-        // compensates for Lax `__default`/`__value` ambiguity.
-        if (ftype == 0 && is_monadic) {
+        // payload uses the correct formatter (Int/Float/Str vs pointer
+        // heuristic). Slot tag of 0 means TAIDA_TAG_INT / untagged —
+        // the caller-level force_int_default_for_lax compensates for
+        // Lax `__default`/`__value` ambiguity. Reading the slot is not
+        // monadic-specific: every pack literal stamps per-field tags,
+        // and a FLOAT payload is unrecoverable from the value alone
+        // (it serialised as its raw bit pattern before this read).
+        if (ftype == 0) {
             taida_val slot_tag = pack[2 + i * 3 + 1];
             if (slot_tag == TAIDA_TAG_STR) ftype = 3;
             else if (slot_tag == TAIDA_TAG_BOOL) ftype = 4;
+            else if (slot_tag == TAIDA_TAG_FLOAT) ftype = 2;
             // TAIDA_TAG_INT (0) / other: leave as 0 and fall back to
             // heuristic inside json_serialize_typed.
         }
@@ -12731,13 +12735,25 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val
         return;
     }
 
-    // Integer/Float hints take precedence over the val==0 Unit fallback
+    // Integer hint takes precedence over the val==0 Unit fallback
     // so `Value::Int(0)` → `"0"` and not `"{}"`. Matches interpreter's
     // `taida_value_to_json` which emits Int(0) as JSON number 0.
-    if (type_hint == 1 || type_hint == 2) { // Int or Float
+    if (type_hint == 1) { // Int
         char num[32];
         snprintf(num, sizeof(num), "%" PRId64 "", val);
         json_append(buf, cap, len, num);
+        return;
+    }
+    // Float hint: the payload is an f64 bit pattern — serialising it
+    // with PRId64 wrote the raw bits as a giant integer into the JSON.
+    // Render through the shared Rust-Display-compatible formatter so
+    // the output round-trips ("2.0", matching the interpreter).
+    if (type_hint == 2) { // Float
+        double d;
+        memcpy(&d, &val, sizeof(double));
+        taida_val fs = taida_float_to_str(d);
+        json_append(buf, cap, len, (const char*)fs);
+        taida_str_release(fs);
         return;
     }
 

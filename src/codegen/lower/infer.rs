@@ -33,7 +33,15 @@ impl Lowering {
             // `expr_is_bool`; without this, defaultFn-driven Float fields
             // (e.g. `Calc = @(halve: Int => :Float)`) would be rendered
             // through `taida_polymorphic_to_string` and observe a raw i64.
-            Expr::MethodCall(obj, method, _, _) => {
+            Expr::MethodCall(obj, method, args, _) => {
+                // getOrDefault's result type follows its default argument
+                // (the checker enforces that the Lax payload and default
+                // agree), so a Float default means a Float result.
+                if method == "getOrDefault"
+                    && args.first().is_some_and(|a| self.expr_returns_float(a))
+                {
+                    return true;
+                }
                 if let Some(type_name) = self.infer_type_name(obj)
                     && let Some(field_types) = self.type_field_types.get(&type_name)
                 {
@@ -60,6 +68,17 @@ impl Lowering {
             Expr::Ident(name, _) => {
                 // float 変数への参照
                 self.float_vars.contains(name) || self.stdlib_constants.contains_key(name)
+            }
+            // Pack-literal field read: `p.x` where the binding recorded
+            // x's static kind (Float payloads are invisible to the value
+            // heuristics, so display dispatch needs the static answer).
+            Expr::FieldAccess(obj, fname, _) => {
+                if let Expr::Ident(v, _) = obj.as_ref() {
+                    self.pack_field_kinds.get(v).and_then(|m| m.get(fname))
+                        == Some(&crate::codegen::tag_prop::TAG_FLOAT)
+                } else {
+                    false
+                }
             }
             // C25B-025 Phase 5-I: math mold family returns Float. Must
             // match the `Float` entries in `src/types/mold_specs.rs`
@@ -93,6 +112,14 @@ impl Lowering {
                 // literal or a tracked @[Float] variable).
                 (name == "Sum"
                     && type_args.first().is_some_and(|a| self.expr_is_float_list(a)))
+                // If[] yields one of its two branches; Abs/Clamp follow
+                // their first argument.
+                || (name == "If"
+                    && type_args.len() >= 3
+                    && self.expr_returns_float(&type_args[1])
+                    && self.expr_returns_float(&type_args[2]))
+                || (matches!(name.as_str(), "Abs" | "Clamp")
+                    && type_args.first().is_some_and(|a| self.expr_returns_float(a)))
             }
             _ => false,
         }
@@ -777,6 +804,18 @@ impl Lowering {
                 }
             }
             _ => {}
+        }
+        // Generic fallback: whatever the static expression classifiers can
+        // prove about the unmold source applies to the bound name too —
+        // this is what carries getOrDefault(float-default), If/Abs/Clamp
+        // results and pack-field reads into display dispatch. Insertions
+        // are idempotent, so overlap with the arms above is harmless.
+        if self.expr_returns_float(source) {
+            self.float_vars.insert(target.to_string());
+        } else if self.expr_is_bool(source) {
+            self.bool_vars.insert(target.to_string());
+        } else if self.expr_is_string_full(source) {
+            self.string_vars.insert(target.to_string());
         }
     }
 

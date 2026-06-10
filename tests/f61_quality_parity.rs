@@ -144,3 +144,52 @@ stdout(Max[mixed]().getOrDefault(0))
     assert_eq!(out, "1\n3\n0.5\n-0.5\na\nfalse\n0.5\n3");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Float kind through read paths: pack-field reads, getOrDefault with
+/// a Float default, If/Abs mold results — each used to display as raw
+/// f64 bits on the compiled backends (the value heuristics cannot
+/// identify a Float payload; the static classifiers now carry it).
+#[test]
+fn float_kind_flows_through_read_paths() {
+    let dir = unique_temp_dir("f61_float_reads");
+    let out = assert_parity(
+        &dir,
+        "float_reads",
+        r#"p <= @(x <= 1.5)
+stdout(p.x.toString())
+m <= hashMap().set("a", 0.5)
+m.get("a").getOrDefault(0.0) >=> g
+stdout(g)
+If[true, 1.5, 2.5]() >=> iv
+stdout(iv)
+Abs[-1.5]() >=> av
+stdout(av)
+"#,
+    );
+    assert_eq!(out, "1.5\n0.5\n1.5\n1.5");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// jsonEncode renders Float fields as numbers, not their raw f64 bit
+/// patterns ({"score":4611686018427387904} corrupted every serialised
+/// artifact downstream). The per-slot pack tags carry the kind; the
+/// serialiser reads them for plain packs too, and the Float hint
+/// formats through the shared Rust-Display-compatible path.
+#[test]
+fn json_encode_renders_float_fields() {
+    let dir = unique_temp_dir("f61_json_float");
+    let out = assert_parity(
+        &dir,
+        "json_float",
+        r#"whole <= @(score <= 2.0, ok <= false, n <= 7, s <= "hi")
+stdout(jsonEncode(whole))
+nested <= @(inner <= @(rate <= -0.5))
+stdout(jsonEncode(nested))
+"#,
+    );
+    assert_eq!(
+        out,
+        "{\"n\":7,\"ok\":false,\"s\":\"hi\",\"score\":2.0}\n{\"inner\":{\"rate\":-0.5}}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

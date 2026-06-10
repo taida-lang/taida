@@ -877,7 +877,7 @@ mod tests {
         //   +103. 1,310,758 -> 1,310,861.
         // 2026-06-10 consume-variant Append (core.c, F1): +912.
         //   1,310,861 -> 1,311,773.
-        const EXPECTED_TOTAL_LEN: usize = 1_320_002;
+        const EXPECTED_TOTAL_LEN: usize = 1_320_766;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1671,7 +1671,9 @@ mod tests {
             // land before the marker (F1 407,671 -> 410,760); F2 unchanged.
             // min/max switch to that comparator and stamp the winner's
             // kind into their Lax (F1 410,760 -> 411,424); F2 unchanged.
-            F1_LEN + 228_179,
+            // jsonEncode learns the Float hint + non-monadic slot-tag
+            // read (after the marker): F2 228,179 -> 228,943.
+            F1_LEN + 228_943,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

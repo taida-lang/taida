@@ -566,6 +566,20 @@ impl Lowering {
                 }
                 if self.expr_is_pack(&assign.value) {
                     self.pack_vars.insert(assign.target.clone());
+                    // Record per-field static kinds for pack literals so a
+                    // later `p.x` field read carries its element kind into
+                    // display dispatch (Float/Bool payloads are invisible
+                    // to the value heuristics).
+                    if let Expr::BuchiPack(fields, _) = &assign.value {
+                        let kinds: std::collections::HashMap<String, i64> = fields
+                            .iter()
+                            .filter(|f| !matches!(f.value, Expr::Placeholder(_)))
+                            .map(|f| (f.name.clone(), self.expr_type_tag(&f.value)))
+                            .collect();
+                        self.pack_field_kinds.insert(assign.target.clone(), kinds);
+                    } else {
+                        self.pack_field_kinds.remove(&assign.target);
+                    }
                 }
                 if self.expr_is_list(&assign.value) {
                     self.list_vars.insert(assign.target.clone());
@@ -2274,6 +2288,20 @@ impl Lowering {
                 // F-58: BuchiPack/TypeInst を返す式の結果を追跡
                 if self.expr_is_pack(&assign.value) {
                     self.pack_vars.insert(assign.target.clone());
+                    // Record per-field static kinds for pack literals so a
+                    // later `p.x` field read carries its element kind into
+                    // display dispatch (Float/Bool payloads are invisible
+                    // to the value heuristics).
+                    if let Expr::BuchiPack(fields, _) = &assign.value {
+                        let kinds: std::collections::HashMap<String, i64> = fields
+                            .iter()
+                            .filter(|f| !matches!(f.value, Expr::Placeholder(_)))
+                            .map(|f| (f.name.clone(), self.expr_type_tag(&f.value)))
+                            .collect();
+                        self.pack_field_kinds.insert(assign.target.clone(), kinds);
+                    } else {
+                        self.pack_field_kinds.remove(&assign.target);
+                    }
                 }
                 // retain-on-store: List を返す式の結果を追跡
                 if self.expr_is_list(&assign.value) {

@@ -1227,11 +1227,15 @@ static void _wc_json_serialize_pack_fields(_wc_json_buf *jb, int64_t *pack, int6
         /* `_wasm_lookup_field_type` returns -1 (not 0) for unregistered
            hashes; normalise to 0 so downstream "unset" checks work. */
         if (ftype < 0) ftype = 0;
-        /* Pull per-slot tag when the global registry has no type. */
-        if (ftype == 0 && is_monadic) {
+        /* Pull per-slot tag when the global registry has no type — not
+           monadic-specific: every pack literal stamps per-field tags,
+           and a FLOAT payload is unrecoverable from the value alone
+           (native twin). */
+        if (ftype == 0) {
             int64_t slot_tag = pack[1 + i * 3 + 1];
             if (slot_tag == WASM_TAG_STR) ftype = 3;
             else if (slot_tag == WASM_TAG_BOOL) ftype = 4;
+            else if (slot_tag == WASM_TAG_FLOAT) ftype = 2;
         }
         /* Lax payload force (see sibling comment above). Applies to
            `__value` and `__default` in Lax packs so both render with
@@ -1285,12 +1289,19 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
         _wc_jb_append(jb, val ? "true" : "false");
         return;
     }
-    /* C25B-028: Int/Float type hint takes precedence over the val==0
+    /* C25B-028: Int type hint takes precedence over the val==0
        Unit fallback so `Value::Int(0)` renders as `"0"` not `"{}"`.
        Matches native runtime's fix and interpreter `taida_value_to_json`. */
-    if (type_hint == 1 || type_hint == 2) {
+    if (type_hint == 1) {
         char *num = _wc_i64_to_str(val);
         _wc_jb_append(jb, num);
+        return;
+    }
+    /* Float hint: the payload is an f64 bit pattern — PRId64-style
+       output wrote the raw bits into the JSON. Render through the
+       shared formatter so the output round-trips (native twin). */
+    if (type_hint == 2) {
+        _wc_jb_append(jb, (const char *)(intptr_t)taida_float_to_str(val));
         return;
     }
     if (val == 0) {
