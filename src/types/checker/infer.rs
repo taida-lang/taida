@@ -347,7 +347,7 @@ impl TypeChecker {
                 } else {
                     self.errors.push(TypeError {
                         message: format!(
-                            "[E1502] Undefined variable '{}'. \
+                            "[E1542] Undefined variable '{}'. \
                              Hint: Check the variable name for typos, or define it before use.",
                             name
                         ),
@@ -1664,7 +1664,7 @@ impl TypeChecker {
                 // step is an `Expr::Ident(name)` and `name` is NOT already a
                 // known function / type / mold / builtin, we register it as
                 // a local binding carrying the current step's type rather
-                // than reporting `[E1502] Undefined variable`.
+                // than reporting `[E1542] Undefined variable`.
                 let old_in_pipeline = self.in_pipeline;
                 let last_idx = exprs.len().saturating_sub(1);
                 // A fresh scope holds any intermediate bind-and-forward bindings.
@@ -1769,6 +1769,33 @@ impl TypeChecker {
                     }
                     // JSON[raw, Schema]() returns Lax[Schema].
                     "JSON" => {
+                        // [E1541] An undefined schema name used to slip
+                        // through to a runtime error even though the JSON
+                        // guide promises compile-time rejection. Simple
+                        // names must resolve to a registered schema; list
+                        // and generic schema forms validate their inner
+                        // names through the same recursion at cast time.
+                        if let Some(Expr::Ident(n, sp) | Expr::TypeLiteral(n, None, sp)) =
+                            type_args.get(1)
+                        {
+                            let known = matches!(
+                                n.as_str(),
+                                "Int" | "Num" | "Float" | "Str" | "Bytes" | "Bool" | "JSON"
+                            ) || self.registry.type_defs.contains_key(n)
+                                || self.registry.mold_defs.contains_key(n)
+                                || self.registry.error_types.contains_key(n)
+                                || self.registry.enum_defs.contains_key(n)
+                                || self.declared_concrete_type_names.contains(n);
+                            if !known {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1541] JSON schema '{}' is not defined. Define it (`{} = @(...)`) or import it before casting.",
+                                        n, n
+                                    ),
+                                    span: sp.clone(),
+                                });
+                            }
+                        }
                         let schema_ty = type_args
                             .get(1)
                             .map(|arg| self.type_arg_expr_to_type(arg))

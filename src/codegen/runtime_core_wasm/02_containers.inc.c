@@ -2468,12 +2468,13 @@ int64_t taida_str_slice(int64_t s_raw, int64_t start_raw, int64_t end_raw) {
     const char *s = (const char *)s_raw;
     if (!s) { return taida_str_alloc(0); }
     int byte_len = _wf_strlen(s);
-    /* Indices are code points (mirrors native taida_str_slice). The
-       negative-end normalisation predates the omitted-end sentinel and
-       is kept as-is: the lowering emits -1 for an omitted end. */
+    /* Indices are code points (mirrors native taida_str_slice).
+       INT64_MIN marks an omitted end ("to the end"); an explicit
+       negative end clamps to 0 like the reference. */
     int64_t start = start_raw;
     int64_t end = end_raw;
-    if (end < 0) end = _wasm_utf8_count(s, byte_len);
+    if (end == (-9223372036854775807LL - 1)) end = _wasm_utf8_count(s, byte_len);
+    if (end < 0) end = 0;
     if (start < 0) start = 0;
     if (start >= end) { return taida_str_alloc(0); }
     int b0 = _wasm_utf8_cp_to_byte(s, byte_len, start);
@@ -2669,6 +2670,24 @@ int64_t taida_cmp_strings(int64_t a_raw, int64_t b_raw) {
 
 /// Slice mold -- polymorphic slice for Str, List, Bytes
 int64_t taida_slice_mold(int64_t value, int64_t start_raw, int64_t end_raw) {
+    if (_looks_like_list(value)) {
+        int64_t *list = (int64_t *)(intptr_t)value;
+        int64_t len = list[1];
+        int64_t s = start_raw;
+        int64_t e = (end_raw == (-9223372036854775807LL - 1)) ? len : end_raw;
+        if (s < 0) s = 0;
+        if (s > len) s = len;
+        if (e < 0) e = 0;
+        if (e > len) e = len;
+        if (e < s) e = s;
+        int64_t out = taida_list_new();
+        for (int64_t i = s; i < e; i++) {
+            _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)out,
+                                         _wasm_elem_kind_at(list, i));
+            out = taida_list_push(out, list[WASM_LIST_ELEMS + i]);
+        }
+        return out;
+    }
     return taida_str_slice(value, start_raw, end_raw);
 }
 

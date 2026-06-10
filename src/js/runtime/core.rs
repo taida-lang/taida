@@ -2153,16 +2153,27 @@ function Slice(val, optsOrStart, maybeEnd) {
   }
   if (typeof val === 'string') {
     // Code-point slicing (String.prototype.slice cuts UTF-16 units and
-    // can split a surrogate pair).
+    // can split a surrogate pair). Negative indices are NOT
+    // tail-relative in Taida — the reference clamps them to 0, so
+    // start >= end yields the empty string.
     const chars = Array.from(val);
     const end = (endOpt !== undefined) ? endOpt : chars.length;
-    return chars.slice(start, end).join('');
+    const s = Math.max(0, start);
+    const e = Math.max(0, Math.min(chars.length, end));
+    return s < e ? chars.slice(s, e).join('') : '';
+  }
+  if (Array.isArray(val)) {
+    const end = (endOpt !== undefined) ? endOpt : val.length;
+    const s = Math.max(0, start);
+    const e = Math.max(0, Math.min(val.length, end));
+    return Object.freeze(s < e ? val.slice(s, e) : []);
   }
   if (val instanceof Uint8Array) {
     const end = (endOpt !== undefined) ? endOpt : val.length;
     const s = Math.max(0, Math.min(val.length, start));
     const e = Math.max(0, Math.min(val.length, end));
-    const from = Math.min(s, e);
+    // Same clamp rule as Str: an inverted range is empty, not swapped.
+    const from = s;
     const to = Math.max(s, e);
     // D29B-004 / Track-ε: subarray is a zero-copy view sharing the
     // underlying ArrayBuffer (vs. .slice() which deep-copies). Matches

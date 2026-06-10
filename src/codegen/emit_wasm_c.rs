@@ -1918,7 +1918,13 @@ fn emit_inst(
 ) -> Result<(), WasmCEmitError> {
     match inst {
         IrInst::ConstInt(dst, val) => {
-            writeln!(c, "{}v_{} = {}LL;", indent, dst, val).unwrap();
+            if *val == i64::MIN {
+                // `-9223372036854775808LL` parses as unary minus on an
+                // out-of-range literal in C; spell the value in-range.
+                writeln!(c, "{}v_{} = (-9223372036854775807LL - 1);", indent, dst).unwrap();
+            } else {
+                writeln!(c, "{}v_{} = {}LL;", indent, dst, val).unwrap();
+            }
         }
         IrInst::ConstFloat(dst, val) => {
             // W-3: Store f64 bits in int64_t via bitcast (same representation as native backend)

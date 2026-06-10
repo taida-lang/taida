@@ -572,6 +572,22 @@ impl Interpreter {
                             new_len,
                         ))))
                     }
+                    Value::List(items) => {
+                        let end = if type_args.len() >= 3 {
+                            match self.eval_expr(&type_args[2])? {
+                                Signal::Value(Value::Int(n)) => n,
+                                _ => items.len() as i64,
+                            }
+                        } else {
+                            self.eval_mold_option(fields, "end")?
+                                .and_then(|v| if let Value::Int(n) = v { Some(n) } else { None })
+                                .unwrap_or(items.len() as i64)
+                        };
+                        let (clamped_start, clamped_end) =
+                            clamp_slice_bounds(items.len(), start, end);
+                        let result: Vec<Value> = items[clamped_start..clamped_end].to_vec();
+                        Ok(Some(Signal::Value(Value::list(result))))
+                    }
                     _ => Ok(None), // Not a supported Slice target, fall through
                 }
             }

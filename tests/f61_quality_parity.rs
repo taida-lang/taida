@@ -671,3 +671,85 @@ stdout(m.getOrDefault(""))
     assert_eq!(out, expected);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Slice agrees on every backend for every target type: the
+/// interpreter gained the List arm (it used to leak the raw MoldInst
+/// pack), JS sliced lists to '' and treated negative ends as
+/// tail-relative, native/wasm treated them as "to the end". The
+/// reference semantics: an omitted end means the end, an explicit
+/// negative end clamps to 0 (an empty slice).
+#[test]
+fn slice_agrees_for_all_target_types_and_bounds() {
+    let dir = unique_temp_dir("f61_slice");
+    let src = r#"stdout(Slice["hello", 1, -1]())
+stdout(Slice["hello", 1]())
+stdout(Slice[@[1, 2, 3, 4], 1, 3]())
+stdout(Slice[@[1, 2, 3, 4], 1]())
+stdout(Slice[@[1, 2, 3, 4], 1, -1]())
+"#;
+    let expected = "\nello\n@[2, 3]\n@[2, 3, 4]\n@[]";
+    let out = assert_parity(&dir, "slice", src);
+    assert_eq!(out, expected);
+    if node_available() {
+        let td = dir.join("slice.td");
+        let mjs = dir.join("slice.mjs");
+        let status = Command::new(taida_bin())
+            .args(["build", "js"])
+            .arg(&td)
+            .arg("-o")
+            .arg(&mjs)
+            .status()
+            .expect("taida build js runs");
+        assert!(status.success());
+        let jsout = Command::new("node").arg(&mjs).output().expect("node runs");
+        assert!(jsout.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&jsout.stdout)
+                .strip_suffix('\n')
+                .unwrap_or_default(),
+            expected,
+            "js slice semantics"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An undefined JSON schema is rejected at check time ([E1541]) — it
+/// used to slip through to a runtime error even though the JSON guide
+/// promises compile-time rejection. Undefined variables now carry
+/// their own code ([E1542]) instead of overloading the deprecated
+/// partial-application diagnostic.
+#[test]
+fn json_schema_and_undefined_variable_diagnostics() {
+    let dir = unique_temp_dir("f61_diag");
+    let td = dir.join("schema.td");
+    std::fs::write(
+        &td,
+        "raw <= \"{}\"\nJSON[raw, NotDefined]() >=> v\nstdout(v)\n",
+    )
+    .expect("write fixture");
+    let out = Command::new(taida_bin())
+        .arg(&td)
+        .output()
+        .expect("taida runs");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(combined.contains("[E1541]"), "schema: {combined}");
+
+    let td2 = dir.join("undef.td");
+    std::fs::write(&td2, "x <= notDefinedAnywhere\nstdout(x)\n").expect("write fixture");
+    let out2 = Command::new(taida_bin())
+        .arg(&td2)
+        .output()
+        .expect("taida runs");
+    let combined2 = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out2.stdout),
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    assert!(combined2.contains("[E1542]"), "undefined: {combined2}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

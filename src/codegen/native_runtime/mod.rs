@@ -1646,7 +1646,9 @@ mod tests {
         //   marker): +1,013. F1 416,600 -> 417,613.
         // 2026-06-11 code-point string indexing (before the marker):
         //   +2,123. F1 417,613 -> 419,736.
-        const F1_LEN: usize = 419_736;
+        // 2026-06-11 Slice end-sentinel unification (before the
+        //   marker): +390. F1 419,736 -> 420,126.
+        const F1_LEN: usize = 420_126;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

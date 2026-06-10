@@ -447,8 +447,12 @@ impl Lowering {
                     match self.lower_mold_field_expr(func, fields, "end")? {
                         Some(v) => v,
                         None => {
+                            // Omitted-end sentinel: i64::MIN is unreachable as a
+                            // user index, so the runtime can distinguish "to the
+                            // end" from an explicit negative end (which the
+                            // reference clamps to 0 — an empty slice).
                             let v = func.alloc_var();
-                            func.push(IrInst::ConstInt(v, -1));
+                            func.push(IrInst::ConstInt(v, i64::MIN));
                             v
                         }
                     }

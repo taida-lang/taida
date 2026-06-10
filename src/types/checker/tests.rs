@@ -3429,8 +3429,8 @@ fn test_bt2_null_rejected() {
     assert!(
         errors
             .iter()
-            .any(|e| e.message.contains("E1502") && e.message.contains("null")),
-        "Assignment from 'null' should produce E1502 undefined variable error, got: {:?}",
+            .any(|e| e.message.contains("E1542") && e.message.contains("null")),
+        "Assignment from 'null' should produce E1542 undefined variable error, got: {:?}",
         errors
     );
 }
@@ -3442,8 +3442,8 @@ fn test_bt2_undefined_rejected() {
     assert!(
         errors
             .iter()
-            .any(|e| e.message.contains("E1502") && e.message.contains("undefined")),
-        "Assignment from 'undefined' should produce E1502 undefined variable error, got: {:?}",
+            .any(|e| e.message.contains("E1542") && e.message.contains("undefined")),
+        "Assignment from 'undefined' should produce E1542 undefined variable error, got: {:?}",
         errors
     );
 }
@@ -3455,8 +3455,8 @@ fn test_bt2_none_rejected() {
     assert!(
         errors
             .iter()
-            .any(|e| e.message.contains("E1502") && e.message.contains("none")),
-        "Assignment from 'none' should produce E1502 undefined variable error, got: {:?}",
+            .any(|e| e.message.contains("E1542") && e.message.contains("none")),
+        "Assignment from 'none' should produce E1542 undefined variable error, got: {:?}",
         errors
     );
 }
@@ -3468,8 +3468,8 @@ fn test_bt2_nil_rejected() {
     assert!(
         errors
             .iter()
-            .any(|e| e.message.contains("E1502") && e.message.contains("nil")),
-        "Assignment from 'nil' should produce E1502 undefined variable error, got: {:?}",
+            .any(|e| e.message.contains("E1542") && e.message.contains("nil")),
+        "Assignment from 'nil' should produce E1542 undefined variable error, got: {:?}",
         errors
     );
 }

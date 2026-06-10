@@ -4560,6 +4560,10 @@ taida_val taida_str_slice(const char* s, taida_val start, taida_val end) {
 }
 
 taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end) {
+    // INT64_MIN marks an omitted end ("to the end"); every arm
+    // substitutes its own length. An explicit negative end clamps to 0
+    // like the reference (start >= end yields the empty slice).
+    int end_omitted = (end == INT64_MIN);
     if (TAIDA_IS_BYTES_CONTIG(value)) {
         // D29B-004 Track-η Phase 6 (Lock-Phase6-B Option β-2, 2026-04-27):
         // CONTIG inputs (e.g. produced by Track-β writev hot-path or any
@@ -4575,10 +4579,11 @@ taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end) {
         const unsigned char *src = taida_bytes_contig_data(value);
         taida_val total = taida_bytes_contig_len(value);
         taida_val s = start;
-        taida_val e = end;
+        taida_val e = end_omitted ? total : end;
         if (s < 0) s = 0;
         if (s > total) s = total;
-        if (e < 0 || e > total) e = total;
+        if (e < 0) e = 0;
+        if (e > total) e = total;
         if (e < s) e = s;
         return taida_bytes_contig_new(src + s, e - s);
     }
@@ -4593,10 +4598,11 @@ taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end) {
         taida_val *bytes = (taida_val*)value;
         taida_val len = bytes[1];
         taida_val s = start;
-        taida_val e = end;
+        taida_val e = end_omitted ? len : end;
         if (s < 0) s = 0;
         if (s > len) s = len;
-        if (e < 0 || e > len) e = len;
+        if (e < 0) e = 0;
+        if (e > len) e = len;
         if (e < s) e = s;
         taida_val out_len = e - s;
         taida_val out = taida_bytes_new_filled(out_len, 0);
@@ -4613,10 +4619,11 @@ taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end) {
         int src_tagged = taida_elem_slot_is_array(list[3]);
         taida_val elem_tag = taida_elem_tag_for_propagation(list);
         taida_val s = start;
-        taida_val e = end;
+        taida_val e = end_omitted ? len : end;
         if (s < 0) s = 0;
         if (s > len) s = len;
-        if (e < 0 || e > len) e = len;
+        if (e < 0) e = 0;
+        if (e > len) e = len;
         if (e < s) e = s;
         taida_val out = taida_list_new();
         if (!src_tagged) ((taida_val*)out)[3] = elem_tag;  // propagate elem_type_tag
@@ -4643,10 +4650,11 @@ taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end) {
     size_t byte_len = taida_str_byte_len_or_strlen(s);
     taida_val len = taida_utf8_count(s, byte_len);
     taida_val cs = start;
-    taida_val ce = end;
+    taida_val ce = end_omitted ? len : end;
     if (cs < 0) cs = 0;
     if (cs > len) cs = len;
-    if (ce < 0 || ce > len) ce = len;
+    if (ce < 0) ce = 0;
+    if (ce > len) ce = len;
     if (ce < cs) ce = cs;
     return taida_str_slice(s, cs, ce);
 }

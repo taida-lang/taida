@@ -330,13 +330,20 @@ impl Lowering {
                         }
                         -1
                     }
-                    // Slice[str] → Str, Slice[bytes] → Bytes (tag as Str at wasm
-                    // level since bytes share the hidden-header str layout).
+                    // Slice[str] → Str, Slice[list] → List, Slice[bytes] →
+                    // Bytes (tag as Str at wasm level since bytes share the
+                    // hidden-header str layout). A list input must NOT take
+                    // the Str default — the Str stdout fast path would print
+                    // the list pointer as text (its magic header leaks as
+                    // "TSLDIAT").
                     "Slice" => {
-                        if let Some(arg) = type_args.first()
-                            && self.expr_is_string_full(arg)
-                        {
-                            return 3;
+                        if let Some(arg) = type_args.first() {
+                            if self.expr_is_string_full(arg) {
+                                return 3;
+                            }
+                            if self.expr_is_list(arg) {
+                                return 5; // TAIDA_TAG_LIST
+                            }
                         }
                         3 // default: Slice returns Str (checker agrees)
                     }
