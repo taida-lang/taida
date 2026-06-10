@@ -22,6 +22,7 @@
 
 /* Bump allocator (defined in runtime_core_wasm.c, non-static for sharing) */
 extern void *wasm_alloc(unsigned int size);
+extern char *_wasm_str_alloc(unsigned int total); /* header-carrying */
 
 /* String utilities (defined in runtime_core_wasm.c as static, so we
    re-declare minimal helpers here) */
@@ -236,7 +237,7 @@ static wasi_resolved_path resolve_preopened_path(const char *path, int32_t path_
         }
 
         /* Get the directory name */
-        char *dir_name = (char *)wasm_alloc(dir_name_len + 1);
+        char *dir_name = (char *)_wasm_str_alloc(dir_name_len + 1);
         if (!dir_name) continue;
         err = __wasi_fd_prestat_dir_name(fd, dir_name, dir_name_len);
         if (err != 0) continue;
@@ -287,7 +288,7 @@ static wasi_resolved_path resolve_preopened_path(const char *path, int32_t path_
 /* ── Helper: allocate a copy of a string ── */
 
 static char *wasi_str_copy(const char *src, int32_t len) {
-    char *buf = (char *)wasm_alloc(len + 1);
+    char *buf = (char *)_wasm_str_alloc(len + 1);
     if (!buf) return (char *)0;
     wasi_memcpy(buf, src, len);
     buf[len] = '\0';
@@ -320,8 +321,8 @@ int64_t taida_os_env_var(int64_t name_ptr) {
     if (env_count == 0) return wasi_env_var_lax_error("not_found");
 
     /* Allocate buffers for environ pointers and data */
-    int32_t *env_ptrs = (int32_t *)wasm_alloc(env_count * 4);
-    char *env_buf = (char *)wasm_alloc(env_buf_size);
+    int32_t *env_ptrs = (int32_t *)_wasm_str_alloc(env_count * 4);
+    char *env_buf = (char *)_wasm_str_alloc(env_buf_size);
     if (!env_ptrs || !env_buf) return wasi_env_var_lax_error("other");
 
     err = __wasi_environ_get(env_ptrs, env_buf);
@@ -361,8 +362,8 @@ int64_t taida_os_all_env(void) {
     int32_t err = __wasi_environ_sizes_get(&env_count, &env_buf_size);
     if (err != 0 || env_count == 0) return hm;
 
-    int32_t *env_ptrs = (int32_t *)wasm_alloc(env_count * 4);
-    char *env_buf = (char *)wasm_alloc(env_buf_size);
+    int32_t *env_ptrs = (int32_t *)_wasm_str_alloc(env_count * 4);
+    char *env_buf = (char *)_wasm_str_alloc(env_buf_size);
     if (!env_ptrs || !env_buf) return hm;
 
     err = __wasi_environ_get(env_ptrs, env_buf);
@@ -451,7 +452,7 @@ int64_t taida_os_read(int64_t path_ptr) {
     int32_t size32 = (int32_t)file_size;
 
     /* Allocate buffer */
-    char *buf = (char *)wasm_alloc(size32 + 1);
+    char *buf = (char *)_wasm_str_alloc(size32 + 1);
     if (!buf) {
         __wasi_fd_close(file_fd);
         return wasi_read_lax_error("other");
@@ -855,7 +856,7 @@ int64_t taida_os_read_bytes(int64_t path_ptr) {
         return wasi_read_bytes_lax_error(wasi_error_kind(err, 0));
     }
 
-    unsigned char *buf = (unsigned char *)wasm_alloc((unsigned int)(file_size > 0 ? file_size : 1));
+    unsigned char *buf = (unsigned char *)_wasm_str_alloc((unsigned int)(file_size > 0 ? file_size : 1));
     if (!buf) {
         __wasi_fd_close(file_fd);
         return wasi_read_bytes_lax_error("other");
@@ -928,7 +929,7 @@ int64_t taida_os_read_bytes_at(int64_t path_ptr, int64_t offset, int64_t len) {
 
     /* Read up to `len` bytes.  Tolerate short reads at EOF: loop
      * fd_read until we've filled the buffer or EOF is reached. */
-    unsigned char *buf = (unsigned char *)wasm_alloc((unsigned int)len);
+    unsigned char *buf = (unsigned char *)_wasm_str_alloc((unsigned int)len);
     if (!buf) {
         __wasi_fd_close(file_fd);
         return wasi_read_bytes_at_lax_error("other");
@@ -1134,7 +1135,7 @@ static char *_wi_i64_to_str(int64_t val) {
     if (uval == 0) { tmp[len++] = '0'; }
     else { while (uval > 0) { tmp[len++] = '0' + (int)(uval % 10); uval /= 10; } }
     int total = neg + len;
-    char *buf = (char *)wasm_alloc((unsigned int)(total + 1));
+    char *buf = (char *)_wasm_str_alloc((unsigned int)(total + 1));
     int pos = 0;
     if (neg) buf[pos++] = '-';
     for (int i = len - 1; i >= 0; i--) buf[pos++] = tmp[i];
@@ -1142,7 +1143,7 @@ static char *_wi_i64_to_str(int64_t val) {
     return buf;
 }
 static void _wi_sb_init(_wi_strbuf *sb) {
-    sb->cap = 256; sb->buf = (char *)wasm_alloc((unsigned int)sb->cap); sb->len = 0;
+    sb->cap = 256; sb->buf = (char *)_wasm_str_alloc((unsigned int)sb->cap); sb->len = 0;
     if (sb->buf) sb->buf[0] = '\0';
 }
 static void _wi_sb_append(_wi_strbuf *sb, const char *s) {
@@ -1150,7 +1151,7 @@ static void _wi_sb_append(_wi_strbuf *sb, const char *s) {
     if (sb->len + slen + 1 > sb->cap) {
         int new_cap = sb->cap;
         while (sb->len + slen + 1 > new_cap) new_cap *= 2;
-        char *nb = (char *)wasm_alloc((unsigned int)new_cap);
+        char *nb = (char *)_wasm_str_alloc((unsigned int)new_cap);
         if (!nb) return;
         for (int i = 0; i < sb->len; i++) nb[i] = sb->buf[i];
         sb->buf = nb; sb->cap = new_cap;
@@ -1498,7 +1499,7 @@ int64_t taida_utf8_decode_mold(int64_t value) {
     if (!_wi_is_bytes(value)) return taida_lax_empty(taida_str_alloc(0));
     int64_t *bytes = (int64_t *)(intptr_t)value;
     int64_t len = bytes[1];
-    unsigned char *raw = (unsigned char *)wasm_alloc((unsigned int)len);
+    unsigned char *raw = (unsigned char *)_wasm_str_alloc((unsigned int)len);
     for (int64_t i = 0; i < len; i++) raw[i] = (unsigned char)bytes[2 + i];
     int pos = 0;
     while (pos < (int)len) {
@@ -1509,7 +1510,7 @@ int64_t taida_utf8_decode_mold(int64_t value) {
         }
         pos += consumed;
     }
-    char *out = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *out = (char *)_wasm_str_alloc((unsigned int)(len + 1));
     for (int64_t i = 0; i < len; i++) out[i] = (char)raw[i];
     out[len] = '\0';
     return taida_lax_new((int64_t)(intptr_t)out, taida_str_alloc(0));
@@ -1847,7 +1848,7 @@ int64_t taida_debug_float_d28b009(int64_t val) {
 int64_t taida_float_to_str_d28b009(int64_t val) {
     double d = _wi_to_double(val);
     if (d != d) {
-        char *buf = (char *)wasm_alloc(4);
+        char *buf = (char *)_wasm_str_alloc(4);
         if (!buf) return 0;
         buf[0] = 'N'; buf[1] = 'a'; buf[2] = 'N'; buf[3] = '\0';
         return (int64_t)(intptr_t)buf;
@@ -2168,7 +2169,7 @@ static int64_t _wi_net_make_request(const char *raw, int32_t raw_len) {
     if (path_end == 0) path_end = i;
     query_end = i;
 
-    char *raw_copy = (char *)wasm_alloc((unsigned int)(raw_len + 1));
+    char *raw_copy = (char *)_wasm_str_alloc((unsigned int)(raw_len + 1));
     if (!raw_copy) return taida_pack_new(0);
 
     _wi_net_slice_copy(raw_copy, raw, 0, raw_len);
@@ -2389,7 +2390,7 @@ int64_t taida_crypto_hex_decode(int64_t value) {
         return taida_lax_empty(taida_bytes_default_value());
     }
     int32_t out_len = slen / 2;
-    unsigned char *buf = (unsigned char *)wasm_alloc((unsigned int)(out_len > 0 ? out_len : 1));
+    unsigned char *buf = (unsigned char *)_wasm_str_alloc((unsigned int)(out_len > 0 ? out_len : 1));
     for (int32_t i = 0; i < out_len; i++) {
         unsigned char hi, lo;
         if (!wasi_hex_val((unsigned char)s[i*2], &hi) ||
@@ -2427,7 +2428,7 @@ int64_t taida_crypto_base64_decode(int64_t value) {
     }
     int32_t n_chunks = slen / 4;
     int32_t cap = n_chunks * 3;
-    unsigned char *buf = (unsigned char *)wasm_alloc((unsigned int)(cap > 0 ? cap : 1));
+    unsigned char *buf = (unsigned char *)_wasm_str_alloc((unsigned int)(cap > 0 ? cap : 1));
     int32_t oi = 0;
     for (int32_t c = 0; c < n_chunks; c++) {
         const unsigned char *q = (const unsigned char *)(s + c * 4);
@@ -2462,7 +2463,7 @@ int64_t taida_crypto_random_bytes(int64_t n_val) {
     if (n_val > TAIDA_WASI_CRYPTO_MAX) {
         return taida_throw(taida_make_error((int64_t)(intptr_t)"CryptoError", (int64_t)(intptr_t)"randomBytes: count exceeds 256 MiB limit"));
     }
-    unsigned char *buf = (unsigned char *)wasm_alloc((unsigned int)n_val);
+    unsigned char *buf = (unsigned char *)_wasm_str_alloc((unsigned int)n_val);
     /* random_get fills up to the requested length; loop to be safe across
        hosts that cap a single call. */
     int64_t got = 0;

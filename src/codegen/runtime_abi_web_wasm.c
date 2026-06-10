@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 extern void *wasm_alloc(unsigned int size);
+extern char *_wasm_str_alloc(unsigned int total); /* header-carrying */
 extern int32_t wasm_arena_enter(void);
 extern void wasm_arena_leave(int32_t saved);
 
@@ -111,7 +112,7 @@ static void abi_memcpy(void *dest, const void *src, int32_t n) {
 
 static char *abi_copy_bytes(const char *src, int32_t len) {
     if (len < 0) len = 0;
-    char *out = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *out = (char *)_wasm_str_alloc((unsigned int)(len + 1));
     if (!out) return (char *)"";
     if (src && len > 0) abi_memcpy(out, src, len);
     out[len] = '\0';
@@ -369,7 +370,7 @@ int64_t taida_abi_response_header(int64_t name_ptr, int64_t value_ptr, int64_t r
 int32_t taida_abi_web_alloc(int32_t len) {
     if (len < 0 || len > TAIDA_ABI_WEB_MAX_REQUEST_BYTES) return 0;
     int32_t arena_mark = wasm_arena_enter();
-    char *buf = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *buf = (char *)_wasm_str_alloc((unsigned int)(len + 1));
     if (!buf) {
         wasm_arena_leave(arena_mark);
         return 0;
@@ -552,7 +553,7 @@ static void abi_json_append_utf8(char *out, int32_t *out_len, int cp) {
 static char *abi_json_parse_string(const char *json, int32_t len, int32_t *p) {
     if (*p >= len || json[*p] != '"') return (char *)0;
     (*p)++;
-    char *out = (char *)wasm_alloc((unsigned int)(len - *p + 1));
+    char *out = (char *)_wasm_str_alloc((unsigned int)(len - *p + 1));
     int32_t out_len = 0;
     while (*p < len) {
         char c = json[*p];
@@ -865,7 +866,7 @@ static char *abi_base64_decode(const char *src, int32_t *out_len) {
         if (out_len) *out_len = 0;
         return abi_copy_cstr("");
     }
-    char *out = (char *)wasm_alloc((unsigned int)((len / 4) * 3 + 4));
+    char *out = (char *)_wasm_str_alloc((unsigned int)((len / 4) * 3 + 4));
     if (!out) {
         if (out_len) *out_len = 0;
         return abi_copy_cstr("");
@@ -935,7 +936,7 @@ int64_t taida_abi_web_make_request(int32_t ptr, int32_t len) {
 static void abi_jb_init(TaidaAbiJsonBuilder *jb, int32_t cap) {
     jb->cap = cap < 64 ? 64 : cap;
     jb->len = 0;
-    jb->buf = (char *)wasm_alloc((unsigned int)jb->cap);
+    jb->buf = (char *)_wasm_str_alloc((unsigned int)jb->cap);
     jb->buf[0] = '\0';
 }
 
@@ -943,7 +944,7 @@ static void abi_jb_reserve(TaidaAbiJsonBuilder *jb, int32_t extra) {
     if (jb->len + extra + 1 <= jb->cap) return;
     int32_t new_cap = jb->cap * 2;
     while (jb->len + extra + 1 > new_cap) new_cap *= 2;
-    char *next = (char *)wasm_alloc((unsigned int)new_cap);
+    char *next = (char *)_wasm_str_alloc((unsigned int)new_cap);
     abi_memcpy(next, jb->buf, jb->len);
     next[jb->len] = '\0';
     jb->buf = next;

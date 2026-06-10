@@ -160,30 +160,22 @@ static uint64_t _wc_fnv1a(const char *s, int len) {
 
 /* ── Type detection helpers for JSON serializer ── */
 
+/* Delegate to the 01_core positive detectors (same pattern as
+   _wc_is_hashmap/_wc_is_set below): the old local copies kept the
+   pre-magic structural heuristics — a bare `cap/len` shape test for
+   lists and a printable-byte test that accepted ANY pointer to a NUL
+   byte as a string — long after every container and string carried a
+   magic. An untagged Int whose value lands in the data segment could
+   round-trip JSON as the wrong type through these. */
+static int _looks_like_list(int64_t ptr);
+static int _looks_like_string(int64_t val);
+
 static int _wc_looks_like_list(int64_t ptr) {
-    if (ptr == 0) return 0;
-    if (ptr < 0 || ptr > 0xFFFFFFFF) return 0;
-    int64_t *data = (int64_t *)(intptr_t)ptr;
-    int64_t cap = data[0];
-    int64_t len = data[1];
-    if (cap >= 8 && cap <= 65536 && len >= 0 && len <= cap) return 1;
-    return 0;
+    return _looks_like_list(ptr);
 }
 
 static int _wc_looks_like_string(int64_t val) {
-    if (val == 0) return 0;
-    if (val < 0 || val > 0xFFFFFFFF) return 0;
-    unsigned int pages = __builtin_wasm_memory_size(0);
-    unsigned int mem_size = pages * 65536;
-    unsigned int addr = (unsigned int)val;
-    if (addr >= mem_size) return 0;
-    const char *s = (const char *)(intptr_t)val;
-    if (s[0] == '\0') return 1;
-    for (int i = 0; i < 8 && s[i]; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') return 0;
-    }
-    return 1;
+    return _looks_like_string(val);
 }
 
 /* C23B-005 / C23B-006 (2026-04-22): these detectors delegate to the
@@ -606,7 +598,7 @@ static int64_t _wc_json_apply_web_request(wc_json_val *jval) {
         body && body->type == WC_JSON_STRING
             ? _wc_json_bytes_from_base64_string(body->str_val)
             : _wc_json_bytes_from_raw((const unsigned char *)"", 0));
-    taida_pack_set(pack, 6, (int64_t)(intptr_t)"WebRequest");
+    taida_pack_set(pack, 6, WSTR("WebRequest"));
     return pack;
 }
 
@@ -627,7 +619,7 @@ static int64_t _wc_json_apply_web_response(wc_json_val *jval) {
         body && body->type == WC_JSON_STRING
             ? _wc_json_bytes_from_base64_string(body->str_val)
             : _wc_json_bytes_from_raw((const unsigned char *)"", 0));
-    taida_pack_set(pack, 3, (int64_t)(intptr_t)"WebResponse");
+    taida_pack_set(pack, 3, WSTR("WebResponse"));
     return pack;
 }
 
@@ -902,14 +894,14 @@ int64_t taida_json_schema_cast(int64_t raw_ptr, int64_t schema_ptr) {
 
     if (!raw || !schema) {
         int64_t def = _wc_json_default_value_for_desc(schema);
-        return taida_lax_empty_error(def, taida_make_error_with_kind((int64_t)(intptr_t)"JsonError", (int64_t)(intptr_t)"JSON parse error: missing raw value or schema", (int64_t)(intptr_t)"parse"));
+        return taida_lax_empty_error(def, taida_make_error_with_kind(WSTR("JsonError"), WSTR("JSON parse error: missing raw value or schema"), WSTR("parse")));
     }
 
     const char *p = raw;
     _wc_json_skip_ws(&p);
     if (!*p) {
         int64_t def = _wc_json_default_value_for_desc(schema);
-        return taida_lax_empty_error(def, taida_make_error_with_kind((int64_t)(intptr_t)"JsonError", (int64_t)(intptr_t)"JSON parse error: empty input", (int64_t)(intptr_t)"parse"));
+        return taida_lax_empty_error(def, taida_make_error_with_kind(WSTR("JsonError"), WSTR("JSON parse error: empty input"), WSTR("parse")));
     }
 
     const char *before_parse = p;
@@ -917,13 +909,13 @@ int64_t taida_json_schema_cast(int64_t raw_ptr, int64_t schema_ptr) {
 
     if (p == before_parse) {
         int64_t def = _wc_json_default_value_for_desc(schema);
-        return taida_lax_empty_error(def, taida_make_error_with_kind((int64_t)(intptr_t)"JsonError", (int64_t)(intptr_t)"JSON parse error: invalid input", (int64_t)(intptr_t)"parse"));
+        return taida_lax_empty_error(def, taida_make_error_with_kind(WSTR("JsonError"), WSTR("JSON parse error: invalid input"), WSTR("parse")));
     }
 
     _wc_json_skip_ws(&p);
     if (*p != '\0') {
         int64_t def = _wc_json_default_value_for_desc(schema);
-        return taida_lax_empty_error(def, taida_make_error_with_kind((int64_t)(intptr_t)"JsonError", (int64_t)(intptr_t)"JSON parse error: trailing input", (int64_t)(intptr_t)"parse"));
+        return taida_lax_empty_error(def, taida_make_error_with_kind(WSTR("JsonError"), WSTR("JSON parse error: trailing input"), WSTR("parse")));
     }
 
     const char *desc = schema;
@@ -935,7 +927,7 @@ int64_t taida_json_schema_cast(int64_t raw_ptr, int64_t schema_ptr) {
         const char *message = _wc_json_schema_error_message
             ? _wc_json_schema_error_message
             : "JSON schema decode failed";
-        return taida_lax_empty_error(def, taida_make_error_with_kind((int64_t)(intptr_t)"JsonError", (int64_t)(intptr_t)message, (int64_t)(intptr_t)"schema"));
+        return taida_lax_empty_error(def, taida_make_error_with_kind(WSTR("JsonError"), (int64_t)(intptr_t)message, WSTR("schema")));
     }
     return taida_lax_new(result, def);
 }
@@ -1258,7 +1250,7 @@ static void _wc_json_serialize_pack_fields(_wc_json_buf *jb, int64_t *pack, int6
                override was derived from the `__value` slot's shape. */
             ftype = lax_default_force_type;
             if (ftype == 3 && field_val == 0) {
-                field_val = (int64_t)(intptr_t)"";
+                field_val = WSTR("");
             }
         }
         fields[nfields].name = fname;
@@ -1736,8 +1728,8 @@ int64_t taida_async_unmold(int64_t async_ptr) {
         int64_t error = obj[3];
         if (taida_can_throw_payload(error)) return taida_throw(error);
         int64_t err = taida_make_error(
-            (int64_t)(intptr_t)"AsyncError",
-            (int64_t)(intptr_t)"Async rejected");
+            WSTR("AsyncError"),
+            WSTR("Async rejected"));
         return taida_throw(err);
     }
     if (status == 0 && obj[3] != 0) {
@@ -1804,8 +1796,8 @@ int64_t taida_async_all(int64_t list_ptr) {
                 int64_t error = aobj[3];
                 if (taida_can_throw_payload(error)) return taida_throw(error);
                 int64_t err = taida_make_error(
-                    (int64_t)(intptr_t)"AsyncError",
-                    (int64_t)(intptr_t)"All: async rejected");
+                    WSTR("AsyncError"),
+                    WSTR("All: async rejected"));
                 return taida_throw(err);
             }
             value = aobj[2];
@@ -1824,8 +1816,8 @@ int64_t taida_async_race(int64_t list_ptr) {
     int64_t len = list[1];  /* list[1] = length */
     if (len == 0) {
         return taida_async_err(taida_make_error(
-            (int64_t)(intptr_t)"AsyncRaceError",
-            (int64_t)(intptr_t)"Race requires at least one value"));
+            WSTR("AsyncRaceError"),
+            WSTR("Race requires at least one value")));
     }
     int64_t first = list[WASM_LIST_ELEMS];
     if (_wasm_is_async_obj(first)) {
@@ -1835,8 +1827,8 @@ int64_t taida_async_race(int64_t list_ptr) {
             int64_t error = aobj[3];
             if (taida_can_throw_payload(error)) return taida_throw(error);
             int64_t err = taida_make_error(
-                (int64_t)(intptr_t)"AsyncError",
-                (int64_t)(intptr_t)"Race: async rejected");
+                WSTR("AsyncError"),
+                WSTR("Race: async rejected"));
             return taida_throw(err);
         }
         return taida_async_ok_tagged(aobj[2], aobj[5]);
@@ -1853,14 +1845,14 @@ static int64_t _wasm_async_task_error_from_caught(int64_t fallback_msg) {
             if (caught_message) message = caught_message;
         }
     }
-    return taida_make_error((int64_t)(intptr_t)"AsyncTaskError", message);
+    return taida_make_error(WSTR("AsyncTaskError"), message);
 }
 
 int64_t taida_async_task_par(int64_t list_ptr) {
     if (!_looks_like_list(list_ptr)) {
         return taida_async_err(taida_make_error(
-            (int64_t)(intptr_t)"AsyncTaskError",
-            (int64_t)(intptr_t)"Par expected a list of AsyncTask values"));
+            WSTR("AsyncTaskError"),
+            WSTR("Par expected a list of AsyncTask values")));
     }
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
@@ -1869,7 +1861,7 @@ int64_t taida_async_task_par(int64_t list_ptr) {
         int64_t task = _wasm_async_task_callable(list[WASM_LIST_ELEMS + i]);
         int64_t value = _wasm_invoke_callback0(task);
         if (__wasm_error_thrown) {
-            int64_t error = _wasm_async_task_error_from_caught((int64_t)(intptr_t)"AsyncTask failed");
+            int64_t error = _wasm_async_task_error_from_caught(WSTR("AsyncTask failed"));
             __wasm_error_thrown = 0;
             return taida_async_err(error);
         }
@@ -1881,8 +1873,8 @@ int64_t taida_async_task_par(int64_t list_ptr) {
 int64_t taida_async_task_par_map(int64_t list_ptr, int64_t fn_ptr) {
     if (!_looks_like_list(list_ptr)) {
         return taida_async_err(taida_make_error(
-            (int64_t)(intptr_t)"AsyncTaskError",
-            (int64_t)(intptr_t)"ParMap expected a list and a function"));
+            WSTR("AsyncTaskError"),
+            WSTR("ParMap expected a list and a function")));
     }
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
@@ -1890,7 +1882,7 @@ int64_t taida_async_task_par_map(int64_t list_ptr, int64_t fn_ptr) {
     for (int64_t i = 0; i < len; i++) {
         int64_t value = _wasm_invoke_callback1(fn_ptr, list[WASM_LIST_ELEMS + i]);
         if (__wasm_error_thrown) {
-            int64_t error = _wasm_async_task_error_from_caught((int64_t)(intptr_t)"ParMap task failed");
+            int64_t error = _wasm_async_task_error_from_caught(WSTR("ParMap task failed"));
             __wasm_error_thrown = 0;
             return taida_async_err(error);
         }

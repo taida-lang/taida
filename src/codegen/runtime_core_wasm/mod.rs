@@ -169,7 +169,18 @@ mod tests {
         //   generated C can expand taida_get/set_return_tag into a
         //   direct slot swap (one runtime call per user-function call
         //   otherwise), with a rationale comment. -> 466,785.
-        const EXPECTED_TOTAL_LEN: usize = 466_785;
+        // 2026-06-10 positive-only identification: _looks_like_string
+        //   loses its printable-byte fallback (magic word required —
+        //   every string in the value space carries one now), the WSTR
+        //   macro wraps all 153 runtime literals entering the value
+        //   space in header-carrying statics, the _looks_like_pack
+        //   field-count cap is lifted (the tail sentinel is the proof),
+        //   and the JSON detectors (_wc_looks_like_*) delegate to the
+        //   positive 01_core implementations instead of their pre-magic
+        //   structural heuristics. _wasm_str_alloc goes non-static for
+        //   the profile runtimes. -> 464,735 (the removed fallback and
+        //   delegated duplicates outweigh the macro).
+        const EXPECTED_TOTAL_LEN: usize = 464_735;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

@@ -17,6 +17,7 @@
 #include <stdint.h>
 
 extern void *wasm_alloc(unsigned int size);
+extern char *_wasm_str_alloc(unsigned int total); /* header-carrying */
 
 static int32_t edge_strlen(const char *s) {
     int32_t n = 0;
@@ -54,7 +55,7 @@ int64_t taida_os_env_var(int64_t name_ptr) {
 
     int32_t key_len = edge_strlen(key);
     int32_t buf_cap = 256;
-    char *buf = (char *)wasm_alloc(buf_cap);
+    char *buf = (char *)_wasm_str_alloc(buf_cap);
     int32_t actual = taida_host_env_get(
         (int32_t)(intptr_t)key, key_len,
         (int32_t)(intptr_t)buf, buf_cap
@@ -66,7 +67,7 @@ int64_t taida_os_env_var(int64_t name_ptr) {
 
     if (actual > buf_cap) {
         buf_cap = actual;
-        buf = (char *)wasm_alloc(buf_cap + 1);
+        buf = (char *)_wasm_str_alloc(buf_cap + 1);
         actual = taida_host_env_get(
             (int32_t)(intptr_t)key, key_len,
             (int32_t)(intptr_t)buf, buf_cap
@@ -82,7 +83,7 @@ int64_t taida_os_all_env(void) {
     taida_hashmap_set_value_tag(hm, TAG_STR);
 
     int32_t buf_cap = 4096;
-    char *buf = (char *)wasm_alloc(buf_cap);
+    char *buf = (char *)_wasm_str_alloc(buf_cap);
     int32_t actual = taida_host_env_get_all(
         (int32_t)(intptr_t)buf, buf_cap
     );
@@ -93,7 +94,7 @@ int64_t taida_os_all_env(void) {
 
     if (actual > buf_cap) {
         buf_cap = actual;
-        buf = (char *)wasm_alloc(buf_cap + 1);
+        buf = (char *)_wasm_str_alloc(buf_cap + 1);
         actual = taida_host_env_get_all(
             (int32_t)(intptr_t)buf, buf_cap
         );
@@ -111,12 +112,12 @@ int64_t taida_os_all_env(void) {
 
         if (eq_pos < pos) {
             int32_t key_len = eq_pos - entry_start;
-            char *key = (char *)wasm_alloc(key_len + 1);
+            char *key = (char *)_wasm_str_alloc(key_len + 1);
             edge_memcpy(key, buf + entry_start, key_len);
             key[key_len] = '\0';
 
             int32_t val_len = pos - (eq_pos + 1);
-            char *val = (char *)wasm_alloc(val_len + 1);
+            char *val = (char *)_wasm_str_alloc(val_len + 1);
             edge_memcpy(val, buf + eq_pos + 1, val_len);
             val[val_len] = '\0';
 

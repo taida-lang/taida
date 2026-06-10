@@ -8,22 +8,22 @@ void taida_str_retain(int64_t val) { (void)val; }
 
 int64_t taida_typeof(int64_t val, int64_t tag) {
     if (val != 0 && val >= WASM_MIN_HEAP_ADDR) {
-        if (_is_wasm_hashmap(val)) return (int64_t)(intptr_t)"HashMap";
-        if (_is_wasm_set(val)) return (int64_t)(intptr_t)"Set";
-        if (_wasm_is_result(val)) return (int64_t)(intptr_t)"Result";
-        if (_wasm_is_lax(val)) return (int64_t)(intptr_t)"Lax";
-        if (_looks_like_pack(val)) return (int64_t)(intptr_t)"BuchiPack";
-        if (_looks_like_list(val)) return (int64_t)(intptr_t)"List";
-        if (_looks_like_string(val)) return (int64_t)(intptr_t)"Str";
+        if (_is_wasm_hashmap(val)) return WSTR("HashMap");
+        if (_is_wasm_set(val)) return WSTR("Set");
+        if (_wasm_is_result(val)) return WSTR("Result");
+        if (_wasm_is_lax(val)) return WSTR("Lax");
+        if (_looks_like_pack(val)) return WSTR("BuchiPack");
+        if (_looks_like_list(val)) return WSTR("List");
+        if (_looks_like_string(val)) return WSTR("Str");
     }
     switch (tag) {
-        case 1: return (int64_t)(intptr_t)"Float";
-        case 2: return (int64_t)(intptr_t)"Bool";
-        case 3: return (int64_t)(intptr_t)"Str";
-        case 4: return (int64_t)(intptr_t)"BuchiPack";
-        case 5: return (int64_t)(intptr_t)"List";
-        case 6: return (int64_t)(intptr_t)"Closure";
-        default: return (int64_t)(intptr_t)"Int";
+        case 1: return WSTR("Float");
+        case 2: return WSTR("Bool");
+        case 3: return WSTR("Str");
+        case 4: return WSTR("BuchiPack");
+        case 5: return WSTR("List");
+        case 6: return WSTR("Closure");
+        default: return WSTR("Int");
     }
 }
 
@@ -35,7 +35,7 @@ int64_t taida_type_name(int64_t val, int64_t tag) {
         }
         /* Plain packs intentionally have no class-like identity. If a future
            pack metadata field becomes public identity, add it before this return. */
-        return (int64_t)(intptr_t)"";
+        return WSTR("");
     }
     return taida_typeof(val, tag);
 }
@@ -1311,10 +1311,10 @@ int64_t taida_list_drop(int64_t list_ptr, int64_t n) {
    (registers inside the helper body rather than at startup because
    the field names are only meaningful on the zip / enumerate path). */
 static void _wasm_register_zip_enumerate_field_names(void) {
-    taida_register_field_name((int64_t)WASM_HASH_FIRST,  (int64_t)(intptr_t)"first");
-    taida_register_field_name((int64_t)WASM_HASH_SECOND, (int64_t)(intptr_t)"second");
-    taida_register_field_name((int64_t)WASM_HASH_INDEX,  (int64_t)(intptr_t)"index");
-    taida_register_field_name((int64_t)WASM_HASH_VALUE2, (int64_t)(intptr_t)"value");
+    taida_register_field_name((int64_t)WASM_HASH_FIRST,  WSTR("first"));
+    taida_register_field_name((int64_t)WASM_HASH_SECOND, WSTR("second"));
+    taida_register_field_name((int64_t)WASM_HASH_INDEX,  WSTR("index"));
+    taida_register_field_name((int64_t)WASM_HASH_VALUE2, WSTR("value"));
 }
 
 int64_t taida_list_enumerate(int64_t list_ptr) {

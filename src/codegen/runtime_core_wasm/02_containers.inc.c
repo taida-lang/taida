@@ -223,11 +223,11 @@ static void _wasm_register_builtin_error_field_names(void) {
     if (registered) return;
     registered = 1;
 
-    taida_register_field_name(WASM_HASH_TYPE, (int64_t)(intptr_t)"type");
-    taida_register_field_name(WASM_HASH_MESSAGE, (int64_t)(intptr_t)"message");
-    taida_register_field_name(WASM_HASH_FIELD, (int64_t)(intptr_t)"field");
-    taida_register_field_name(WASM_HASH_CODE, (int64_t)(intptr_t)"code");
-    taida_register_field_name(WASM_HASH_KIND, (int64_t)(intptr_t)"kind");
+    taida_register_field_name(WASM_HASH_TYPE, WSTR("type"));
+    taida_register_field_name(WASM_HASH_MESSAGE, WSTR("message"));
+    taida_register_field_name(WASM_HASH_FIELD, WSTR("field"));
+    taida_register_field_name(WASM_HASH_CODE, WSTR("code"));
+    taida_register_field_name(WASM_HASH_KIND, WSTR("kind"));
 }
 
 int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr) {
@@ -283,10 +283,10 @@ static int _wasm_lax_names_registered = 0;
 static void _wasm_register_lax_field_names(void) {
     if (_wasm_lax_names_registered) return;
     _wasm_lax_names_registered = 1;
-    taida_register_field_name(WASM_HASH_HAS_VALUE, (int64_t)(intptr_t)"has_value");
-    taida_register_field_name(WASM_HASH___VALUE,   (int64_t)(intptr_t)"__value");
-    taida_register_field_name(WASM_HASH___DEFAULT, (int64_t)(intptr_t)"__default");
-    taida_register_field_name(WASM_HASH___TYPE,    (int64_t)(intptr_t)"__type");
+    taida_register_field_name(WASM_HASH_HAS_VALUE, WSTR("has_value"));
+    taida_register_field_name(WASM_HASH___VALUE,   WSTR("__value"));
+    taida_register_field_name(WASM_HASH___DEFAULT, WSTR("__default"));
+    taida_register_field_name(WASM_HASH___TYPE,    WSTR("__type"));
 }
 
 int64_t taida_lax_new(int64_t value, int64_t default_value) {
@@ -300,7 +300,7 @@ int64_t taida_lax_new(int64_t value, int64_t default_value) {
     taida_pack_set_hash(pack, 2, WASM_HASH___DEFAULT);
     taida_pack_set(pack, 2, default_value);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
-    taida_pack_set(pack, 3, (int64_t)(intptr_t)"Lax");
+    taida_pack_set(pack, 3, WSTR("Lax"));
     /* Tag the __type slot as STR so `_wasm_pack_to_string_full` quotes it
        correctly (matches interpreter's `__type <= "Lax"`). */
     taida_pack_set_tag(pack, 3, WASM_TAG_STR);
@@ -318,7 +318,7 @@ int64_t taida_lax_empty(int64_t default_value) {
     taida_pack_set_hash(pack, 2, WASM_HASH___DEFAULT);
     taida_pack_set(pack, 2, default_value);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
-    taida_pack_set(pack, 3, (int64_t)(intptr_t)"Lax");
+    taida_pack_set(pack, 3, WSTR("Lax"));
     taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
 }
@@ -334,7 +334,7 @@ int64_t taida_lax_empty_error(int64_t default_value, int64_t error) {
     taida_pack_set_hash(pack, 2, WASM_HASH___DEFAULT);
     taida_pack_set(pack, 2, default_value);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
-    taida_pack_set(pack, 3, (int64_t)(intptr_t)"Lax");
+    taida_pack_set(pack, 3, WSTR("Lax"));
     taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     taida_pack_set_hash(pack, 4, WASM_HASH___ERROR);
     taida_pack_set(pack, 4, error);
@@ -381,16 +381,16 @@ static int64_t _wasm_error_info_pack(int64_t type_name, int64_t message, int64_t
     taida_pack_set(pack, 3, code);
     taida_pack_set_tag(pack, 3, WASM_TAG_INT);
     taida_pack_set_hash(pack, 4, WASM_HASH___TYPE);
-    taida_pack_set(pack, 4, (int64_t)(intptr_t)"ErrorInfo");
+    taida_pack_set(pack, 4, WSTR("ErrorInfo"));
     taida_pack_set_tag(pack, 4, WASM_TAG_STR);
     return pack;
 }
 
 static int64_t _wasm_error_info_default(void) {
     return _wasm_error_info_pack(
-        (int64_t)(intptr_t)"",
-        (int64_t)(intptr_t)"",
-        (int64_t)(intptr_t)"",
+        WSTR(""),
+        WSTR(""),
+        WSTR(""),
         0
     );
 }
@@ -410,8 +410,8 @@ static int _wasm_is_error_info_source_pack(int64_t ptr) {
 }
 
 static int64_t _wasm_error_info_from_error(int64_t error) {
-    int64_t type_name = (int64_t)(intptr_t)"Error";
-    int64_t message = (int64_t)(intptr_t)"";
+    int64_t type_name = WSTR("Error");
+    int64_t message = WSTR("");
     int64_t kind = 0;
     int64_t code = 0;
     if (_looks_like_pack(error)) {
@@ -497,10 +497,10 @@ static int _wasm_is_lax(int64_t val) {
    by `_wasm_register_lax_field_names`, but we re-register them here as
    a defence-in-depth so the Gorillax path is self-sufficient. */
 static void _wasm_register_gorillax_field_names(void) {
-    taida_register_field_name(WASM_HASH_HAS_VALUE, (int64_t)(intptr_t)"has_value");
-    taida_register_field_name(WASM_HASH___VALUE,   (int64_t)(intptr_t)"__value");
-    taida_register_field_name(WASM_HASH___ERROR,   (int64_t)(intptr_t)"__error");
-    taida_register_field_name(WASM_HASH___TYPE,    (int64_t)(intptr_t)"__type");
+    taida_register_field_name(WASM_HASH_HAS_VALUE, WSTR("has_value"));
+    taida_register_field_name(WASM_HASH___VALUE,   WSTR("__value"));
+    taida_register_field_name(WASM_HASH___ERROR,   WSTR("__error"));
+    taida_register_field_name(WASM_HASH___TYPE,    WSTR("__type"));
 }
 
 int64_t taida_gorillax_new(int64_t value) {
@@ -521,7 +521,7 @@ int64_t taida_gorillax_new(int64_t value) {
     taida_pack_set(pack, 2, taida_pack_new(0));
     taida_pack_set_tag(pack, 2, WASM_TAG_PACK);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
-    taida_pack_set(pack, 3, (int64_t)(intptr_t)"Gorillax");
+    taida_pack_set(pack, 3, WSTR("Gorillax"));
     taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
 }
@@ -538,7 +538,7 @@ int64_t taida_gorillax_err(int64_t error) {
     taida_pack_set(pack, 2, error);
     taida_pack_set_tag(pack, 2, WASM_TAG_PACK);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
-    taida_pack_set(pack, 3, (int64_t)(intptr_t)"Gorillax");
+    taida_pack_set(pack, 3, WSTR("Gorillax"));
     taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
 }
@@ -568,7 +568,7 @@ int64_t taida_gorillax_relax(int64_t gx) {
     taida_pack_set(pack, 2, taida_pack_get_idx(gx, 2));
     taida_pack_set_tag(pack, 2, WASM_TAG_PACK);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
-    taida_pack_set(pack, 3, (int64_t)(intptr_t)"RelaxedGorillax");
+    taida_pack_set(pack, 3, WSTR("RelaxedGorillax"));
     taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
 }
@@ -585,7 +585,7 @@ int64_t taida_relaxed_gorillax_new(int64_t value) {
     taida_pack_set(pack, 2, taida_pack_new(0));
     taida_pack_set_tag(pack, 2, WASM_TAG_PACK);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
-    taida_pack_set(pack, 3, (int64_t)(intptr_t)"RelaxedGorillax");
+    taida_pack_set(pack, 3, WSTR("RelaxedGorillax"));
     taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
 }
@@ -602,7 +602,7 @@ int64_t taida_relaxed_gorillax_err(int64_t error) {
     taida_pack_set(pack, 2, error);
     taida_pack_set_tag(pack, 2, WASM_TAG_PACK);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
-    taida_pack_set(pack, 3, (int64_t)(intptr_t)"RelaxedGorillax");
+    taida_pack_set(pack, 3, WSTR("RelaxedGorillax"));
     taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
 }
@@ -620,10 +620,10 @@ static int _wasm_result_names_registered = 0;
 static void _wasm_register_result_field_names(void) {
     if (_wasm_result_names_registered) return;
     _wasm_result_names_registered = 1;
-    taida_register_field_name(WASM_HASH___VALUE,     (int64_t)(intptr_t)"__value");
-    taida_register_field_name(WASM_HASH___PREDICATE, (int64_t)(intptr_t)"__predicate");
-    taida_register_field_name(WASM_HASH_THROW,       (int64_t)(intptr_t)"throw");
-    taida_register_field_name(WASM_HASH___TYPE,      (int64_t)(intptr_t)"__type");
+    taida_register_field_name(WASM_HASH___VALUE,     WSTR("__value"));
+    taida_register_field_name(WASM_HASH___PREDICATE, WSTR("__predicate"));
+    taida_register_field_name(WASM_HASH_THROW,       WSTR("throw"));
+    taida_register_field_name(WASM_HASH___TYPE,      WSTR("__type"));
 }
 
 int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate) {
@@ -638,7 +638,7 @@ int64_t taida_result_create(int64_t value, int64_t throw_val, int64_t predicate)
     taida_pack_set(pack, 2, throw_val);
     taida_pack_set_tag(pack, 2, WASM_TAG_PACK);
     taida_pack_set_hash(pack, 3, WASM_HASH___TYPE);
-    taida_pack_set(pack, 3, (int64_t)(intptr_t)"Result");
+    taida_pack_set(pack, 3, WSTR("Result"));
     taida_pack_set_tag(pack, 3, WASM_TAG_STR);
     return pack;
 }
@@ -673,8 +673,8 @@ static int _wasm_stream_names_registered = 0;
 static void _wasm_register_stream_field_names(void) {
     if (_wasm_stream_names_registered) return;
     _wasm_stream_names_registered = 1;
-    taida_register_field_name(WASM_HASH_STREAM_STATUS, (int64_t)(intptr_t)"__stream_status");
-    taida_register_field_name(WASM_HASH_STREAM_COUNT,  (int64_t)(intptr_t)"__stream_count");
+    taida_register_field_name(WASM_HASH_STREAM_STATUS, WSTR("__stream_status"));
+    taida_register_field_name(WASM_HASH_STREAM_COUNT,  WSTR("__stream_count"));
 }
 
 int64_t taida_stream_new(int64_t inner_value) {
@@ -682,13 +682,13 @@ int64_t taida_stream_new(int64_t inner_value) {
     _wasm_register_stream_field_names();
     int64_t pack = taida_pack_new(3);
     taida_pack_set_hash(pack, 0, WASM_HASH_STREAM_STATUS);
-    taida_pack_set(pack, 0, (int64_t)(intptr_t)"completed");
+    taida_pack_set(pack, 0, WSTR("completed"));
     taida_pack_set_tag(pack, 0, WASM_TAG_STR);
     taida_pack_set_hash(pack, 1, WASM_HASH_STREAM_COUNT);
     taida_pack_set(pack, 1, 1);
     taida_pack_set_tag(pack, 1, WASM_TAG_INT);
     taida_pack_set_hash(pack, 2, WASM_HASH___TYPE);
-    taida_pack_set(pack, 2, (int64_t)(intptr_t)"Stream");
+    taida_pack_set(pack, 2, WSTR("Stream"));
     taida_pack_set_tag(pack, 2, WASM_TAG_STR);
     return pack;
 }
@@ -803,7 +803,7 @@ int64_t taida_result_map_error(int64_t result, int64_t fn_ptr) {
         display = taida_polymorphic_to_string(mapped);
     }
     int64_t new_error = taida_make_error(
-        (int64_t)(intptr_t)"ResultError", display);
+        WSTR("ResultError"), display);
     return taida_result_create(0, new_error, 0);
 }
 
@@ -887,8 +887,8 @@ int64_t taida_result_get_or_throw(int64_t result) {
         return taida_throw(throw_val);
     }
     int64_t error = taida_make_error(
-        (int64_t)(intptr_t)"ResultError",
-        (int64_t)(intptr_t)"Result predicate failed");
+        WSTR("ResultError"),
+        WSTR("Result predicate failed"));
     return taida_throw(error);
 }
 
@@ -930,15 +930,15 @@ int64_t taida_relaxed_gorillax_unmold(int64_t ptr) {
         return taida_pack_get_idx(ptr, 1);
     }
     int64_t info = _wasm_error_info_from_error(taida_pack_get_idx(ptr, 2));
-    int64_t kind = (int64_t)(intptr_t)"RelaxedGorillaEscaped";
+    int64_t kind = WSTR("RelaxedGorillaEscaped");
     int64_t code = 0;
     if (_looks_like_pack(info)) {
         if (taida_pack_has_hash(info, WASM_HASH_KIND)) kind = taida_pack_get(info, WASM_HASH_KIND);
         if (taida_pack_has_hash(info, WASM_HASH_CODE)) code = taida_pack_get(info, WASM_HASH_CODE);
     }
     int64_t error = taida_make_error_with_kind_code(
-        (int64_t)(intptr_t)"RelaxedGorillaEscaped",
-        (int64_t)(intptr_t)"Relaxed gorilla escaped",
+        WSTR("RelaxedGorillaEscaped"),
+        WSTR("Relaxed gorilla escaped"),
         kind,
         code);
     return taida_throw(error);
@@ -985,8 +985,8 @@ int64_t taida_monadic_get_or_throw(int64_t obj) {
         int64_t throw_val = taida_pack_get(obj, WASM_HASH_THROW);
         if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
         int64_t error = taida_make_error(
-            (int64_t)(intptr_t)"ResultError",
-            (int64_t)(intptr_t)"Result predicate failed");
+            WSTR("ResultError"),
+            WSTR("Result predicate failed"));
         return taida_throw(error);
     }
     if (_wasm_is_lax(obj)) return taida_lax_unmold(obj);
@@ -1037,13 +1037,13 @@ static int64_t _wasm_invoke_callback0(int64_t fn_ptr) {
 }
 
 int64_t taida_async_task_new(int64_t fn_ptr) {
-    taida_register_field_name(WASM_HASH_TODO_TASK, (int64_t)(intptr_t)"task");
-    taida_register_field_name(WASM_HASH___TYPE, (int64_t)(intptr_t)"__type");
+    taida_register_field_name(WASM_HASH_TODO_TASK, WSTR("task"));
+    taida_register_field_name(WASM_HASH___TYPE, WSTR("__type"));
     int64_t pack = taida_pack_new(2);
     taida_pack_set_hash(pack, 0, WASM_HASH_TODO_TASK);
     taida_pack_set(pack, 0, fn_ptr);
     taida_pack_set_hash(pack, 1, WASM_HASH___TYPE);
-    taida_pack_set(pack, 1, (int64_t)(intptr_t)"AsyncTask");
+    taida_pack_set(pack, 1, WSTR("AsyncTask"));
     taida_pack_set_tag(pack, 1, WASM_TAG_STR);
     return pack;
 }
@@ -1053,7 +1053,7 @@ static int64_t _wasm_async_task_callable(int64_t task) {
         && taida_pack_has_hash(task, WASM_HASH_TODO_TASK)
         && taida_pack_has_hash(task, WASM_HASH___TYPE)) {
         int64_t type_name = taida_pack_get(task, WASM_HASH___TYPE);
-        if (taida_str_eq(type_name, (int64_t)(intptr_t)"AsyncTask")) {
+        if (taida_str_eq(type_name, WSTR("AsyncTask"))) {
             return taida_pack_get(task, WASM_HASH_TODO_TASK);
         }
     }
@@ -1077,7 +1077,7 @@ int64_t taida_error_type_check_or_rethrow(int64_t error_val, int64_t handler_typ
 int64_t taida_molten_new(void) {
     int64_t pack = taida_pack_new(1);
     taida_pack_set_hash(pack, 0, WASM_HASH___TYPE);
-    taida_pack_set(pack, 0, (int64_t)(intptr_t)"Molten");
+    taida_pack_set(pack, 0, WSTR("Molten"));
     return pack;
 }
 
@@ -1115,7 +1115,7 @@ int64_t taida_secret_new(int64_t value) {
 
 int64_t taida_redact(int64_t carrier) {
     (void)carrier;
-    return taida_str_new_copy((int64_t)(intptr_t)"***");
+    return taida_str_new_copy(WSTR("***"));
 }
 
 int64_t taida_stub_new(int64_t message) {
@@ -1140,7 +1140,7 @@ int64_t taida_todo_new(int64_t id, int64_t task, int64_t sol, int64_t unm) {
     taida_pack_set_hash(pack, 5, WASM_HASH___DEFAULT);
     taida_pack_set(pack, 5, unm);
     taida_pack_set_hash(pack, 6, WASM_HASH___TYPE);
-    taida_pack_set(pack, 6, (int64_t)(intptr_t)"TODO");
+    taida_pack_set(pack, 6, WSTR("TODO"));
     return pack;
 }
 
@@ -1169,7 +1169,7 @@ static inline int64_t _lax_tag_vd(int64_t lax, int64_t tag) {
 }
 
 int64_t taida_str_mold_int(int64_t v) {
-    return _lax_tag_vd(taida_lax_new(taida_int_to_str(v), (int64_t)(intptr_t)""), WASM_TAG_STR);
+    return _lax_tag_vd(taida_lax_new(taida_int_to_str(v), WSTR("")), WASM_TAG_STR);
 }
 
 /* C23-4: Rust-`f64::to_string`-compatible formatter for `Str[Float]()`.
@@ -1202,15 +1202,15 @@ static int64_t _taida_float_to_str_mold(int64_t val) {
 }
 
 int64_t taida_str_mold_float(int64_t v) {
-    return _lax_tag_vd(taida_lax_new(_taida_float_to_str_mold(v), (int64_t)(intptr_t)""), WASM_TAG_STR);
+    return _lax_tag_vd(taida_lax_new(_taida_float_to_str_mold(v), WSTR("")), WASM_TAG_STR);
 }
 
 int64_t taida_str_mold_bool(int64_t v) {
-    return _lax_tag_vd(taida_lax_new(taida_str_from_bool(v), (int64_t)(intptr_t)""), WASM_TAG_STR);
+    return _lax_tag_vd(taida_lax_new(taida_str_from_bool(v), WSTR("")), WASM_TAG_STR);
 }
 
 int64_t taida_str_mold_str(int64_t v) {
-    return _lax_tag_vd(taida_lax_new(v, (int64_t)(intptr_t)""), WASM_TAG_STR);
+    return _lax_tag_vd(taida_lax_new(v, WSTR("")), WASM_TAG_STR);
 }
 
 /* C23-2: generic Str[x]() entry for non-primitive values (List/Pack/Lax/
@@ -1222,7 +1222,7 @@ int64_t taida_str_mold_str(int64_t v) {
    `taida_str_mold_any`. */
 int64_t taida_str_mold_any(int64_t v) {
     int64_t str = _wasm_stdout_display_string(v);
-    return _lax_tag_vd(taida_lax_new(str, (int64_t)(intptr_t)""), WASM_TAG_STR);
+    return _lax_tag_vd(taida_lax_new(str, WSTR("")), WASM_TAG_STR);
 }
 
 int64_t taida_int_mold_int(int64_t v) {
@@ -2066,8 +2066,8 @@ int64_t taida_hmac_sha256_secret(int64_t secret_ptr, int64_t msg_val) {
        under `--no-check`; the checker [E1506] gates it normally. */
     if (!_wasm_carrier_kind(secret_ptr)) {
         return taida_throw(taida_make_error(
-            (int64_t)(intptr_t)"TypeError",
-            (int64_t)(intptr_t)"HmacSha256 expects a sealed Secret as its first argument — seal it with MoltenizeSecret[...] or read it via MoltenizeSecretFromEnv / MoltenizeSecretFromFile"));
+            WSTR("TypeError"),
+            WSTR("HmacSha256 expects a sealed Secret as its first argument — seal it with MoltenizeSecret[...] or read it via MoltenizeSecretFromEnv / MoltenizeSecretFromFile")));
     }
     int64_t inner = taida_pack_get_idx(secret_ptr, 1);
     return taida_crypto_hmac_sha256(inner, msg_val);
@@ -2076,8 +2076,8 @@ int64_t taida_hmac_sha256_secret(int64_t secret_ptr, int64_t msg_val) {
 int64_t taida_constant_time_eq_secret(int64_t secret_ptr, int64_t cand_val) {
     if (!_wasm_carrier_kind(secret_ptr)) { /* F56-FB-002: see taida_hmac_sha256_secret. */
         return taida_throw(taida_make_error(
-            (int64_t)(intptr_t)"TypeError",
-            (int64_t)(intptr_t)"ConstantTimeEq expects a sealed Secret as its first argument — seal it with MoltenizeSecret[...] or read it via MoltenizeSecretFromEnv / MoltenizeSecretFromFile"));
+            WSTR("TypeError"),
+            WSTR("ConstantTimeEq expects a sealed Secret as its first argument — seal it with MoltenizeSecret[...] or read it via MoltenizeSecretFromEnv / MoltenizeSecretFromFile")));
     }
     int64_t inner = taida_pack_get_idx(secret_ptr, 1);
     return taida_crypto_constant_time_equals(inner, cand_val);

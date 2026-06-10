@@ -27,6 +27,7 @@
 // Only functions actually called from this file are declared here.
 // ---------------------------------------------------------------------------
 extern void *wasm_alloc(unsigned int size);
+extern char *_wasm_str_alloc(unsigned int total); /* header-carrying */
 extern int64_t taida_lax_new(int64_t value, int64_t default_value);
 extern int64_t taida_lax_empty(int64_t default_value);
 extern int64_t taida_list_new(void);
@@ -200,7 +201,7 @@ static char *_wf_i64_to_str(int64_t val) {
         while (uval > 0) { tmp[len++] = '0' + (int)(uval % 10); uval /= 10; }
     }
     int total = neg + len;
-    char *buf = (char *)wasm_alloc((unsigned int)(total + 1));
+    char *buf = (char *)_wasm_str_alloc((unsigned int)(total + 1));
     int pos = 0;
     if (neg) buf[pos++] = '-';
     for (int i = len - 1; i >= 0; i--) buf[pos++] = tmp[i];
@@ -333,7 +334,7 @@ static int64_t _wf_gorillax_to_str(int64_t gx) {
         const char *vs = (const char *)(intptr_t)value_str;
         int vlen = _wf_strlen(vs);
         int need = prefix_len + vlen + 2;
-        char *buf = (char *)wasm_alloc((unsigned int)(need));
+        char *buf = (char *)_wasm_str_alloc((unsigned int)(need));
         _wf_memcpy(buf, prefix, prefix_len);
         _wf_memcpy(buf + prefix_len, vs, vlen);
         buf[prefix_len + vlen] = ')';
@@ -562,7 +563,7 @@ int64_t taida_bytes_to_list(int64_t bytes_ptr) {
 /* Minimal string buffer for Bytes display */
 typedef struct { char *buf; int len; int cap; } _wf_strbuf;
 static void _wf_sb_init(_wf_strbuf *sb) {
-    sb->cap = 256; sb->buf = (char *)wasm_alloc(sb->cap); sb->len = 0;
+    sb->cap = 256; sb->buf = (char *)_wasm_str_alloc(sb->cap); sb->len = 0;
     if (sb->buf) sb->buf[0] = '\0';
 }
 static void _wf_sb_append(_wf_strbuf *sb, const char *s) {
@@ -570,7 +571,7 @@ static void _wf_sb_append(_wf_strbuf *sb, const char *s) {
     if (sb->len + slen + 1 > sb->cap) {
         int new_cap = sb->cap;
         while (sb->len + slen + 1 > new_cap) new_cap *= 2;
-        char *nb = (char *)wasm_alloc((unsigned int)new_cap);
+        char *nb = (char *)_wasm_str_alloc((unsigned int)new_cap);
         if (!nb) return;
         for (int i = 0; i < sb->len; i++) nb[i] = sb->buf[i];
         sb->buf = nb; sb->cap = new_cap;
@@ -892,7 +893,7 @@ int64_t taida_utf8_decode_mold(int64_t value) {
     int64_t *bytes = (int64_t *)(intptr_t)value;
     int64_t len = bytes[1];
     // Extract raw bytes
-    unsigned char *raw = (unsigned char *)wasm_alloc((unsigned int)len);
+    unsigned char *raw = (unsigned char *)_wasm_str_alloc((unsigned int)len);
     for (int64_t i = 0; i < len; i++) raw[i] = (unsigned char)bytes[2 + i];
     // Validate UTF-8
     int pos = 0;
@@ -904,7 +905,7 @@ int64_t taida_utf8_decode_mold(int64_t value) {
         }
         pos += consumed;
     }
-    char *out = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *out = (char *)_wasm_str_alloc((unsigned int)(len + 1));
     for (int64_t i = 0; i < len; i++) out[i] = (char)raw[i];
     out[len] = '\0';
     return taida_lax_new((int64_t)(intptr_t)out, taida_str_alloc(0));
