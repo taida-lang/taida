@@ -186,7 +186,13 @@ mod tests {
         //   coincides with a live string's data address carries that
         //   string's real magic word, so detection cannot save it.
         //   Plus the int_to_str forward declaration. -> 466,038.
-        const EXPECTED_TOTAL_LEN: usize = 466_038;
+        // 2026-06-10 _wf_strstr complexity fix (01_core.inc.c): the
+        //   helper measured the whole remaining haystack on every call,
+        //   turning cursor-walking callers (Split / Replace) into
+        //   O(n^2) — a thousand-part split re-measured ~5MB of tail per
+        //   pipeline pass. Now terminator-driven. string_ops: 629ms ->
+        //   16ms. -> 466,389.
+        const EXPECTED_TOTAL_LEN: usize = 466_389;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

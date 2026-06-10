@@ -404,15 +404,21 @@ static int _wf_strcmp(const char *a, const char *b) {
 }
 
 /// Find first occurrence of needle in haystack, or NULL.
+/// Terminator-driven: no up-front strlen of the haystack. The previous
+/// version measured the whole remaining haystack on every call, which
+/// turned every scan-forward caller (Split / Replace walk a cursor
+/// through the string calling this per occurrence) into O(n^2) — a
+/// 10KB string split into a thousand parts re-measured ~5MB of tail
+/// per pipeline pass.
 static const char *_wf_strstr(const char *haystack, const char *needle) {
     if (!haystack || !needle) return (const char *)0;
-    int nlen = _wf_strlen(needle);
-    if (nlen == 0) return haystack;
-    int hlen = _wf_strlen(haystack);
-    if (nlen > hlen) return (const char *)0;
-    for (int i = 0; i <= hlen - nlen; i++) {
-        if (_wf_strncmp(haystack + i, needle, nlen) == 0)
-            return haystack + i;
+    if (!needle[0]) return haystack;
+    for (const char *h = haystack; *h; h++) {
+        if (*h != needle[0]) continue;
+        const char *a = h + 1;
+        const char *b = needle + 1;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (!*b) return h;
     }
     return (const char *)0;
 }
