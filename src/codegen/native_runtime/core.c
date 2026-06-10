@@ -8257,8 +8257,15 @@ taida_val taida_hashmap_to_string(taida_val hm_ptr) {
         if (HM_SLOT_OCCUPIED(sh, sk)) {
             taida_val value = hm[HM_HEADER + slot * 3 + 2];
 
+            // Kind-aware value rendering: a Float payload is invisible
+            // to the value heuristics (wasm's renderer already reads the
+            // uniform value tag; this is the native twin). Keys have no
+            // tag slot in the header — they keep the heuristic path.
+            taida_val val_tag = hm[3];
             taida_val key_str_ptr = taida_value_to_debug_string(sk);
-            taida_val val_str_ptr = taida_value_to_debug_string(value);
+            taida_val val_str_ptr = (val_tag == TAIDA_TAG_FLOAT || val_tag == TAIDA_TAG_BOOL)
+                ? taida_elem_to_debug_string_kinded(value, TAIDA_EKIND((uint32_t)val_tag, 0))
+                : taida_value_to_debug_string(value);
             const char *key_str = (const char*)key_str_ptr;
             const char *val_str = (const char*)val_str_ptr;
             if (!key_str) key_str = "\"\"";
@@ -8749,16 +8756,24 @@ taida_val taida_set_to_string(taida_val set_ptr) {
     memcpy(buf, "Set({", 6); /* 5 chars + '\0' */
     size_t off = 5;
     for (taida_val i = 0; i < len; i++) {
-        char item_str[64];
-        int item_len = snprintf(item_str, sizeof(item_str), "%" PRId64 "", list[4 + i]);
-        size_t needed = (size_t)item_len + (i > 0 ? 2 : 0) + 10;
-        if (off + needed > buf_size) {
+        // Sets share the list layout (elem tag + kind array), so render
+        // each element through the same kind-aware path as lists — the
+        // raw PRId64 write printed Float bits and string pointers as
+        // giant integers.
+        taida_val item_str_ptr =
+            taida_elem_to_debug_string_kinded(list[4 + i], taida_elem_kind_at(list, i));
+        const char *item_str = (const char*)item_str_ptr;
+        if (!item_str) item_str = "0";
+        size_t item_len = strlen(item_str);
+        size_t needed = item_len + (i > 0 ? 2 : 0) + 10;
+        while (off + needed > buf_size) {
             buf_size *= 2;
             TAIDA_REALLOC(buf, buf_size, "set_to_string");
         }
         if (i > 0) { memcpy(buf + off, ", ", 2); off += 2; }
-        memcpy(buf + off, item_str, (size_t)item_len); off += (size_t)item_len;
+        memcpy(buf + off, item_str, item_len); off += item_len;
         buf[off] = '\0';
+        taida_str_release(item_str_ptr);
     }
     memcpy(buf + off, "})", 3); /* 2 chars + '\0' */
     taida_val result = (taida_val)taida_str_new_copy(buf);

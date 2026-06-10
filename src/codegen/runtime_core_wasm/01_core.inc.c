@@ -3671,6 +3671,9 @@ int64_t taida_hashmap_values(int64_t hm_ptr) {
     int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
     int64_t cap = hm[0];
     int64_t list = taida_list_new();
+    /* Propagate the value tag onto the result list (native NO-1 twin) —
+       without it a uniform-Float map's values displayed as raw bits. */
+    ((int64_t *)(intptr_t)list)[2] = hm[2];
     int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
     for (int64_t oi = 0; oi < next_ord; oi++) {
         int64_t slot = hm[WASM_HM_ORD_SLOT(cap, oi)];

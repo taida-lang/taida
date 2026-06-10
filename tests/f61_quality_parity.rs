@@ -193,3 +193,39 @@ stdout(jsonEncode(nested))
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// HashMap/Set displays render uniform Float values as numbers on the
+/// compiled backends (native printed raw f64 bits in toString and Set,
+/// wasm lost the tag in values()). The interpreter currently prints
+/// its internal pack form for these containers — a separate, known
+/// reference-side issue — so this pin asserts native/wasm agreement
+/// and the absence of bit-pattern leakage rather than interp parity.
+#[test]
+fn hashmap_set_display_renders_floats_on_compiled_backends() {
+    let dir = unique_temp_dir("f61_hm_set_display");
+    let td = dir.join("hm.td");
+    std::fs::write(
+        &td,
+        r#"m <= hashMap().set("a", 1.5).set("b", 2.5)
+stdout(m.values())
+stdout(m)
+s <= setOf(@[1.5, 2.5])
+stdout(s)
+stdout(s.toList())
+"#,
+    )
+    .expect("write fixture");
+    let native = build_and_run_native(&td, &dir, "hm");
+    assert!(
+        !native.contains("4609434218613702656"),
+        "native leaked f64 bits: {native}"
+    );
+    assert!(
+        native.contains("HashMap({\"a\": 1.5, \"b\": 2.5})") && native.contains("Set({1.5, 2.5})"),
+        "native display shape: {native}"
+    );
+    if let Some(wasm) = build_and_run_wasm(&td, &dir, "hm") {
+        assert_eq!(native, wasm, "native vs wasm display");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
