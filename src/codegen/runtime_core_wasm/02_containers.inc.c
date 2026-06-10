@@ -2446,31 +2446,36 @@ int64_t taida_regex_new(int64_t pattern_raw, int64_t flags_raw) {
 int64_t taida_str_slice(int64_t s_raw, int64_t start_raw, int64_t end_raw) {
     const char *s = (const char *)s_raw;
     if (!s) { return taida_str_alloc(0); }
-    int len = _wf_strlen(s);
-    int start = (int)start_raw;
-    int end = (int)end_raw;
-    /* Native normalizes negative end to len (e.g. end=-1 means "to end of string") */
-    if (end < 0) end = len;
+    int byte_len = _wf_strlen(s);
+    /* Indices are code points (mirrors native taida_str_slice). The
+       negative-end normalisation predates the omitted-end sentinel and
+       is kept as-is: the lowering emits -1 for an omitted end. */
+    int64_t start = start_raw;
+    int64_t end = end_raw;
+    if (end < 0) end = _wasm_utf8_count(s, byte_len);
     if (start < 0) start = 0;
-    if (end > len) end = len;
     if (start >= end) { return taida_str_alloc(0); }
-    int slen = end - start;
+    int b0 = _wasm_utf8_cp_to_byte(s, byte_len, start);
+    int b1 = _wasm_utf8_cp_to_byte(s, byte_len, end);
+    if (b0 >= b1) { return taida_str_alloc(0); }
+    int slen = b1 - b0;
     char *r = _wasm_str_alloc((unsigned int)(slen + 1));
-    _wf_memcpy(r, s + start, slen);
+    _wf_memcpy(r, s + b0, slen);
     r[slen] = '\0';
     return (int64_t)r;
 }
 
-/// CharAt[str, index]() -- extract single character at index
+/// CharAt[str, index]() -- extract single character (code point) at index
 int64_t taida_str_char_at(int64_t s_raw, int64_t idx_raw) {
     const char *s = (const char *)s_raw;
-    int idx = (int)idx_raw;
-    if (!s) { return taida_str_alloc(0); }
-    int len = _wf_strlen(s);
-    if (idx < 0 || idx >= len) { return taida_str_alloc(0); }
-    char *r = _wasm_str_alloc(2);
-    r[0] = s[idx];
-    r[1] = '\0';
+    if (!s || idx_raw < 0) { return taida_str_alloc(0); }
+    int byte_len = _wf_strlen(s);
+    int off = _wasm_utf8_cp_to_byte(s, byte_len, idx_raw);
+    if (off >= byte_len) { return taida_str_alloc(0); }
+    int cl = _wasm_utf8_cp_len_at(s, byte_len, off);
+    char *r = _wasm_str_alloc((unsigned int)(cl + 1));
+    _wf_memcpy(r, s + off, cl);
+    r[cl] = '\0';
     return (int64_t)r;
 }
 
@@ -2496,12 +2501,18 @@ int64_t taida_str_repeat(int64_t s_raw, int64_t n_raw) {
 int64_t taida_str_reverse(int64_t s_raw) {
     const char *s = (const char *)s_raw;
     if (!s) { return taida_str_alloc(0); }
-    int len = _wf_strlen(s);
-    char *r = _wasm_str_alloc((unsigned int)(len + 1));
-    for (int i = 0; i < len; i++) {
-        r[i] = s[len - 1 - i];
+    /* Reverse code points, not bytes (mirrors native). */
+    int byte_len = _wf_strlen(s);
+    char *r = _wasm_str_alloc((unsigned int)(byte_len + 1));
+    int w = byte_len;
+    int i = 0;
+    while (i < byte_len) {
+        int cl = _wasm_utf8_cp_len_at(s, byte_len, i);
+        w -= cl;
+        _wf_memcpy(r + w, s + i, cl);
+        i += cl;
     }
-    r[len] = '\0';
+    r[byte_len] = '\0';
     return (int64_t)r;
 }
 
@@ -2611,16 +2622,17 @@ int64_t taida_str_last_index_of(int64_t s_raw, int64_t sub_raw) {
     return -1;
 }
 
-/// str.get(index) -- get character at index as Lax[Str]
+/// str.get(index) -- get character (code point) at index as Lax[Str]
 int64_t taida_str_get(int64_t s_raw, int64_t idx_raw) {
     const char *s = (const char *)s_raw;
-    int idx = (int)idx_raw;
-    if (!s) return taida_lax_empty((int64_t)"");
-    int len = _wf_strlen(s);
-    if (idx < 0 || idx >= len) return taida_lax_empty((int64_t)"");
-    char *r = _wasm_str_alloc(2);
-    r[0] = s[idx];
-    r[1] = '\0';
+    if (!s || idx_raw < 0) return taida_lax_empty((int64_t)"");
+    int byte_len = _wf_strlen(s);
+    int off = _wasm_utf8_cp_to_byte(s, byte_len, idx_raw);
+    if (off >= byte_len) return taida_lax_empty((int64_t)"");
+    int cl = _wasm_utf8_cp_len_at(s, byte_len, off);
+    char *r = _wasm_str_alloc((unsigned int)(cl + 1));
+    _wf_memcpy(r, s + off, cl);
+    r[cl] = '\0';
     return taida_lax_new((int64_t)r, (int64_t)"");
 }
 

@@ -218,7 +218,15 @@ mod tests {
         // 2026-06-11 string-conversion parse parity
         //   (02_containers.inc.c): the manual float parser accepts
         //   nan / inf / infinity like the reference. 483,773 -> 484,806.
-        const EXPECTED_TOTAL_LEN: usize = 484_806;
+        // 2026-06-11 code-point string indexing (01_core /
+        //   02_containers): length / get / CharAt / Slice / Reverse
+        //   walk UTF-8 lead bytes — see the native twin.
+        //   484,806 -> 486,760.
+        // 2026-06-11 public-shape container display (01_core): the
+        //   synthetic full-form renderers are removed — every display
+        //   path routes HashMap / Set through `HashMap({...})` /
+        //   `Set({...})`. 486,760 -> 482,417.
+        const EXPECTED_TOTAL_LEN: usize = 482_417;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

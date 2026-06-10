@@ -1484,29 +1484,20 @@ function __taida_display_string(v) {
       if (status === 'rejected') return 'Async[rejected: ' + __taida_format(v.__error) + ']';
       return 'Async[pending]';
     }
-    // C23B-003 reopen — HashMap: interpreter represents HashMap as
-    // `BuchiPack(__entries <= @[@(key <= K, value <= V), ...], __type <= "HashMap")`
-    // (`src/interpreter/prelude.rs:618-621`). `Str[hm]()` therefore renders
-    // through `Value::BuchiPack.to_display_string()` = full-form pack.
-    // The JS runtime stores HashMap as a frozen object carrying method
-    // fields alongside `__entries`, so we must explicitly rebuild the
-    // synthetic pack shape instead of iterating the JS object's own keys
-    // (which would leak method source bodies as pack fields).
+    // HashMap / Set display the public `HashMap({...})` / `Set({...})`
+    // shape — the `__` carrier fields are compiler-internal and the
+    // reference renders the same shape from stdout, interpolation and
+    // `Str[...]()` alike.
     if (v.__type === 'HashMap') {
       const entries = Array.isArray(v.__entries) ? v.__entries : [];
-      const entryStrs = entries.map(e =>
-        '@(key <= ' + __taida_format(e.key)
-          + ', value <= ' + __taida_format(e.value) + ')'
+      const pairs = entries.map(e =>
+        __taida_format(e.key) + ': ' + __taida_format(e.value)
       );
-      return '@(__entries <= @[' + entryStrs.join(', ')
-        + '], __type <= "HashMap")';
+      return 'HashMap({' + pairs.join(', ') + '})';
     }
-    // C23B-003 reopen — Set: interpreter `BuchiPack(__items <= @[...], __type <= "Set")`
-    // (`src/interpreter/prelude.rs:644-647`).
     if (v.__type === 'Set') {
       const items = Array.isArray(v.__items) ? v.__items : [];
-      return '@(__items <= @[' + items.map(x => __taida_format(x)).join(', ')
-        + '], __type <= "Set")';
+      return 'Set({' + items.map(x => __taida_format(x)).join(', ') + '})';
     }
     // C23B-003 reopen — Stream: interpreter uses `Value::Stream` (not a
     // BuchiPack), so `to_display_string()` returns
@@ -2149,8 +2140,11 @@ function Slice(val, optsOrStart, maybeEnd) {
     if (__taida_isIntNumber(optsOrStart.end)) endOpt = optsOrStart.end;
   }
   if (typeof val === 'string') {
-    const end = (endOpt !== undefined) ? endOpt : val.length;
-    return val.slice(start, end);
+    // Code-point slicing (String.prototype.slice cuts UTF-16 units and
+    // can split a surrogate pair).
+    const chars = Array.from(val);
+    const end = (endOpt !== undefined) ? endOpt : chars.length;
+    return chars.slice(start, end).join('');
   }
   if (val instanceof Uint8Array) {
     const end = (endOpt !== undefined) ? endOpt : val.length;
@@ -2166,7 +2160,11 @@ function Slice(val, optsOrStart, maybeEnd) {
   }
   return '';
 }
-function CharAt(str, idx) { return typeof str === 'string' && idx >= 0 && idx < str.length ? Lax(str[idx]) : Lax(null, ''); }
+function CharAt(str, idx) {
+  if (typeof str !== 'string' || idx < 0) return Lax(null, '');
+  const chars = Array.from(str); // code points, not UTF-16 units
+  return idx < chars.length ? Lax(chars[idx]) : Lax(null, '');
+}
 function Repeat(str, n) {
   if (typeof str !== 'string') return '';
   n = __taida_nonnegative_count(n);
@@ -2230,7 +2228,8 @@ function StringRepeatJoin(str, n, sep) {
   }
 }
 function Reverse(val) {
-  if (typeof val === 'string') return val.split('').reverse().join('');
+  // Array.from iterates code points; split('') would tear surrogate pairs.
+  if (typeof val === 'string') return Array.from(val).reverse().join('');
   if (Array.isArray(val)) { const copy = [...val]; copy.reverse(); return Object.freeze(copy); }
   return val;
 }
@@ -3113,8 +3112,10 @@ if (!String.prototype.__taida_str_patched) {
   const __native_startsWith = String.prototype.startsWith;
   const __native_endsWith = String.prototype.endsWith;
   Object.defineProperty(String.prototype, '__taida_str_patched', { value: true, enumerable: false });
+  // Code points, not UTF-16 units — "a🎈b".length() is 3 on every
+  // backend (the reference iterates chars).
   Object.defineProperty(String.prototype, 'length_', {
-    value: function() { return this.length; }, enumerable: false
+    value: function() { return Array.from(this).length; }, enumerable: false
   });
   Object.defineProperty(String.prototype, 'contains', {
     value: function(v) { return this.includes(v); }, enumerable: false
@@ -3151,10 +3152,14 @@ if (!String.prototype.__taida_str_patched) {
       return Lax(Array.from(prefix).length);
     }, enumerable: false, configurable: true
   });
-  // get(index) — return Lax for string character access
+  // get(index) — return Lax for string character access. The index is
+  // a code point (an astral character is one element, not a surrogate
+  // pair).
   Object.defineProperty(String.prototype, 'get', {
     value: function(idx) {
-      if (idx >= 0 && idx < this.length) return Lax(this[idx]);
+      if (idx < 0) return Lax(null, '');
+      const chars = Array.from(this);
+      if (idx < chars.length) return Lax(chars[idx]);
       return Lax(null, '');
     }, enumerable: false
   });

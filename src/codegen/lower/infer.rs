@@ -207,19 +207,20 @@ impl Lowering {
                 self.expr_is_string_full(lhs) || self.expr_is_string_full(rhs)
             }
             // WF-2b: MoldInst string molds (Upper, Lower, etc.) return strings
-            // Note: CharAt returns Lax[Str], not raw Str (TF-15)
-            // Note: Reverse is polymorphic (Str or List), so NOT included here
+            // Note: CharAt AND `Str[x]()` return Lax[Str], not raw Str —
+            // classifying the Lax pack as a string makes stdout print the
+            // pack pointer as text (the magic header leaks as "KAPDIAT").
+            // Note: Reverse and Slice are polymorphic (Str or List/Bytes),
+            // so NOT included here.
             Expr::MoldInst(name, _, _, _) => {
                 crate::types::mold_specs::mold_return_tag(name)
                     == Some(crate::codegen::tag_prop::TAG_STR)
                     || matches!(
                         name.as_str(),
-                        "Str"
-                            | "Upper"
+                        "Upper"
                             | "Lower"
                             | "Trim"
                             | "Replace"
-                            | "Slice"
                             | "Repeat"
                             | "Pad"
                             | "Join"

@@ -4488,39 +4488,74 @@ taida_val taida_str_concat(const char* a, const char* b) {
     return (taida_val)buf;
 }
 
+// ── Unicode code-point string indexing ──────────────────
+// The string unit across every index-taking Str API is the Unicode
+// code point (the reference iterates chars). These helpers walk the
+// UTF-8 lead bytes; byte lengths come from the hidden header so
+// embedded NULs count as ordinary characters (E32B-082 parity).
+static size_t taida_str_byte_len_or_strlen(const char *s) {
+    size_t out_len = 0;
+    if (taida_str_byte_len(s, &out_len)) return out_len;
+    return strlen(s);
+}
+
+static taida_val taida_utf8_count(const char *s, size_t byte_len) {
+    taida_val n = 0;
+    for (size_t i = 0; i < byte_len; i++)
+        if (((unsigned char)s[i] & 0xC0) != 0x80) n++;
+    return n;
+}
+
+// Byte offset where code point `cp` starts; byte_len when past the end.
+static size_t taida_utf8_cp_to_byte(const char *s, size_t byte_len, taida_val cp) {
+    if (cp <= 0) return 0;
+    taida_val seen = 0;
+    for (size_t i = 0; i < byte_len; i++) {
+        if (((unsigned char)s[i] & 0xC0) != 0x80) {
+            if (seen == cp) return i;
+            seen++;
+        }
+    }
+    return byte_len;
+}
+
+// Byte length of the code point starting at s[i].
+static size_t taida_utf8_cp_len_at(const char *s, size_t byte_len, size_t i) {
+    size_t j = i + 1;
+    while (j < byte_len && (((unsigned char)s[j]) & 0xC0) == 0x80) j++;
+    return j - i;
+}
+
 taida_val taida_str_length(const char* s) {
     if (!s) return 0;
-    // E32B-082: prefer the heap-header byte length so embedded NUL bytes are
-    // counted (parity with interp/JS where `"X\x00Y".length() == 3`). Static
-    // strings emitted by the cranelift codegen now carry the same hidden
-    // header, so this short-circuits before strlen() truncates at the first
-    // NUL. The fall-through to strlen is preserved for raw C strings handed
-    // in from FFI / inline assembly callsites, where there is no header.
-    size_t out_len = 0;
-    if (taida_str_byte_len(s, &out_len)) {
-        return (taida_val)out_len;
-    }
-    return (taida_val)strlen(s);
+    // Code points, not bytes — `"héllo日本".length()` is 7 on every
+    // backend. The byte length still comes from the hidden header so
+    // embedded NULs are counted (E32B-082).
+    size_t byte_len = taida_str_byte_len_or_strlen(s);
+    return taida_utf8_count(s, byte_len);
 }
 
 taida_val taida_str_char_at(const char* s, taida_val idx) {
-    if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
-    taida_val len = (taida_val)strlen(s);
-    if (idx < 0 || idx >= len) { char *r = taida_str_alloc(0); return (taida_val)r; }
-    char *r = taida_str_alloc(1);
-    r[0] = s[idx];
+    if (!s || idx < 0) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    size_t byte_len = taida_str_byte_len_or_strlen(s);
+    size_t off = taida_utf8_cp_to_byte(s, byte_len, idx);
+    if (off >= byte_len) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    size_t cl = taida_utf8_cp_len_at(s, byte_len, off);
+    char *r = taida_str_alloc(cl);
+    memcpy(r, s + off, cl);
     return (taida_val)r;
 }
 
 taida_val taida_str_slice(const char* s, taida_val start, taida_val end) {
     if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
-    taida_val len = (taida_val)strlen(s);
+    size_t byte_len = taida_str_byte_len_or_strlen(s);
     if (start < 0) start = 0;
-    if (end > len) end = len;
-    if (start >= end) { char *r = taida_str_alloc(0); return (taida_val)r; }
-    taida_val slen = end - start;
+    size_t b0 = taida_utf8_cp_to_byte(s, byte_len, start);
+    size_t b1 = end < start ? b0 : taida_utf8_cp_to_byte(s, byte_len, end);
+    if (b0 >= b1) { char *r = taida_str_alloc(0); return (taida_val)r; }
+    size_t slen = b1 - b0;
     char *r = taida_str_alloc(slen);
-    memcpy(r, s + start, slen);
+    memcpy(r, s + b0, slen);
     return (taida_val)r;
 }
 
@@ -4601,7 +4636,12 @@ taida_val taida_slice_mold(taida_val value, taida_val start, taida_val end) {
         char *r = taida_str_alloc(0);
         return (taida_val)r;
     }
-    taida_val len = (taida_val)strlen(s);
+    // Indices are code points (taida_str_slice walks UTF-8 lead
+    // bytes); clamp in code-point space. The negative-end
+    // normalisation predates the omitted-end sentinel and is kept:
+    // the lowering emits -1 for an omitted end.
+    size_t byte_len = taida_str_byte_len_or_strlen(s);
+    taida_val len = taida_utf8_count(s, byte_len);
     taida_val cs = start;
     taida_val ce = end;
     if (cs < 0) cs = 0;
@@ -4669,11 +4709,14 @@ taida_val taida_str_ends_with(const char* s, const char* suffix) {
 }
 
 taida_val taida_str_get(const char* s, taida_val idx) {
-    if (!s) return taida_lax_empty(TAIDA_EMPTY_STR);
-    taida_val len = (taida_val)strlen(s);
-    if (idx < 0 || idx >= len) return taida_lax_empty(TAIDA_EMPTY_STR);
-    char *r = taida_str_alloc(1);
-    r[0] = s[idx];
+    if (!s || idx < 0) return taida_lax_empty(TAIDA_EMPTY_STR);
+    // Code-point indexing — see taida_str_char_at.
+    size_t byte_len = taida_str_byte_len_or_strlen(s);
+    size_t off = taida_utf8_cp_to_byte(s, byte_len, idx);
+    if (off >= byte_len) return taida_lax_empty(TAIDA_EMPTY_STR);
+    size_t cl = taida_utf8_cp_len_at(s, byte_len, off);
+    char *r = taida_str_alloc(cl);
+    memcpy(r, s + off, cl);
     return taida_lax_new((taida_val)r, TAIDA_EMPTY_STR);
 }
 
@@ -4957,10 +5000,17 @@ taida_val taida_str_repeat_join(const char* s, taida_val n, const char* sep) {
 
 taida_val taida_str_reverse(const char* s) {
     if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
-    taida_val len = (taida_val)strlen(s);
-    char *r = taida_str_alloc(len);
-    for (taida_val i = 0; i < len; i++) {
-        r[i] = s[len - 1 - i];
+    // Reverse code points, not bytes — a byte reversal shreds every
+    // multibyte UTF-8 sequence.
+    size_t byte_len = taida_str_byte_len_or_strlen(s);
+    char *r = taida_str_alloc(byte_len);
+    size_t w = byte_len;
+    size_t i = 0;
+    while (i < byte_len) {
+        size_t cl = taida_utf8_cp_len_at(s, byte_len, i);
+        w -= cl;
+        memcpy(r + w, s + i, cl);
+        i += cl;
     }
     return (taida_val)r;
 }
@@ -8892,13 +8942,15 @@ taida_val taida_polymorphic_length(taida_val ptr) {
     if (TAIDA_IS_BYTES_CONTIG(ptr)) {
         return ((taida_val*)ptr)[1];
     }
-    // Treat as string. E32B-082: prefer the heap-header byte length so
-    // embedded NUL bytes are counted (e.g. `"X\x00Y".length() == 3`),
-    // matching interpreter / JS parity. Falls back to the NUL-bounded scan
-    // for raw C-string callers (FFI / inline asm) that have no header.
+    // Treat as string: code points, not bytes (the reference iterates
+    // chars — `"héllo日本".length()` is 7 everywhere). The byte length
+    // still comes from the heap header so embedded NULs count
+    // (E32B-082); raw C-string callers fall back to the NUL-bounded scan.
     size_t sl = 0;
-    if (taida_str_byte_len((const char*)ptr, &sl)) return (taida_val)sl;
-    if (taida_read_cstr_len_safe((const char*)ptr, 65536, &sl)) return (taida_val)sl;
+    if (taida_str_byte_len((const char*)ptr, &sl))
+        return taida_utf8_count((const char*)ptr, sl);
+    if (taida_read_cstr_len_safe((const char*)ptr, 65536, &sl))
+        return taida_utf8_count((const char*)ptr, sl);
     return 0;
 }
 
@@ -9964,15 +10016,13 @@ static int taida_is_async_task_pack(taida_val ptr) {
 // formatting (e.g., item_str in list display) are released within the function.
 static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
-// C23B-003 reopen 2: debug-string variant that recurses into the
-// synthetic full-form helpers for HashMap / Set / BuchiPack. Used only
-// inside `taida_hashmap_to_display_string_full` / `_set_…_full` /
-// `taida_pack_to_display_string_full` so nested typed runtime objects
-// keep their full-form rendering (matching the interpreter's
+// Debug-string variant that recurses into the full-form pack helper
+// (HashMap / Set route to their public `HashMap({...})` / `Set({...})`
+// shape — the carrier fields are compiler-internal). Used inside
+// `taida_pack_to_display_string_full` so nested packs keep their
+// full-form rendering (matching the interpreter's
 // `Value::to_debug_string()` on BuchiPack, which itself recurses).
 static taida_val taida_value_to_debug_string_full(taida_val val);
-static taida_val taida_hashmap_to_display_string_full(taida_val hm_ptr);
-static taida_val taida_set_to_display_string_full(taida_val set_ptr);
 static taida_val taida_pack_to_display_string_full(taida_val pack_ptr);
 
 // Convert a list to display string: @[item1, item2, ...]
@@ -10389,8 +10439,10 @@ static taida_val taida_value_to_debug_string(taida_val val) {
 // `HashMap({…})` form.
 static taida_val taida_value_to_debug_string_full(taida_val val) {
     if (val == 0) return (taida_val)taida_str_new_copy("0");
-    if (taida_is_hashmap(val)) return taida_hashmap_to_display_string_full(val);
-    if (taida_is_set(val)) return taida_set_to_display_string_full(val);
+    // HashMap / Set always display the public `HashMap({...})` /
+    // `Set({...})` shape — the carrier fields are compiler-internal.
+    if (taida_is_hashmap(val)) return taida_hashmap_to_string(val);
+    if (taida_is_set(val)) return taida_set_to_string(val);
     if (taida_is_async(val)) return taida_async_to_string(val);
     if (taida_is_list(val)) {
         // List itself uses `@[...]` format (already matches interpreter);
@@ -10514,121 +10566,6 @@ taida_val taida_polymorphic_to_string(taida_val obj) {
 // matching the interpreter's to_display_string() behavior.
 // .toString() methods use taida_polymorphic_to_string which produces Lax(...)/Result(...) forms.
 //
-// C23B-003 reopen: HashMap / Set are not `BuchiPack` in the native runtime
-// (they carry dedicated magic-tagged layouts) but the interpreter represents
-// them as `BuchiPack(__entries <= ..., __type <= "HashMap")` /
-// `BuchiPack(__items <= ..., __type <= "Set")` (see
-// `src/interpreter/prelude.rs:618-621` and `:644-647`). For `Str[...]()` to
-// match the interpreter byte-for-byte we must therefore emit the synthetic
-// full-form pack shape, not the short-form `HashMap({...})` /
-// `Set({...})` that `taida_hashmap_to_string` / `taida_set_to_string`
-// produce for `.toString()`.
-static taida_val taida_hashmap_to_display_string_full(taida_val hm_ptr) {
-    taida_val *hm = (taida_val*)hm_ptr;
-    taida_val cap = hm[1];
-    size_t buf_size = 256;
-    size_t off = 0;
-    char *buf = (char*)TAIDA_MALLOC(buf_size, "hm_display_full");
-    memcpy(buf, "@(__entries <= @[", 17); off = 17;
-    taida_val count = 0;
-    // C23B-008 (2026-04-22): walk the insertion-order side-index so the
-    // emitted pair sequence matches the interpreter's Vec<(k,v)> order.
-    // Holes (order slot == -1) and tombstoned entries (bucket no longer
-    // occupied) are both skipped.
-    taida_val next_ord = hm[TAIDA_HM_ORD_HEADER_SLOT(cap)];
-    for (taida_val oi = 0; oi < next_ord; oi++) {
-        taida_val slot = hm[TAIDA_HM_ORD_SLOT(cap, oi)];
-        if (slot < 0 || slot >= cap) continue;
-        taida_val sh = hm[HM_HEADER + slot * 3];
-        taida_val sk = hm[HM_HEADER + slot * 3 + 1];
-        if (HM_SLOT_OCCUPIED(sh, sk)) {
-            taida_val value = hm[HM_HEADER + slot * 3 + 2];
-            // C23B-003 reopen 2: nested typed runtime objects must recurse
-            // through the full-form helper so nested HashMap/Set/BuchiPack
-            // keep their `@(__entries …)` / `@(__items …)` / full pack
-            // shape instead of collapsing to the `.toString()` short-form.
-            taida_val key_str_ptr = taida_value_to_debug_string_full(sk);
-            taida_val val_str_ptr = taida_value_to_debug_string_full(value);
-            const char *key_str = (const char*)key_str_ptr;
-            const char *val_str = (const char*)val_str_ptr;
-            if (!key_str) key_str = "\"\"";
-            if (!val_str) val_str = "0";
-            size_t klen = strlen(key_str);
-            size_t vlen = strlen(val_str);
-            // "@(key <= <k>, value <= <v>)" + optional ", " prefix
-            size_t needed = klen + vlen + 22;
-            if (count > 0) needed += 2;
-            while (off + needed + 32 > buf_size) {
-                buf_size *= 2;
-                TAIDA_REALLOC(buf, buf_size, "hm_display_full");
-            }
-            if (count > 0) { memcpy(buf + off, ", ", 2); off += 2; }
-            memcpy(buf + off, "@(key <= ", 9); off += 9;
-            memcpy(buf + off, key_str, klen); off += klen;
-            memcpy(buf + off, ", value <= ", 11); off += 11;
-            memcpy(buf + off, val_str, vlen); off += vlen;
-            buf[off++] = ')';
-            buf[off] = '\0';
-            taida_str_release(key_str_ptr);
-            taida_str_release(val_str_ptr);
-            count++;
-        }
-    }
-    const char *suffix = "], __type <= \"HashMap\")";
-    size_t slen = strlen(suffix);
-    while (off + slen + 1 > buf_size) {
-        buf_size *= 2;
-        TAIDA_REALLOC(buf, buf_size, "hm_display_full");
-    }
-    memcpy(buf + off, suffix, slen); off += slen;
-    buf[off] = '\0';
-    taida_val result = (taida_val)taida_str_new_copy(buf);
-    free(buf);
-    return result;
-}
-
-static taida_val taida_set_to_display_string_full(taida_val set_ptr) {
-    // Set uses List layout internally (same as taida_list_to_display_string):
-    //   set[0] = magic, set[1] = capacity, set[2] = length, set[3] = type_tag,
-    //   set[4..4+len] = items.
-    taida_val *set = (taida_val*)set_ptr;
-    taida_val set_len = set[2];
-    size_t buf_size = 256;
-    size_t off = 0;
-    char *buf = (char*)TAIDA_MALLOC(buf_size, "set_display_full");
-    memcpy(buf, "@(__items <= @[", 15); off = 15;
-    for (taida_val i = 0; i < set_len; i++) {
-        taida_val item = set[4 + i];
-        // C23B-003 reopen 2: recurse into full-form for nested
-        // HashMap/Set/Pack items.
-        taida_val item_str = taida_value_to_debug_string_full(item);
-        const char *is = (const char*)item_str;
-        if (!is) is = "0";
-        size_t ilen = strlen(is);
-        size_t needed = ilen + 2;
-        if (i > 0) needed += 2;
-        while (off + needed + 32 > buf_size) {
-            buf_size *= 2;
-            TAIDA_REALLOC(buf, buf_size, "set_display_full");
-        }
-        if (i > 0) { memcpy(buf + off, ", ", 2); off += 2; }
-        memcpy(buf + off, is, ilen); off += ilen;
-        buf[off] = '\0';
-        taida_str_release(item_str);
-    }
-    const char *suffix = "], __type <= \"Set\")";
-    size_t slen = strlen(suffix);
-    while (off + slen + 1 > buf_size) {
-        buf_size *= 2;
-        TAIDA_REALLOC(buf, buf_size, "set_display_full");
-    }
-    memcpy(buf + off, suffix, slen); off += slen;
-    buf[off] = '\0';
-    taida_val result = (taida_val)taida_str_new_copy(buf);
-    free(buf);
-    return result;
-}
-
 taida_val taida_stdout_display_string(taida_val obj) {
     if (obj == 0) return (taida_val)taida_str_new_copy("0");
     // C25B-001: Stream packs render as `Stream[completed: N items]`
@@ -10636,13 +10573,12 @@ taida_val taida_stdout_display_string(taida_val obj) {
     // precede the generic BuchiPack path so `Str[Stream[...]]()` doesn't
     // stringify the internal `__stream_count` / `__stream_status` fields.
     if (taida_is_stream_pack(obj)) return taida_stream_to_display_string(obj);
-    // C23B-003 reopen: route HashMap / Set through their synthetic full-form
-    // helpers so `Str[...]()` matches the interpreter's
-    // `BuchiPack(__entries/__items, __type)` rendering instead of the
-    // short-form `HashMap({...})` / `Set({...})` that
-    // `taida_value_to_display_string` would produce for `.toString()`.
-    if (taida_is_hashmap(obj)) return taida_hashmap_to_display_string_full(obj);
-    if (taida_is_set(obj)) return taida_set_to_display_string_full(obj);
+    // HashMap / Set display the public `HashMap({...})` / `Set({...})`
+    // shape everywhere — stdout, interpolation and `Str[...]()` alike.
+    // The `__entries` / `__items` carrier fields are compiler-internal
+    // and the reference no longer prints them from any path.
+    if (taida_is_hashmap(obj)) return taida_hashmap_to_string(obj);
+    if (taida_is_set(obj)) return taida_set_to_string(obj);
     if (taida_is_buchi_pack(obj)) {
         if (taida_is_async_task_pack(obj)) {
             return (taida_val)taida_str_new_copy("AsyncTask[<task>]");

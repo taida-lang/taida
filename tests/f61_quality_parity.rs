@@ -605,3 +605,69 @@ fn toplevel_forward_function_reference_is_rejected() {
     assert_eq!(out, "2");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The string unit is the Unicode code point on every backend:
+/// length / get / CharAt / Slice / Reverse used to count bytes on
+/// native+wasm and UTF-16 units in js ("héllo日本".length() was 12 / 7
+/// / 12; a byte Reverse shredded every multibyte sequence).
+#[test]
+fn string_apis_use_code_point_units_everywhere() {
+    let dir = unique_temp_dir("f61_codepoints");
+    let src = r#"s <= "héllo日本"
+stdout(s.length())
+stdout(s.get(1).getOrDefault(""))
+stdout(Slice[s, 1, 3]())
+stdout(CharAt[s, 5]().getOrDefault(""))
+stdout(Reverse[s]())
+e <= "a🎈b"
+stdout(e.length())
+stdout(e.get(1).getOrDefault(""))
+stdout(Reverse[e]())
+stdout(s.indexOf("日"))
+stdout(s.lastIndexOf("l"))
+"#;
+    let expected = "7\né\nél\n日\n本日olléh\n3\n🎈\nb🎈a\n5\n3";
+    let out = assert_parity(&dir, "codepoints", src);
+    assert_eq!(out, expected);
+    if node_available() {
+        let td = dir.join("codepoints.td");
+        let mjs = dir.join("codepoints.mjs");
+        let status = Command::new(taida_bin())
+            .args(["build", "js"])
+            .arg(&td)
+            .arg("-o")
+            .arg(&mjs)
+            .status()
+            .expect("taida build js runs");
+        assert!(status.success());
+        let jsout = Command::new("node").arg(&mjs).output().expect("node runs");
+        assert!(jsout.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&jsout.stdout).trim_end(),
+            expected,
+            "js code point units"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `Str[container]()` renders the public HashMap({...}) / Set({...})
+/// shape on every backend (native/js rebuilt the internal carrier-pack
+/// text), and a Lax bound to a variable prints as the Lax pack — the
+/// string classifier no longer mistakes `Str[x]()`'s Lax[Str] for a
+/// raw string (which printed the pack pointer's magic header as text).
+#[test]
+fn str_conversion_and_lax_binding_display_agree() {
+    let dir = unique_temp_dir("f61_str_conv");
+    let src = r#"v <= Str[setOf(@[1, 2, 3])]()
+stdout(v.getOrDefault(""))
+w <= Str[42]()
+stdout(w)
+m <= Str[hashMap().set("a", 1)]()
+stdout(m.getOrDefault(""))
+"#;
+    let expected = "Set({1, 2, 3})\n@(has_value <= true, __value <= \"42\", __default <= \"\", __type <= \"Lax\")\nHashMap({\"a\": 1})";
+    let out = assert_parity(&dir, "str_conv", src);
+    assert_eq!(out, expected);
+    let _ = std::fs::remove_dir_all(&dir);
+}

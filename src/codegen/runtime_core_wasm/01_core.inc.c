@@ -1384,10 +1384,41 @@ int64_t taida_str_concat(int64_t a_ptr, int64_t b_ptr) {
     return (int64_t)(intptr_t)buf;
 }
 
+/* ── Unicode code-point string indexing (mirror of native) ──
+   Every index-taking Str API counts Unicode code points (the
+   reference iterates chars); these helpers walk UTF-8 lead bytes. */
+static int64_t _wasm_utf8_count(const char *s, int byte_len) {
+    int64_t n = 0;
+    for (int i = 0; i < byte_len; i++)
+        if (((unsigned char)s[i] & 0xC0) != 0x80) n++;
+    return n;
+}
+
+/* Byte offset where code point `cp` starts; byte_len when past the end. */
+static int _wasm_utf8_cp_to_byte(const char *s, int byte_len, int64_t cp) {
+    if (cp <= 0) return 0;
+    int64_t seen = 0;
+    for (int i = 0; i < byte_len; i++) {
+        if (((unsigned char)s[i] & 0xC0) != 0x80) {
+            if (seen == cp) return i;
+            seen++;
+        }
+    }
+    return byte_len;
+}
+
+/* Byte length of the code point starting at s[i]. */
+static int _wasm_utf8_cp_len_at(const char *s, int byte_len, int i) {
+    int j = i + 1;
+    while (j < byte_len && (((unsigned char)s[j]) & 0xC0) == 0x80) j++;
+    return j - i;
+}
+
 int64_t taida_str_length(int64_t s_ptr) {
     const char *s = (const char *)(intptr_t)s_ptr;
     if (!s) return 0;
-    return (int64_t)wasm_strlen(s);
+    /* Code points, not bytes — mirrors native taida_str_length. */
+    return _wasm_utf8_count(s, wasm_strlen(s));
 }
 
 int64_t taida_str_eq(int64_t a_ptr, int64_t b_ptr) {
@@ -1891,9 +1922,10 @@ int64_t taida_polymorphic_length(int64_t ptr) {
     if (_looks_like_list(ptr)) {
         return taida_list_length(ptr);
     }
-    /* Otherwise treat as string */
+    /* Otherwise treat as string: code points, not bytes (mirrors
+       native taida_polymorphic_length). */
     const char *s = (const char *)(intptr_t)ptr;
-    return (int64_t)wasm_strlen(s);
+    return _wasm_utf8_count(s, wasm_strlen(s));
 }
 
 /* ── W-3f/W-4f2: taida_polymorphic_to_string (full collection support) ── */
@@ -2023,8 +2055,6 @@ static int64_t _wasm_value_to_debug_string_full(int64_t val);
    to the existing structural detector. */
 static int64_t _wasm_render_elem_tagged_debug(int64_t val, int64_t tag);
 static int64_t _wasm_render_elem_tagged_debug_full(int64_t val, int64_t tag);
-static int64_t _wasm_hashmap_to_display_string_full(int64_t hm_ptr);
-static int64_t _wasm_set_to_display_string_full(int64_t set_ptr);
 static int64_t _wasm_pack_to_string_full(int64_t pack_ptr);
 static int _wasm_is_error(int64_t val);
 static int64_t _wasm_error_to_string(int64_t val);
@@ -2101,7 +2131,7 @@ static int64_t _wasm_hashmap_to_string(int64_t hm_ptr) {
     int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
     int64_t cap = hm[0];
     /* C23B-005 / C23B-006 / C23B-007: `hm[2]` is reliable now — see the
-       `_wasm_hashmap_to_display_string_full` comment and the hardened
+       `_wasm_hashmap_to_string` comment and the hardened
        `taida_hashmap_set_value_tag` (HETEROGENEOUS latch). */
     int64_t value_tag = hm[2];
     _wasm_strbuf sb;
@@ -2394,14 +2424,16 @@ static int64_t _wasm_render_elem_tagged_debug_full(int64_t val, int64_t tag) {
 
 /* C23B-003 reopen 2: recursive debug-string variant for nested typed
    runtime objects. Mirrors native's `taida_value_to_debug_string_full`.
-   Must be defined BEFORE `_wasm_hashmap_to_display_string_full` /
-   `_wasm_set_to_display_string_full` / `_wasm_pack_to_string_full` call
+   Must be defined BEFORE `_wasm_pack_to_string_full` and the
+   container renderers call
    it — but each of those uses it from the function body, so forward
    declarations at the top of this fragment keep the ordering valid. */
 static int64_t _wasm_value_to_debug_string_full(int64_t val) {
     if (val == 0) return WSTR("0");
-    if (_is_wasm_hashmap(val)) return _wasm_hashmap_to_display_string_full(val);
-    if (_is_wasm_set(val)) return _wasm_set_to_display_string_full(val);
+    /* HashMap / Set always display the public `HashMap({...})` /
+       `Set({...})` shape — the carrier fields are compiler-internal. */
+    if (_is_wasm_hashmap(val)) return _wasm_hashmap_to_string(val);
+    if (_is_wasm_set(val)) return _wasm_set_to_string(val);
     /* C23B-003 reopen 3: render empty packs (`@()`) with their interpreter-
        parity string. Must be checked BEFORE `_looks_like_pack` (which
        requires `fc >= 1`) and BEFORE the int fallback which would otherwise
@@ -2453,88 +2485,6 @@ static int64_t _wasm_value_to_debug_string_full(int64_t val) {
     return taida_int_to_str(val);
 }
 
-/* C23B-003 reopen: HashMap / Set are not `BuchiPack` in the wasm runtime
-   (they carry dedicated header markers) but the interpreter represents them
-   as `BuchiPack(__entries <= ..., __type <= "HashMap")` /
-   `BuchiPack(__items <= ..., __type <= "Set")` (see
-   `src/interpreter/prelude.rs:618-621` and `:644-647`). For `Str[...]()` to
-   match the interpreter byte-for-byte we must therefore emit the synthetic
-   full-form pack shape, not the short-form `HashMap({...})` / `Set({...})`
-   that `_wasm_hashmap_to_string` / `_wasm_set_to_string` produce for
-   `.toString()`. Symmetric with native's
-   `taida_hashmap_to_display_string_full` / `taida_set_to_display_string_full`. */
-static int64_t _wasm_hashmap_to_display_string_full(int64_t hm_ptr) {
-    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
-    int64_t cap = hm[0];
-    /* C23B-005 / C23B-006 (2026-04-22): `hm[2]` is now reliable thanks
-       to the hardened `taida_hashmap_set_value_tag` (downgrades to
-       UNKNOWN(-1) on type conflict — C23B-007 promoted this further
-       to HETEROGENEOUS(-2) so a downgraded tag cannot re-promote on a
-       subsequent `.set()`). For homogeneous HashMaps the primitive tag
-       dispatches the tag-aware renderer which bypasses structural
-       detectors entirely. For heterogeneous HashMaps the tag is -2
-       (HETEROGENEOUS) or -1 (UNKNOWN) and the tagged renderer falls
-       back to `_wasm_value_to_debug_string_full` per element so mixed
-       value types each render through their own structural dispatch
-       (closes the `.set("a", 1).set("b", "x").set("c", 2)` regression
-       where the tag system would lose `"x"` to a raw pointer Int). */
-    int64_t value_tag = hm[2];
-    _wasm_strbuf sb;
-    _sb_init(&sb);
-    _sb_append(&sb, "@(__entries <= @[");
-    /* C23B-008 (2026-04-22): iterate via the insertion-order side-index
-       (`order_array[0..next_ord]`) instead of walking buckets, so the
-       emitted pair sequence matches interpreter / JS byte-for-byte. Each
-       `order_array[oi]` holds either a bucket slot (>= 0) or -1 (hole
-       from a subsequent `.remove()` call); skip holes and also
-       defensively skip slots whose buckets have since been tombstoned. */
-    int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
-    int64_t count = 0;
-    for (int64_t oi = 0; oi < next_ord; oi++) {
-        int64_t slot = hm[WASM_HM_ORD_SLOT(cap, oi)];
-        if (slot < 0 || slot >= cap) continue;
-        int64_t sh = hm[WASM_HM_HEADER + slot * 3];
-        int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
-        if (WASM_HM_SLOT_OCCUPIED(sh, sk)) {
-            int64_t value = hm[WASM_HM_HEADER + slot * 3 + 2];
-            if (count > 0) _sb_append(&sb, ", ");
-            int64_t key_str = _wasm_value_to_debug_string_full(sk);
-            int64_t val_str = _wasm_render_elem_tagged_debug_full(value, value_tag);
-            _sb_append(&sb, "@(key <= ");
-            _sb_append(&sb, (const char *)(intptr_t)key_str);
-            _sb_append(&sb, ", value <= ");
-            _sb_append(&sb, (const char *)(intptr_t)val_str);
-            _sb_append(&sb, ")");
-            count++;
-        }
-    }
-    _sb_append(&sb, "], __type <= \"HashMap\")");
-    return _sb_finish(&sb);
-}
-
-static int64_t _wasm_set_to_display_string_full(int64_t set_ptr) {
-    int64_t *list = (int64_t *)(intptr_t)set_ptr;
-    int64_t len = list[1];
-    /* C23B-005: honour the set's elem_type_tag so primitive members
-       dispatch through the tag-aware renderer. Sets share the list
-       header layout. */
-    int64_t elem_tag = list[2];
-    _wasm_strbuf sb;
-    _sb_init(&sb);
-    _sb_append(&sb, "@(__items <= @[");
-    for (int64_t i = 0; i < len; i++) {
-        if (i > 0) _sb_append(&sb, ", ");
-        int64_t elem = list[WASM_LIST_ELEMS + i];
-        /* C23B-003 reopen 2 / C23B-005: prefer the tag-aware renderer;
-           for non-primitive members the fallback recurses through
-           `_wasm_value_to_debug_string_full`. */
-        int64_t elem_str = _wasm_render_elem_tagged_debug_full(elem, elem_tag);
-        _sb_append(&sb, (const char *)(intptr_t)elem_str);
-    }
-    _sb_append(&sb, "], __type <= \"Set\")");
-    return _sb_finish(&sb);
-}
-
 /* C21B-seed-07: stdout-display entry point for BuchiPack — matches the
    native `taida_stdout_display_string` contract. When the value is a pack
    (fc=4 Lax / fc=3 Result / user packs / Gorillax), the interpreter-parity
@@ -2553,13 +2503,12 @@ static int64_t _wasm_stdout_display_string(int64_t obj) {
        Must precede the generic pack path so `Str[Stream[...]]()`
        doesn't stringify the internal `__stream_*` fields. */
     if (_wasm_is_stream_pack(obj)) return _wasm_stream_to_display_string(obj);
-    /* C23B-003 reopen: route HashMap / Set through their synthetic full-form
-       helpers so `Str[...]()` matches the interpreter's
-       `BuchiPack(__entries/__items, __type)` rendering instead of the
-       short-form `HashMap({...})` / `Set({...})` that
-       `_wasm_value_to_display_string` would produce for `.toString()`. */
-    if (_is_wasm_hashmap(obj)) return _wasm_hashmap_to_display_string_full(obj);
-    if (_is_wasm_set(obj)) return _wasm_set_to_display_string_full(obj);
+    /* HashMap / Set display the public `HashMap({...})` / `Set({...})`
+       shape everywhere — stdout, interpolation and `Str[...]()` alike.
+       The `__entries` / `__items` carrier fields are compiler-internal
+       and the reference no longer prints them from any path. */
+    if (_is_wasm_hashmap(obj)) return _wasm_hashmap_to_string(obj);
+    if (_is_wasm_set(obj)) return _wasm_set_to_string(obj);
     /* C23B-003 reopen 3: top-level `stdout(@())` / `Str[@()]()` must render
        as the interpreter's `Value::Unit.to_debug_string()` output `"@()"`
        rather than the raw heap pointer (the `taida_pack_new(0)` allocation

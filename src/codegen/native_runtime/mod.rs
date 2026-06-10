@@ -889,7 +889,16 @@ mod tests {
         //   Int rejects out-of-range (ERANGE), Float rejects strtod's
         //   whitespace / hex / NaN-payload extensions — both matching
         //   the reference parse. +1,013. 1,327,349 -> 1,328,362.
-        const EXPECTED_TOTAL_LEN: usize = 1_328_362;
+        // 2026-06-11 code-point string indexing (core.c, F1): length /
+        //   get / CharAt / Slice / Reverse walk UTF-8 lead bytes instead
+        //   of treating bytes as characters. +2,123.
+        //   1,328,362 -> 1,330,485.
+        // 2026-06-11 public-shape container display (core.c, F2): the
+        //   synthetic `@(__entries/__items ...)` full-form renderers are
+        //   removed — every display path routes HashMap / Set through
+        //   the `HashMap({...})` / `Set({...})` shape. -5,273.
+        //   1,330,485 -> 1,325,212.
+        const EXPECTED_TOTAL_LEN: usize = 1_325_212;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1635,7 +1644,9 @@ mod tests {
         //   unique (before the marker): +3,074. F1 413,526 -> 416,600.
         // 2026-06-11 string-conversion parse parity (before the
         //   marker): +1,013. F1 416,600 -> 417,613.
-        const F1_LEN: usize = 417_613;
+        // 2026-06-11 code-point string indexing (before the marker):
+        //   +2,123. F1 417,613 -> 419,736.
+        const F1_LEN: usize = 419_736;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1693,11 +1704,14 @@ mod tests {
             // (F1 411,424 -> 412,335); F2 unchanged.
             // Fixed-notation float formatting for extreme magnitudes
             // (F1 412,335 -> 413,526); F2 unchanged.
-            // Float-bearing Set ops hash path and the string-conversion
-            // parse parity land before the marker (F1 413,526 ->
-            // 417,613); the unhandled-throw report unification adds
-            // +1,407 after it. F2 228,943 -> 230,350.
-            F1_LEN + 230_350,
+            // Float-bearing Set ops hash path, the string-conversion
+            // parse parity and the code-point string indexing land
+            // before the marker (F1 413,526 -> 419,736); the
+            // unhandled-throw report unification adds +1,407 after it
+            // and the public-shape container display removes the
+            // synthetic full-form renderers (-5,273).
+            // F2 228,943 -> 225,077.
+            F1_LEN + 225_077,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
