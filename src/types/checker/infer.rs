@@ -2399,7 +2399,18 @@ impl TypeChecker {
                         }
                     }
                     "Join" => Type::Str,
-                    "Sum" => Type::Num,
+                    // Sum of @[Int] is Int, of @[Float] is Float. Num is a
+                    // constraint marker (not annotatable as a value type),
+                    // so pinning Sum to Num forced every annotated caller
+                    // into the now-rejected `=> :Num`. Unknown element
+                    // types surface as Unknown (checker-permissive) so the
+                    // caller can still annotate the concrete type.
+                    "Sum" => match type_args.first().map(|a| self.infer_expr_type(a)) {
+                        Some(Type::List(inner)) if inner.is_numeric() => *inner,
+                        Some(Type::List(inner)) if *inner == Type::Unknown => Type::Unknown,
+                        Some(Type::Unknown) | None => Type::Unknown,
+                        _ => Type::Num,
+                    },
                     "Find" => Type::Generic("Lax".to_string(), vec![Type::Unknown]),
                     "FindIndex" | "Count" => Type::Int,
                     // E32B-022 (Lock-N): Lax[Int]-returning replacement for

@@ -51,7 +51,10 @@ impl Lowering {
                                 self.float_returning_funcs.insert(func_def.name.clone());
                             }
                             // NB-31: Track Int/Num-returning functions for callable_type_tag
-                            crate::parser::TypeExpr::Named(n) if n == "Int" || n == "Num" => {
+                            // Num is rejected as a value annotation by the
+                            // checker; registering it as Int here made a
+                            // --no-check Float body render as raw bits.
+                            crate::parser::TypeExpr::Named(n) if n == "Int" => {
                                 self.int_returning_funcs.insert(func_def.name.clone());
                             }
                             crate::parser::TypeExpr::List(_) => {

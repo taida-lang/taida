@@ -255,3 +255,118 @@ stdout(cur)
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Num is a generic-constraint marker, not a value type: a
+/// value-position annotation must be rejected at check time, while the
+/// constraint position and the type-query position stay valid. Before
+/// this, `=> :Num` registered the function as Int-returning and a
+/// Float body rendered as a raw f64 bit pattern on compiled backends.
+#[test]
+fn num_value_annotations_are_rejected_and_constraints_still_work() {
+    let dir = unique_temp_dir("f59_num_marker");
+    // Rejected: return-type position.
+    let bad_ret = dir.join("bad_ret.td");
+    std::fs::write(&bad_ret, "f x: Int =\n  1.5\n=> :Num\nstdout(f(1))\n").unwrap();
+    let out = Command::new(taida_bin()).arg(&bad_ret).output().unwrap();
+    let msg = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        msg.contains("[E1537]"),
+        "return :Num must be E1537, got: {msg}"
+    );
+    // Rejected: parameter position.
+    let bad_param = dir.join("bad_param.td");
+    std::fs::write(&bad_param, "f x: Num =\n  x\n=> :Int\nstdout(f(1))\n").unwrap();
+    let out2 = Command::new(taida_bin()).arg(&bad_param).output().unwrap();
+    let msg2 = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out2.stdout),
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    assert!(
+        msg2.contains("[E1537]"),
+        "param :Num must be E1537, got: {msg2}"
+    );
+    // A Float body under `=> :Int` is a plain return-type mismatch now
+    // (the numeric-narrowing relaxation is gone).
+    let bad_narrow = dir.join("bad_narrow.td");
+    std::fs::write(&bad_narrow, "g x: Int =\n  1.5\n=> :Int\nstdout(g(1))\n").unwrap();
+    let out3 = Command::new(taida_bin()).arg(&bad_narrow).output().unwrap();
+    let msg3 = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out3.stdout),
+        String::from_utf8_lossy(&out3.stderr)
+    );
+    assert!(
+        msg3.contains("[E1601]"),
+        "Float body under :Int must be E1601, got: {msg3}"
+    );
+    // Valid: constraint position + type queries, on every backend.
+    // (A Float instantiation of `=> :T` still displays as raw bits on
+    // native/wasm — the dynamic return tag does not carry Float for
+    // generic returns. That is a separate pre-existing hole, tracked
+    // on its own; the Int instantiation pins the constraint machinery.)
+    let ok = assert_parity(
+        &dir,
+        "num_legal",
+        r#"clampMin[T <= :Num] x: T min: T =
+  | x < min |> min
+  | _ |> x
+=> :T
+
+stdout(clampMin(5, 3))
+stdout(TypeIs[3.14, :Num]())
+stdout(TypeExtends[:Int, :Num]())
+"#,
+    );
+    assert_eq!(ok, "5\ntrue\ntrue");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Built-in type names cannot be shadowed by user definitions: the
+/// annotation resolver always picks the built-in, so a custom `Num` /
+/// `Str` pack would be definable yet unusable (its annotations either
+/// hit the constraint-marker rejection or a nonsensical "returns Num,
+/// expected Num" mismatch). The definition site now rejects the
+/// shadowing. The undocumented `String` / `Boolean` / `Number`
+/// resolver aliases are gone too — annotating them is a plain type
+/// error instead of silently meaning Str / Bool / Num.
+#[test]
+fn builtin_type_names_cannot_be_shadowed() {
+    let dir = unique_temp_dir("f59_shadow");
+    for (stem, src) in [
+        ("shadow_num", "Num = @(\n  v <= 0\n)\nstdout(1)\n"),
+        (
+            "shadow_str_mold",
+            "Mold[T] => Str[T] = @(\n  v <= 0\n)\nstdout(1)\n",
+        ),
+        ("shadow_bool_enum", "Enum => Bool = :Yes :No\nstdout(1)\n"),
+    ] {
+        let td = dir.join(format!("{stem}.td"));
+        std::fs::write(&td, src).unwrap();
+        let out = Command::new(taida_bin()).arg(&td).output().unwrap();
+        let msg = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(msg.contains("[E1538]"), "{stem} must be E1538, got: {msg}");
+    }
+    // The alias spellings no longer resolve to built-ins.
+    let alias = dir.join("alias.td");
+    std::fs::write(&alias, "f x: String =\n  x\n=> :Str\nstdout(f(\"a\"))\n").unwrap();
+    let out = Command::new(taida_bin()).arg(&alias).output().unwrap();
+    let msg = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        msg.contains("Type error"),
+        "String annotation must no longer alias Str, got: {msg}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

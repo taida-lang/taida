@@ -207,10 +207,10 @@ impl TypeChecker {
         match name {
             "Int" => Type::Int,
             "Float" => Type::Float,
-            "Num" | "Number" => Type::Num,
-            "Str" | "String" => Type::Str,
+            "Num" => Type::Num,
+            "Str" => Type::Str,
             "Bytes" => Type::Bytes,
-            "Bool" | "Boolean" => Type::Bool,
+            "Bool" => Type::Bool,
             "Unit" => Type::Unit,
             "JSON" => Type::Json,
             "Molten" => Type::Molten,

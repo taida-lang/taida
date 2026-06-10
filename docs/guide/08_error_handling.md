@@ -552,7 +552,7 @@ calculateAverage scores: @[Int] =
   Sum[scores]() >=> total
   Div[total, scores.length()]() >=> avg
   avg
-=> :Num
+=> :Int
 
 // 不要: ゼロ除算のためにエラー処理を書く必要はありません
 // | scores.isEmpty() |> Error(...).throw()  // これは過剰です

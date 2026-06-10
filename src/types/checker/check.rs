@@ -635,6 +635,38 @@ impl TypeChecker {
                     }
                 }
 
+                // [E1537]: `Num` is a constraint marker, not a value type.
+                // The constraints reference states it is not an independent
+                // wire value type; allowing `=> :Num` / `x: Num` annotations
+                // made the lowering guess a representation (it registered the
+                // function as Int-returning), so a Float body rendered as a
+                // raw f64 bit pattern on the compiled backends. Constraint
+                // position (`[T <= :Num]`) and type-query position
+                // (`TypeIs[x, :Num]`) remain valid.
+                if fd.return_type.is_some() && Self::contains_constraint_marker_type(&ret_ty) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1537] Function '{}' declares return type {}, but Num is a generic-constraint marker, not a value type. Annotate the concrete type instead (`:Int` or `:Float`), or make the function generic with `[T <= :Num] ... => :T`. See docs/reference/type_constraints.md and docs/reference/diagnostic_codes.md [E1537].",
+                            fd.name, ret_ty
+                        ),
+                        span: fd.span.clone(),
+                    });
+                }
+                for (idx, param) in fd.params.iter().enumerate() {
+                    if param.type_annotation.is_some()
+                        && let Some(pty) = param_types.get(idx)
+                        && Self::contains_constraint_marker_type(pty)
+                    {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1537] Function '{}' parameter '{}' has type annotation {}, but Num is a generic-constraint marker, not a value type. Annotate the concrete type instead (`:Int` or `:Float`), or make the function generic with `[T <= :Num] {}: T`. See docs/reference/type_constraints.md and docs/reference/diagnostic_codes.md [E1537].",
+                                fd.name, param.name, pty, param.name
+                            ),
+                            span: fd.span.clone(),
+                        });
+                    }
+                }
+
                 // Register the name in scope so duplicate detection still works.
                 // Invalid generic functions stay non-callable by using `Unknown`.
                 let function_value_ty = if self.invalid_func_defs.contains(&fd.name) {
@@ -715,8 +747,6 @@ impl TypeChecker {
                         if !(body_ty == Type::Unknown
                             || Self::contains_unknown(&body_ty)
                             || self.registry.is_subtype_of(&body_ty, &ret_ty)
-                            // Allow numeric narrowing: Num body is compatible with Int/Float/Num return
-                            || body_ty.is_numeric() && ret_ty.is_numeric()
                             // RCB-50: Named/List/BuchiPack are now properly checked
                             // via is_subtype_of. The previous blanket skip hid genuine
                             // return-type mismatches.
