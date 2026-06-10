@@ -75,9 +75,9 @@ fn assert_parity(dir: &Path, stem: &str, source: &str) -> String {
     interp
 }
 
-/// F58B-003 core reproduction: one unmold inside a deep tail-recursive
-/// cond-arm body. The accumulator crosses the ELF load base (~4.19M)
-/// around depth 9571, where the broken heuristic started concatenating.
+/// Core reproduction: one unmold inside a deep tail-recursive cond-arm
+/// body. The accumulator crosses the ELF load base (~4.19M) around
+/// depth 9571, where the broken heuristic started concatenating.
 #[test]
 fn deep_tail_recursion_with_unmold_keeps_int_semantics() {
     let dir = unique_temp_dir("f58b003_deep_unmold");
