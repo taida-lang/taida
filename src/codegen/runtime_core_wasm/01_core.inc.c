@@ -175,14 +175,41 @@ void *wasm_alloc(unsigned int size) {
     WASM_PERF_INC(wasm_perf_alloc_calls);
     WASM_PERF_ADD(wasm_perf_alloc_bytes, size);
 
+    /* Hard heap ceiling at 2GB: pointers travel the value space as
+       int64_t via sign-EXTENDING (intptr_t) casts, so an address past
+       2^31 turns negative and every pointer-validity check rejects it
+       — results silently degrade to empty objects long before the
+       4GB linear-memory limit. Trap loudly at the real boundary
+       instead. (Lifting the ceiling means zero-extending every
+       pointer-to-value conversion — a representation-level change
+       tracked separately.) */
+    if (bump_ptr > 0x7FFF0000u) {
+        static const char ceil_msg[] = "taida: wasm heap ceiling reached (2GB address space for boxed values)\n";
+        wasi_ciovec iov;
+        iov.buf = (int32_t)(intptr_t)ceil_msg;
+        iov.len = (int32_t)(sizeof(ceil_msg) - 1);
+        int32_t nwritten;
+        __wasi_fd_write(2, &iov, 1, &nwritten);
+        __builtin_trap();
+    }
+
     /* Check if we need to grow memory */
     unsigned int pages_needed = (bump_ptr + 65535) / 65536;
     unsigned int current_pages = __builtin_wasm_memory_size(0);
     if (pages_needed > current_pages) {
         int grew = __builtin_wasm_memory_grow(0, pages_needed - current_pages);
         if (grew == -1) {
-            /* Out of memory — return NULL (will crash on use) */
-            return (void *)0;
+            /* Out of memory. Trap loudly: returning NULL here used to
+               flow into list/pack constructors as an empty object and
+               silently corrupt results (a 10k-append loop run twice
+               produced an empty second list instead of failing). */
+            static const char oom_msg[] = "taida: wasm linear memory exhausted (allocation failed)\n";
+            wasi_ciovec iov;
+            iov.buf = (int32_t)(intptr_t)oom_msg;
+            iov.len = (int32_t)(sizeof(oom_msg) - 1);
+            int32_t nwritten;
+            __wasi_fd_write(2, &iov, 1, &nwritten);
+            __builtin_trap();
         }
     }
 

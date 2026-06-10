@@ -2283,9 +2283,13 @@ impl TypeChecker {
                         }
                     }
                     "Fold" | "Foldr" | "Reduce" => {
-                        // Returns the accumulator type (first arg)
-                        if let Some(first_arg) = type_args.first() {
-                            self.infer_expr_type(first_arg)
+                        // Fold[list, init, fn]: returns the accumulator
+                        // type — the INIT argument at index 1, not the
+                        // list at index 0. The old first-arg read made
+                        // every function ending in an unmolded fold
+                        // fail [E1601] with "body returns @[T]".
+                        if let Some(init_arg) = type_args.get(1) {
+                            self.infer_expr_type(init_arg)
                         } else {
                             Type::Unknown
                         }

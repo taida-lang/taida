@@ -197,7 +197,13 @@ mod tests {
         //   apart, diverging from the locked chars-split semantics that
         //   the interpreter / native / JS already implement. Fragments
         //   stay empty-free per the B11 method lock. -> 467,164.
-        const EXPECTED_TOTAL_LEN: usize = 467_164;
+        // 2026-06-10 loud allocation failure (01_core.inc.c): wasm_alloc
+        //   traps with a message at the 2GB heap ceiling (sign-extending
+        //   pointer-to-value casts make addresses past 2^31 negative and
+        //   silently reject as invalid — a 10k-append loop run twice
+        //   returned an empty second list) and on memory.grow failure
+        //   (used to return NULL into constructors). -> 468,580.
+        const EXPECTED_TOTAL_LEN: usize = 468_580;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),
