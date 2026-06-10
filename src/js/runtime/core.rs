@@ -132,14 +132,29 @@ function __taida_is_float(v) {
 // Always used when the codegen sees `Float[...]()` — this is purely a
 // display-side tag; arithmetic and equality paths stay untouched (no
 // deopt). Matches the interpreter's `Value::Float` tag.
+// Rust f64::from_str compatible parse: no surrounding whitespace, no
+// hex floats, no prefix-parse; nan / inf / infinity in any case with an
+// optional sign. Returns null on reject (NaN is a successful parse).
+function __taida_parse_f64(s) {
+  if (typeof s !== 'string'
+      || !/^[+-]?(?:[iI][nN][fF](?:[iI][nN][iI][tT][yY])?|[nN][aA][nN]|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)$/.test(s)) {
+    return null;
+  }
+  const sign = s[0] === '-' ? -1 : 1;
+  const body = (s[0] === '+' || s[0] === '-') ? s.slice(1) : s;
+  const low = body.toLowerCase();
+  if (low === 'nan') return NaN;
+  if (low === 'inf' || low === 'infinity') return sign * Infinity;
+  return parseFloat(s);
+}
 function Float_mold_f(value) {
   let num;
   if (typeof value === 'number') num = value;
   else if (typeof value === 'bigint') num = Number(value);
   else if (typeof value === 'boolean') num = value ? 1.0 : 0.0;
   else if (typeof value === 'string') {
-    const f = parseFloat(value);
-    if (isNaN(f)) {
+    const f = __taida_parse_f64(value);
+    if (f === null) {
       return Lax(null, 0.0, true);
     }
     num = f;
@@ -321,6 +336,38 @@ class __TaidaError extends globalThis.Error {
 // Standalone throw function (no Object.prototype pollution)
 function __taida_throw(obj) {
   throw obj instanceof globalThis.Error ? obj : new __TaidaError(obj.type || 'Error', obj.message || '', obj);
+}
+
+// Unhandled-throw report: match the interpreter's single-line format
+// and exit code (`Runtime error: Unhandled error: ...`, packs as
+// `Error[type]: message` with AnonymousError/Unknown fallbacks) instead
+// of Node's raw stack + object dump.
+if (typeof process !== 'undefined' && typeof process.on === 'function') {
+  const __taida_report_unhandled = (e) => {
+    if (e instanceof __TaidaError) {
+      let detail;
+      const f = e.fields;
+      if (f === null || f === undefined) {
+        detail = e.message || 'error';
+      } else if (typeof f !== 'object') {
+        detail = String(f); // bare value throw: throw("boom") / throw(42)
+      } else {
+        const ty = (typeof f.type === 'string' && f.type)
+          || (typeof f.__type === 'string' && f.__type)
+          || 'AnonymousError';
+        const msg = (typeof f.message === 'string' && f.message) || 'Unknown';
+        detail = `Error[${ty}]: ${msg}`;
+      }
+      console.error(`Runtime error: Unhandled error: ${detail}`);
+    } else if (e instanceof globalThis.Error) {
+      console.error(`Runtime error: ${e.message}`);
+    } else {
+      console.error(`Runtime error: ${String(e)}`);
+    }
+    process.exit(1);
+  };
+  process.on('uncaughtException', __taida_report_unhandled);
+  process.on('unhandledRejection', __taida_report_unhandled);
 }
 
 function __taida_error_info_default() {
@@ -1563,7 +1610,11 @@ function Int_mold(value, base) {
   if (typeof value === 'string') {
     if (!/^[+-]?\d+$/.test(value)) return Lax(null, 0);
     try {
-      return Lax(__taida_fromI64BigInt(BigInt(value)));
+      const b = BigInt(value);
+      // Out-of-range i64 is a parse failure (Rust parse::<i64> parity),
+      // not a two's-complement wrap.
+      if (b > 9223372036854775807n || b < -9223372036854775808n) return Lax(null, 0);
+      return Lax(__taida_fromI64BigInt(b));
     } catch (_) {
       return Lax(null, 0);
     }
@@ -1575,8 +1626,8 @@ function Float_mold(value) {
   if (typeof value === 'bigint') return Lax(Number(value));
   if (typeof value === 'boolean') return Lax(value ? 1.0 : 0.0);
   if (typeof value === 'string') {
-    const f = parseFloat(value);
-    if (isNaN(f)) return Lax(null, 0.0);
+    const f = __taida_parse_f64(value);
+    if (f === null) return Lax(null, 0.0);
     return Lax(f);
   }
   return Lax(null, 0.0);

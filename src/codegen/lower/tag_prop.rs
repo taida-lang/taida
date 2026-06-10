@@ -287,7 +287,17 @@ impl Lowering {
                     "indexOfLax" | "lastIndexOfLax" | "searchLax" => 4,
                     "map" | "filter" | "flatMap" | "sort" | "unique" | "flatten" | "reverse"
                     | "concat" | "append" | "prepend" | "zip" | "enumerate" => 5,
-                    _ => -1, // TAIDA_TAG_UNKNOWN
+                    // Whatever the static Float classifier can prove
+                    // (getOrDefault with a Float default, Float-returning
+                    // user methods, ...) routes through the Float stdout
+                    // path; everything else stays runtime-dispatched.
+                    _ => {
+                        if self.expr_returns_float(expr) {
+                            1 // TAIDA_TAG_FLOAT
+                        } else {
+                            -1 // TAIDA_TAG_UNKNOWN
+                        }
+                    }
                 }
             }
             // C12-1b (FB-27): MoldInst return-type tag dispatch now consults the

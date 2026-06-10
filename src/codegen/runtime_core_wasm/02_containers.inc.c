@@ -78,10 +78,57 @@ int64_t taida_throw(int64_t error_val) {
         __wasm_error_thrown = 1;
         return 0; /* caller should check __wasm_error_thrown */
     }
-    /* No error ceiling: gorilla crash */
-    const char *msg = "Unhandled error (no error ceiling)\n";
-    write_stdout(msg, wasm_strlen(msg));
-    __builtin_trap();
+    /* No error ceiling: match the interpreter's unhandled report —
+       `Runtime error: Unhandled error: ...` on stderr, exit 1; packs
+       render as `Error[type]: message` with the AnonymousError /
+       Unknown fallbacks the reference applies. */
+    {
+        wasi_ciovec iov[6];
+        int n = 0;
+        const char *head = "Runtime error: Unhandled error: ";
+        iov[n].buf = (int32_t)(intptr_t)head; iov[n].len = wasm_strlen(head); n++;
+        if (taida_is_buchi_pack(error_val)) {
+            const char *ty = "AnonymousError";
+            const char *m = "Unknown";
+            if (taida_pack_has_hash(error_val, WASM_HASH_TYPE)) {
+                int64_t tv = taida_pack_get(error_val, WASM_HASH_TYPE);
+                if (tv && _looks_like_string(tv)
+                    && ((const char *)(intptr_t)tv)[0] != '\0')
+                    ty = (const char *)(intptr_t)tv;
+            }
+            if (_wf_strcmp(ty, "AnonymousError") == 0
+                && taida_pack_has_hash(error_val, WASM_HASH___TYPE)) {
+                int64_t tv = taida_pack_get(error_val, WASM_HASH___TYPE);
+                if (tv && _looks_like_string(tv)
+                    && ((const char *)(intptr_t)tv)[0] != '\0')
+                    ty = (const char *)(intptr_t)tv;
+            }
+            if (taida_pack_has_hash(error_val, WASM_HASH_MESSAGE)) {
+                int64_t mv = taida_pack_get(error_val, WASM_HASH_MESSAGE);
+                if (mv && _looks_like_string(mv)
+                    && ((const char *)(intptr_t)mv)[0] != '\0')
+                    m = (const char *)(intptr_t)mv;
+            }
+            iov[n].buf = (int32_t)(intptr_t)"Error["; iov[n].len = 6; n++;
+            iov[n].buf = (int32_t)(intptr_t)ty; iov[n].len = wasm_strlen(ty); n++;
+            iov[n].buf = (int32_t)(intptr_t)"]: "; iov[n].len = 3; n++;
+            iov[n].buf = (int32_t)(intptr_t)m; iov[n].len = wasm_strlen(m); n++;
+        } else {
+            int64_t msg = _wasm_throw_to_display_string(error_val);
+            const char *ms = msg ? (const char *)(intptr_t)msg : "error";
+            iov[n].buf = (int32_t)(intptr_t)ms; iov[n].len = wasm_strlen(ms); n++;
+        }
+        iov[n].buf = (int32_t)(intptr_t)"\n"; iov[n].len = 1; n++;
+        /* One iovec per call — the single-iovec shape is the only one
+           this runtime has ever exercised against wasmtime. */
+        for (int i = 0; i < n; i++) {
+            int32_t nwritten;
+            __wasi_fd_write(2, &iov[i], 1, &nwritten);
+        }
+        extern void proc_exit(int code)
+            __attribute__((import_module("wasi_snapshot_preview1"), import_name("proc_exit")));
+        proc_exit(1);
+    }
     return 0;
 }
 
@@ -1275,6 +1322,27 @@ int64_t taida_float_mold_str(int64_t v) {
     int negative = 0;
     if (s[i] == '-') { negative = 1; i++; }
     else if (s[i] == '+') { i++; }
+
+    /* Rust f64::from_str parity: nan / inf / infinity (any case,
+       optional sign) are successful parses on every other backend. */
+    {
+        const char *p = s + i;
+        char l0 = (char)(p[0] | 32);
+        if (l0 == 'n' || l0 == 'i') {
+            char buf[9];
+            int bl = 0;
+            while (p[bl] != '\0' && bl < 8) { buf[bl] = (char)(p[bl] | 32); bl++; }
+            buf[bl] = '\0';
+            if (p[bl] == '\0') {
+                if (_wf_strcmp(buf, "nan") == 0)
+                    return _float_lax_new(_d2l(__builtin_nan("")));
+                if (_wf_strcmp(buf, "inf") == 0 || _wf_strcmp(buf, "infinity") == 0)
+                    return _float_lax_new(
+                        _d2l(negative ? -__builtin_inf() : __builtin_inf()));
+            }
+            return _float_lax_empty();
+        }
+    }
 
     /* Must start with digit or '.' */
     if (!((s[i] >= '0' && s[i] <= '9') || s[i] == '.'))

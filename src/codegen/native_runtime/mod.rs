@@ -881,7 +881,15 @@ mod tests {
         //   unique (core.c, F1): Float fingerprint canonicalisation +
         //   seen-set wiring in union/intersect/diff, tagged linear
         //   helpers removed. +3,074. 1,322,868 -> 1,325,942.
-        const EXPECTED_TOTAL_LEN: usize = 1_325_942;
+        // 2026-06-11 unhandled-throw report unification (core.c, F2):
+        //   taida_throw's no-ceiling path matches the interpreter's
+        //   `Runtime error: Unhandled error: ...` / Error[type]: message
+        //   format. +1,407. 1,325,942 -> 1,327,349.
+        // 2026-06-11 string-conversion parse parity (core.c, F1):
+        //   Int rejects out-of-range (ERANGE), Float rejects strtod's
+        //   whitespace / hex / NaN-payload extensions — both matching
+        //   the reference parse. +1,013. 1,327,349 -> 1,328,362.
+        const EXPECTED_TOTAL_LEN: usize = 1_328_362;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1625,7 +1633,9 @@ mod tests {
         //   bit threaded by the emitter). +912. F1 403,062 -> 403,974.
         // 2026-06-11 kind-aware hash path for Float-bearing Set ops /
         //   unique (before the marker): +3,074. F1 413,526 -> 416,600.
-        const F1_LEN: usize = 416_600;
+        // 2026-06-11 string-conversion parse parity (before the
+        //   marker): +1,013. F1 416,600 -> 417,613.
+        const F1_LEN: usize = 417_613;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1683,7 +1693,11 @@ mod tests {
             // (F1 411,424 -> 412,335); F2 unchanged.
             // Fixed-notation float formatting for extreme magnitudes
             // (F1 412,335 -> 413,526); F2 unchanged.
-            F1_LEN + 228_943,
+            // Float-bearing Set ops hash path and the string-conversion
+            // parse parity land before the marker (F1 413,526 ->
+            // 417,613); the unhandled-throw report unification adds
+            // +1,407 after it. F2 228,943 -> 230,350.
+            F1_LEN + 230_350,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

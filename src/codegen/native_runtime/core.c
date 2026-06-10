@@ -2305,9 +2305,13 @@ taida_val taida_int_mold_str(taida_val v) {
     // Reject leading whitespace to match Interpreter parity (Rust parse::<i64>)
     if (s[0] == ' ' || s[0] == '\t' || s[0] == '\n' || s[0] == '\r') return taida_lax_tag_value_default(taida_lax_empty(0), TAIDA_TAG_INT);
     char *end;
-    taida_val result = strtol(s, &end, 10);
+    errno = 0;
+    long long result = strtoll(s, &end, 10);
     if (*end != '\0') return taida_lax_tag_value_default(taida_lax_empty(0), TAIDA_TAG_INT);  // parse failed
-    return taida_lax_tag_value_default(taida_lax_new(result, 0), TAIDA_TAG_INT);
+    // Out-of-range input clamps under strtoll and sets ERANGE — the
+    // reference (Rust parse::<i64>) treats it as a parse failure.
+    if (errno == ERANGE) return taida_lax_tag_value_default(taida_lax_empty(0), TAIDA_TAG_INT);
+    return taida_lax_tag_value_default(taida_lax_new((taida_val)result, 0), TAIDA_TAG_INT);
 }
 taida_val taida_int_mold_bool(taida_val v) {
     return taida_lax_tag_value_default(taida_lax_new(v ? 1 : 0, 0), TAIDA_TAG_INT);
@@ -2343,6 +2347,18 @@ taida_val taida_float_mold_float(double v) {
 taida_val taida_float_mold_str(taida_val v) {
     const char *s = (const char *)v;
     if (!s || *s == '\0') return taida_lax_tag_value_default(taida_lax_empty(_d2l(0.0)), TAIDA_TAG_FLOAT);
+    // Rust f64::from_str parity: strtod additionally accepts leading
+    // whitespace, hex floats (0x1.8p1) and NaN payloads (nan(chars)) —
+    // all parse failures on the reference.
+    if (s[0] == ' ' || s[0] == '\t' || s[0] == '\n' || s[0] == '\r')
+        return taida_lax_tag_value_default(taida_lax_empty(_d2l(0.0)), TAIDA_TAG_FLOAT);
+    {
+        size_t body = (s[0] == '+' || s[0] == '-') ? 1 : 0;
+        if (s[body] == '0' && (s[body + 1] == 'x' || s[body + 1] == 'X'))
+            return taida_lax_tag_value_default(taida_lax_empty(_d2l(0.0)), TAIDA_TAG_FLOAT);
+        if ((s[body] == 'n' || s[body] == 'N') && strchr(s, '(') != NULL)
+            return taida_lax_tag_value_default(taida_lax_empty(_d2l(0.0)), TAIDA_TAG_FLOAT);
+    }
     char *end;
     double result = strtod(s, &end);
     if (*end != '\0') return taida_lax_tag_value_default(taida_lax_empty(_d2l(0.0)), TAIDA_TAG_FLOAT);  // parse failed
@@ -9272,12 +9288,38 @@ taida_val taida_throw(taida_val error_val) {
         __taida_error_val[depth] = error_val;
         longjmp(__taida_error_jmp[depth], 1);
     }
-    // No error ceiling: gorilla — print the actual error message
-    taida_val msg = taida_throw_to_display_string(error_val);
-    if (msg != 0) {
-        fprintf(stderr, "Runtime error: %s\n", (const char*)msg);
+    // No error ceiling: match the interpreter's unhandled report —
+    // `Runtime error: Unhandled error: ...` on stderr, exit 1; packs
+    // render as `Error[type]: message` with the AnonymousError /
+    // Unknown fallbacks the reference applies.
+    if (taida_is_buchi_pack(error_val)) {
+        const char *ty = NULL;
+        const char *m = NULL;
+        size_t sl = 0;
+        if (taida_pack_has_hash(error_val, (taida_val)HASH_TYPE)) {
+            taida_val tv = taida_pack_get(error_val, (taida_val)HASH_TYPE);
+            if (tv && taida_is_string_value(tv)
+                && taida_read_cstr_len_safe((const char*)tv, 65536, &sl) && sl > 0)
+                ty = (const char*)tv;
+        }
+        if (!ty && taida_pack_has_hash(error_val, (taida_val)HASH___TYPE)) {
+            taida_val tv = taida_pack_get(error_val, (taida_val)HASH___TYPE);
+            if (tv && taida_is_string_value(tv)
+                && taida_read_cstr_len_safe((const char*)tv, 65536, &sl) && sl > 0)
+                ty = (const char*)tv;
+        }
+        if (taida_pack_has_hash(error_val, (taida_val)HASH_MESSAGE)) {
+            taida_val mv = taida_pack_get(error_val, (taida_val)HASH_MESSAGE);
+            if (mv && taida_is_string_value(mv)
+                && taida_read_cstr_len_safe((const char*)mv, 65536, &sl) && sl > 0)
+                m = (const char*)mv;
+        }
+        fprintf(stderr, "Runtime error: Unhandled error: Error[%s]: %s\n",
+                ty ? ty : "AnonymousError", m ? m : "Unknown");
     } else {
-        fprintf(stderr, "Unhandled error (no error ceiling)\n");
+        taida_val msg = taida_throw_to_display_string(error_val);
+        fprintf(stderr, "Runtime error: Unhandled error: %s\n",
+                msg ? (const char*)msg : "error");
     }
     exit(1);
     return 0;

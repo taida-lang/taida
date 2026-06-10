@@ -194,18 +194,19 @@ stdout(jsonEncode(nested))
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// HashMap/Set displays render uniform Float values as numbers on the
-/// compiled backends (native printed raw f64 bits in toString and Set,
-/// wasm lost the tag in values()). The interpreter currently prints
-/// its internal pack form for these containers — a separate, known
-/// reference-side issue — so this pin asserts native/wasm agreement
-/// and the absence of bit-pattern leakage rather than interp parity.
+/// HashMap/Set displays agree on every backend: native printed raw f64
+/// bits in toString and Set, wasm lost the tag in values(), and the
+/// interpreter leaked the internal carrier pack
+/// (`@(__entries <= ..., __type <= "HashMap")`) from stdout / template
+/// interpolation even though the `__` namespace is declared
+/// compiler-internal and `.toString()` already printed the public
+/// shape.
 #[test]
 fn hashmap_set_display_renders_floats_on_compiled_backends() {
     let dir = unique_temp_dir("f61_hm_set_display");
-    let td = dir.join("hm.td");
-    std::fs::write(
-        &td,
+    let out = assert_parity(
+        &dir,
+        "hm",
         r#"m <= hashMap().set("a", 1.5).set("b", 2.5)
 stdout(m.values())
 stdout(m)
@@ -213,20 +214,11 @@ s <= setOf(@[1.5, 2.5])
 stdout(s)
 stdout(s.toList())
 "#,
-    )
-    .expect("write fixture");
-    let native = build_and_run_native(&td, &dir, "hm");
-    assert!(
-        !native.contains("4609434218613702656"),
-        "native leaked f64 bits: {native}"
     );
-    assert!(
-        native.contains("HashMap({\"a\": 1.5, \"b\": 2.5})") && native.contains("Set({1.5, 2.5})"),
-        "native display shape: {native}"
+    assert_eq!(
+        out,
+        "@[1.5, 2.5]\nHashMap({\"a\": 1.5, \"b\": 2.5})\nSet({1.5, 2.5})\n@[1.5, 2.5]"
     );
-    if let Some(wasm) = build_and_run_wasm(&td, &dir, "hm") {
-        assert_eq!(native, wasm, "native vs wasm display");
-    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -434,5 +426,141 @@ stdout(a.diff(b).size())
         elapsed < Duration::from_secs(10),
         "Float set ops took {elapsed:?} — linear fallback regression?"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// String-conversion parses agree with the reference on every backend:
+/// `Float["NaN"/"Infinity"]` succeeds (Rust f64::from_str semantics —
+/// js rejected NaN, wasm rejected both), out-of-range `Int[...]` fails
+/// (native clamped via strtol, js wrapped through BigInt.asIntN), and
+/// the IEEE specials display as `NaN` / `inf` / `-inf` (js used
+/// `Infinity`; the Float kind now flows through getOrDefault into the
+/// display dispatch on the compiled backends too).
+#[test]
+fn conversion_parse_acceptance_matches_reference() {
+    let dir = unique_temp_dir("f61_conv_parse");
+    let src = r#"a <= Float["NaN"]()
+stdout(a.hasValue())
+b <= Float["Infinity"]()
+stdout(b.hasValue())
+c <= Int["9999999999999999999999"]()
+stdout(c.hasValue())
+n <= Float["NaN"]().getOrDefault(0.0)
+stdout(n)
+i <= Float["-inf"]().getOrDefault(0.0)
+stdout(i)
+w <= Float[" 1.5"]()
+stdout(w.hasValue())
+"#;
+    let expected = "true\ntrue\nfalse\nNaN\n-inf\nfalse";
+    let out = assert_parity(&dir, "conv_parse", src);
+    assert_eq!(out, expected);
+    if node_available() {
+        let td = dir.join("conv_parse.td");
+        let mjs = dir.join("conv_parse.mjs");
+        let status = Command::new(taida_bin())
+            .args(["build", "js"])
+            .arg(&td)
+            .arg("-o")
+            .arg(&mjs)
+            .status()
+            .expect("taida build js runs");
+        assert!(status.success(), "js build failed");
+        let jsout = Command::new("node").arg(&mjs).output().expect("node runs");
+        assert!(jsout.status.success(), "js run failed");
+        assert_eq!(
+            String::from_utf8_lossy(&jsout.stdout).trim_end(),
+            expected,
+            "js conversion parses"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An uncaught throw reports identically on every backend: one
+/// `Runtime error: Unhandled error: ...` line on stderr and exit code 1
+/// (js dumped a raw Node stack + object internals, wasm wrote a generic
+/// note to stdout and trapped with exit 134; packs render as
+/// `Error[type]: message`).
+#[test]
+fn unhandled_throw_reports_identically_everywhere() {
+    let dir = unique_temp_dir("f61_throw_report");
+    let td = dir.join("boom.td");
+    std::fs::write(
+        &td,
+        "Error => MyErr = @(message: Str)\nthrow(MyErr(message <= \"oops\"))\n",
+    )
+    .expect("write fixture");
+    let expected_line = "Runtime error: Unhandled error: Error[MyErr]: oops";
+
+    let interp = Command::new(taida_bin())
+        .arg(&td)
+        .output()
+        .expect("interp runs");
+    assert_eq!(interp.status.code(), Some(1), "interp exit code");
+    assert!(
+        String::from_utf8_lossy(&interp.stderr).contains(expected_line),
+        "interp report: {}",
+        String::from_utf8_lossy(&interp.stderr)
+    );
+
+    let bin = dir.join("boom_native");
+    let status = Command::new(taida_bin())
+        .args(["build", "native"])
+        .arg(&td)
+        .arg("-o")
+        .arg(&bin)
+        .status()
+        .expect("native build");
+    assert!(status.success());
+    let native = Command::new(&bin).output().expect("native runs");
+    assert_eq!(native.status.code(), Some(1), "native exit code");
+    assert!(
+        String::from_utf8_lossy(&native.stderr).contains(expected_line),
+        "native report: {}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+
+    if node_available() {
+        let mjs = dir.join("boom.mjs");
+        let status = Command::new(taida_bin())
+            .args(["build", "js"])
+            .arg(&td)
+            .arg("-o")
+            .arg(&mjs)
+            .status()
+            .expect("js build");
+        assert!(status.success());
+        let js = Command::new("node").arg(&mjs).output().expect("node runs");
+        assert_eq!(js.status.code(), Some(1), "js exit code");
+        let js_err = String::from_utf8_lossy(&js.stderr);
+        assert!(js_err.contains(expected_line), "js report: {js_err}");
+        assert!(
+            !js_err.contains("at __taida_throw"),
+            "js must not dump a raw stack: {js_err}"
+        );
+    }
+
+    if let Some(wasmtime) = wasmtime_bin() {
+        let wasm = dir.join("boom.wasm");
+        let status = Command::new(taida_bin())
+            .args(["build", "wasm-min"])
+            .arg(&td)
+            .arg("-o")
+            .arg(&wasm)
+            .status()
+            .expect("wasm build");
+        assert!(status.success());
+        let out = Command::new(&wasmtime)
+            .arg(&wasm)
+            .output()
+            .expect("wasmtime runs");
+        assert_eq!(out.status.code(), Some(1), "wasm exit code");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(expected_line),
+            "wasm report: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

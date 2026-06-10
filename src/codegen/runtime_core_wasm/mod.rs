@@ -210,7 +210,15 @@ mod tests {
         //   canonicalisation + seen-set wiring in union/intersect/diff,
         //   tagged linear helpers removed — see the native twin.
         //   479,244 -> 481,465.
-        const EXPECTED_TOTAL_LEN: usize = 481_465;
+        // 2026-06-11 unhandled-throw report unification
+        //   (02_containers.inc.c): the no-ceiling path writes the
+        //   interpreter's `Runtime error: Unhandled error: ...` line to
+        //   stderr and proc_exits(1) instead of trapping after a stdout
+        //   note. 481,465 -> 483,773.
+        // 2026-06-11 string-conversion parse parity
+        //   (02_containers.inc.c): the manual float parser accepts
+        //   nan / inf / infinity like the reference. 483,773 -> 484,806.
+        const EXPECTED_TOTAL_LEN: usize = 484_806;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

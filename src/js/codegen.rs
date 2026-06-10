@@ -546,6 +546,15 @@ impl JsCodegen {
             Expr::MoldInst(name, type_args, _, _) if name == "Div" || name == "Mod" => {
                 type_args.iter().any(|a| self.is_float_origin_expr(a))
             }
+            // getOrDefault's result type follows its default argument
+            // (the checker enforces that the Lax payload and the default
+            // agree), so a Float default propagates Float origin — this
+            // carries `Float["NaN"]().getOrDefault(0.0)` into the
+            // `__taida_float_render` path (`inf` / `-inf`, not JS'
+            // `Infinity`).
+            Expr::MethodCall(_, method, args, _) if method == "getOrDefault" => {
+                args.first().is_some_and(|a| self.is_float_origin_expr(a))
+            }
             _ => false,
         }
     }
