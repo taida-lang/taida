@@ -5936,7 +5936,10 @@ taida_val taida_float_to_str(double a) {
     // `3.14` → `3.1400000000000001`). The loop below picks the shortest
     // precision that survives a round-trip, matching Rust's behaviour
     // for every double in practice while remaining self-contained.
-    char tmp[64];
+    // 400 bytes: a finite f64 expands to at most ~310 decimal digits
+    // (1e308) — or "0." plus ~320 fractional places at the denormal end
+    // — the old 64-byte buffer forced %g's scientific notation.
+    char tmp[400];
     if (isnan(a)) { snprintf(tmp, sizeof(tmp), "NaN"); }
     else if (isinf(a)) { snprintf(tmp, sizeof(tmp), a < 0 ? "-inf" : "inf"); }
     else if (a == 0.0) {
@@ -5949,8 +5952,12 @@ taida_val taida_float_to_str(double a) {
         // interpreter output byte-for-byte.
         snprintf(tmp, sizeof(tmp), signbit(a) ? "-0.0" : "0.0");
     }
-    else if (a == floor(a) && fabs(a) < 1e16) {
-        // Integer-valued float in the exact range — always "X.0".
+    else if (a == floor(a)) {
+        // Integer-valued float — always "X.0", at any magnitude. libc's
+        // %f performs the exact decimal expansion, matching Rust's
+        // Display (which never uses scientific notation); the previous
+        // < 1e16 guard sent 1e20 down the %g path and printed "1e+20"
+        // where the interpreter prints the full 21-digit integer.
         snprintf(tmp, sizeof(tmp), "%.1f", a);
     } else {
         // Find the smallest precision p in [1..17] such that
@@ -5966,6 +5973,21 @@ taida_val taida_float_to_str(double a) {
             // tmp already holds the chosen rendering.
         } else {
             snprintf(tmp, sizeof(tmp), "%.17g", a);
+        }
+        // Rust's Display never uses scientific notation: when %g chose
+        // an exponent form (tiny magnitudes like 1e-7), re-render in
+        // fixed notation at the smallest precision that round-trips,
+        // then trim the trailing zeros.
+        if (strchr(tmp, 'e') || strchr(tmp, 'E')) {
+            for (int prec = 1; prec < (int)sizeof(tmp) - 8; prec++) {
+                snprintf(tmp, sizeof(tmp), "%.*f", prec, a);
+                if (strtod(tmp, NULL) == a) break;
+            }
+            char *dot2 = strchr(tmp, '.');
+            if (dot2) {
+                char *end = tmp + strlen(tmp) - 1;
+                while (end > dot2 + 1 && *end == '0') *end-- = '\0';
+            }
         }
         // If the output lacks a '.' (e.g. `%g` elided the fraction on
         // an integer-looking float outside the above range), append ".0"

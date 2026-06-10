@@ -229,3 +229,30 @@ stdout(s.toList())
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Extreme Float magnitudes format identically on interp/native/wasm:
+/// wasm printed 1e20 as "0" (the u64 cast is UB past 2^64), native
+/// chose %g's scientific notation ("1e+20" / "1e-07") where the
+/// reference expands every finite f64 in fixed notation.
+#[test]
+fn extreme_float_magnitudes_format_consistently() {
+    let dir = unique_temp_dir("f61_float_extreme");
+    let out = assert_parity(
+        &dir,
+        "extremes",
+        r#"big <= 100000000000000000000.5
+stdout(big.toString())
+huge <= 123456789012345678901234567890.0
+stdout(huge.toString())
+tiny <= 0.0000001
+stdout(tiny.toString())
+neg <= -100000000000000000000.5
+stdout(neg.toString())
+"#,
+    );
+    assert_eq!(
+        out,
+        "100000000000000000000.0\n123456789012345677877719597056.0\n0.0000001\n-100000000000000000000.0"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

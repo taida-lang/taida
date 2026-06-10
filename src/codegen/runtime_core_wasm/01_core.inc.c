@@ -1662,6 +1662,33 @@ static int fmt_g(double d, char *buf, int bufsize) {
         return len;
     }
 
+    /* Large integer-valued f64: every finite f64 at or above 2^53 is an
+       integer, and past ~1e18/1e19 the i64/u64 casts below are UB — the
+       old path printed 1e20 as "0". Expand exactly: decompose into
+       mantissa * 2^exp and double out in decimal (cold path; <= ~310
+       digits for the largest finite f64). */
+    if (d >= 1e18) {
+        union { double d; uint64_t u; } um;
+        um.d = d;
+        uint64_t mant = (um.u & 0xFFFFFFFFFFFFFULL) | (1ULL << 52);
+        int exp2 = (int)((um.u >> 52) & 0x7FF) - 1023 - 52; /* >= 0 here */
+        unsigned char dig[340];
+        int n = 0;
+        while (mant > 0) { dig[n++] = (unsigned char)(mant % 10); mant /= 10; }
+        for (int k = 0; k < exp2; k++) {
+            int carry = 0;
+            for (int i = 0; i < n; i++) {
+                int v = dig[i] * 2 + carry;
+                dig[i] = (unsigned char)(v % 10);
+                carry = v / 10;
+            }
+            while (carry) { dig[n++] = (unsigned char)(carry % 10); carry /= 10; }
+        }
+        for (int i = n - 1; i >= 0 && len < bufsize; i--) buf[len++] = (char)('0' + dig[i]);
+        if (len + 2 <= bufsize) { buf[len++] = '.'; buf[len++] = '0'; }
+        return len;
+    }
+
     /* Integer check: if d == floor(d) and d < 1e18, format as "X.0" */
     {
         int64_t as_int = (int64_t)d;
