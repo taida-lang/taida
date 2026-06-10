@@ -691,6 +691,7 @@ impl TypeChecker {
         matches!(
             name,
             "Int"
+                | "Integer"
                 | "Float"
                 | "Num"
                 | "Str"
@@ -698,7 +699,6 @@ impl TypeChecker {
                 | "Bytes"
                 | "Bool"
                 | "Boolean"
-                | "Number"
                 | "Unit"
                 | "Void"
         )
@@ -708,6 +708,7 @@ impl TypeChecker {
         matches!(
             name,
             "Int"
+                | "Integer"
                 | "Float"
                 | "Num"
                 | "Str"

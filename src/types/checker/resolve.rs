@@ -205,12 +205,12 @@ impl TypeChecker {
 
     fn type_name_to_type(&self, name: &str) -> Type {
         match name {
-            "Int" => Type::Int,
+            "Int" | "Integer" => Type::Int,
             "Float" => Type::Float,
             "Num" => Type::Num,
-            "Str" => Type::Str,
+            "Str" | "String" => Type::Str,
             "Bytes" => Type::Bytes,
-            "Bool" => Type::Bool,
+            "Bool" | "Boolean" => Type::Bool,
             "Unit" => Type::Unit,
             "JSON" => Type::Json,
             "Molten" => Type::Molten,

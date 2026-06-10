@@ -326,14 +326,16 @@ stdout(TypeExtends[:Int, :Num]())
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Built-in type names cannot be shadowed by user definitions: the
-/// annotation resolver always picks the built-in, so a custom `Num` /
-/// `Str` pack would be definable yet unusable (its annotations either
-/// hit the constraint-marker rejection or a nonsensical "returns Num,
-/// expected Num" mismatch). The definition site now rejects the
-/// shadowing. The undocumented `String` / `Boolean` / `Number`
-/// resolver aliases are gone too — annotating them is a plain type
-/// error instead of silently meaning Str / Bool / Num.
+/// Primitive type names (and their official alias spellings) cannot
+/// be shadowed by user definitions: the annotation resolver always
+/// picks the built-in, so a custom `Num` / `Str` pack would be
+/// definable yet unusable (its annotations either hit the
+/// constraint-marker rejection or a nonsensical "returns Num,
+/// expected Num" mismatch). The definition site rejects the
+/// shadowing. `Integer` / `String` / `Boolean` are the OFFICIAL alias
+/// spellings of Int / Str / Bool and resolve accordingly; `Number` is
+/// not a type at all (Num is inference-internal) and stays a free
+/// identifier.
 #[test]
 fn builtin_type_names_cannot_be_shadowed() {
     let dir = unique_temp_dir("f59_shadow");
@@ -344,6 +346,7 @@ fn builtin_type_names_cannot_be_shadowed() {
             "Mold[T] => Str[T] = @(\n  v <= 0\n)\nstdout(1)\n",
         ),
         ("shadow_bool_enum", "Enum => Bool = :Yes :No\nstdout(1)\n"),
+        ("shadow_integer", "Integer = @(\n  v <= 0\n)\nstdout(1)\n"),
     ] {
         let td = dir.join(format!("{stem}.td"));
         std::fs::write(&td, src).unwrap();
@@ -355,18 +358,28 @@ fn builtin_type_names_cannot_be_shadowed() {
         );
         assert!(msg.contains("[E1538]"), "{stem} must be E1538, got: {msg}");
     }
-    // The alias spellings no longer resolve to built-ins.
+    // The official alias spellings resolve to their primitives.
     let alias = dir.join("alias.td");
-    std::fs::write(&alias, "f x: String =\n  x\n=> :Str\nstdout(f(\"a\"))\n").unwrap();
+    std::fs::write(
+        &alias,
+        "f x: Integer =\n  x + 1\n=> :Int\ng s: String =\n  s\n=> :Str\nh b: Boolean =\n  !b\n=> :Bool\nstdout(f(41))\nstdout(g(\"ok\"))\nstdout(h(false))\n",
+    )
+    .unwrap();
     let out = Command::new(taida_bin()).arg(&alias).output().unwrap();
-    let msg = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim_end(),
+        "42\nok\ntrue",
+        "official aliases must resolve to Int/Str/Bool"
     );
+    // `Number` is not a reserved name: a user type of that name works.
+    let free = dir.join("free_number.td");
+    std::fs::write(&free, "Number = @(\n  v <= 0\n)\nstdout(Number(v <= 7))\n").unwrap();
+    let out2 = Command::new(taida_bin()).arg(&free).output().unwrap();
+    assert!(out2.status.success());
     assert!(
-        msg.contains("Type error"),
-        "String annotation must no longer alias Str, got: {msg}"
+        String::from_utf8_lossy(&out2.stdout).contains("v <= 7"),
+        "Number must be a free identifier"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
