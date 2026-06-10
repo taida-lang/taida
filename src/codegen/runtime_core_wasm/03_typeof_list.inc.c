@@ -1089,7 +1089,7 @@ int64_t taida_list_unique(int64_t list_ptr) {
            native taida_list_unique). The result rebuilds its own kind
            entries for the surviving elements (and naturally re-homogenises
            when only one kind survives). The hash path engages only when
-           every element kind is hashable — Float or unknown kinds fall back
+           every element kind is hashable — unknown kinds fall back
            to the linear pair scan. */
         int64_t new_list = taida_list_new();
         _wasm_seen_k seen;

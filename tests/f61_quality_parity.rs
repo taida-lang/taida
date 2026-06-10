@@ -753,3 +753,75 @@ fn json_schema_and_undefined_variable_diagnostics() {
     assert!(combined2.contains("[E1542]"), "undefined: {combined2}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The kind-aware numeric fingerprint lives in the f64 domain the
+/// equality widens to: past 2^53, Int(2^60 + 1) and Float(2^60) are
+/// equal after widening, and the hash path must not split what the
+/// equality merges (Set/Unique used to report 2 elements on the
+/// compiled backends where the interpreter reports 1).
+#[test]
+fn numeric_fingerprint_matches_equality_past_2_53() {
+    let dir = unique_temp_dir("f61_fp53");
+    let src = r#"bigf <= 1152921504606846976.0
+u <= setOf(@[bigf]).union(setOf(@[1152921504606846977]))
+stdout(u.size())
+"#;
+    let out = assert_parity(&dir, "fp53", src);
+    assert_eq!(out, "1");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Order-sensitive checks see template interpolation bodies and
+/// error-ceiling handlers: `${later(1)}` is parsed and evaluated by
+/// the interpreter like any expression (forward references failed at
+/// runtime there and silently succeeded on the hoisting backends),
+/// and a ceiling handler runs when a later statement throws, where
+/// only the functions defined up to the throw exist.
+#[test]
+fn template_and_ceiling_forward_references_are_rejected() {
+    let dir = unique_temp_dir("f61_fwd_edges");
+    let t1 = dir.join("template.td");
+    std::fs::write(&t1, "stdout(`${later(1)}`)\nlater x: Int = x * 2 => :Int\n")
+        .expect("write fixture");
+    let o1 = Command::new(taida_bin())
+        .arg(&t1)
+        .output()
+        .expect("taida runs");
+    let c1 = format!(
+        "{}{}",
+        String::from_utf8_lossy(&o1.stdout),
+        String::from_utf8_lossy(&o1.stderr)
+    );
+    assert!(c1.contains("[E1539]"), "template: {c1}");
+
+    let t2 = dir.join("ceiling.td");
+    std::fs::write(
+        &t2,
+        "|== error: Error =\n  recover(1)\n=> :Int\nthrow(\"x\")\nrecover x: Int = x => :Int\n",
+    )
+    .expect("write fixture");
+    let o2 = Command::new(taida_bin())
+        .arg(&t2)
+        .output()
+        .expect("taida runs");
+    let c2 = format!(
+        "{}{}",
+        String::from_utf8_lossy(&o2.stdout),
+        String::from_utf8_lossy(&o2.stderr)
+    );
+    assert!(c2.contains("[E1539]"), "ceiling: {c2}");
+
+    let t3 = dir.join("template_undef.td");
+    std::fs::write(&t3, "s <= `v=${missing}`\nstdout(s)\n").expect("write fixture");
+    let o3 = Command::new(taida_bin())
+        .arg(&t3)
+        .output()
+        .expect("taida runs");
+    let c3 = format!(
+        "{}{}",
+        String::from_utf8_lossy(&o3.stdout),
+        String::from_utf8_lossy(&o3.stderr)
+    );
+    assert!(c3.contains("[E1542]"), "template undefined: {c3}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

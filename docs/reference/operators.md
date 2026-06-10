@@ -344,7 +344,7 @@ riskyOperation()
 
 Lax 境界は `|==` ではなく、`has_value` / `getOrDefault` / `|` による分岐で処理します:
 
-```taida
+```taida fragment
 result <= JSON[raw, User]()
 result >=> user
 | user.status.has_value |> stdout("status=" + user.status.getOrDefault(Status:Pending()).toString())

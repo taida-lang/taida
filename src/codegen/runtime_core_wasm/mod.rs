@@ -239,7 +239,9 @@ mod tests {
         //   (02_containers.inc.c): 483,445 -> 484,166.
         // 2026-06-11 STR tags on str.get's Lax (02_containers.inc.c):
         //   484,166 -> 484,517.
-        const EXPECTED_TOTAL_LEN: usize = 484_517;
+        // 2026-06-11 numeric fingerprint = f64 image
+        //   (01_core.inc.c) — see the native twin. 484,517 -> 483,936.
+        const EXPECTED_TOTAL_LEN: usize = 483_936;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

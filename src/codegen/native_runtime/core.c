@@ -6760,43 +6760,31 @@ static int taida_ekind_value_eq(taida_val a, uint32_t eka, taida_val b, uint32_t
 static void taida_fp_accum_k(taida_val v, uint32_t ekind, uint64_t *h) {
     switch (TAIDA_EKIND_KIND(ekind)) {
         case TAIDA_TAG_INT:
-        case TAIDA_TAG_ENUM: {
+        case TAIDA_TAG_ENUM:
+        case TAIDA_TAG_FLOAT: {
+            // Numeric kinds fingerprint their f64 image: equality
+            // crosses Int/Enum/Float by WIDENING to f64 (so past 2^53,
+            // Int(2^60) == Float(2^60) == Int(2^60 + 1)), and the
+            // fingerprint must never separate a pair the equality
+            // confirms. Same-kind Int collisions inside one f64 bucket
+            // are split by the equality confirmation; -0.0 canonicalises
+            // to +0.0 (eq treats them and Int(0) as one class); a NaN
+            // keeps its (never-equal) bits and inserts fresh, exactly
+            // like the linear path. Enum type ids stay out of the hash —
+            // ValueKey does the same and lets confirmation distinguish
+            // same-ordinal enums.
+            double d = (TAIDA_EKIND_KIND(ekind) == TAIDA_TAG_FLOAT)
+                ? _l2d(v)
+                : (double)(int64_t)v;
+            if (d == 0.0) d = 0.0; // -0.0 -> +0.0
             unsigned char tag = 0; taida_fnv_bytes(h, &tag, 1);
-            int64_t s = (int64_t)v; taida_fnv_bytes(h, &s, sizeof(s));
+            int64_t bits; memcpy(&bits, &d, sizeof(bits));
+            taida_fnv_bytes(h, &bits, sizeof(bits));
             break;
         }
         case TAIDA_TAG_BOOL: {
             unsigned char tag = 1; taida_fnv_bytes(h, &tag, 1);
             int64_t s = (int64_t)v; taida_fnv_bytes(h, &s, sizeof(s));
-            break;
-        }
-        case TAIDA_TAG_FLOAT: {
-            // Fingerprint a Float inside its eq-equivalence class: any d
-            // some Int64 i equals under the crossing rule (d == (double)i)
-            // must fingerprint as that Int, or the hash would separate a
-            // pair the equality confirms. (double)INT64_MAX rounds up to
-            // 2^63 exactly, so 2^63 itself maps back to INT64_MAX; the
-            // range checks also keep the int64 cast defined (M19 lesson:
-            // out-of-range float->int casts are UB, not saturation).
-            // -0.0 lands in the integer arm as 0, matching +0.0 == -0.0.
-            // A NaN keeps its raw bits under the Float tag: confirmation
-            // rejects NaN == NaN, so every NaN inserts fresh — exactly
-            // the linear path's behaviour.
-            double d = _l2d(v);
-            int64_t as_int = 0; int int_like = 0;
-            if (d >= -9223372036854775808.0 && d < 9223372036854775808.0) {
-                int64_t t = (int64_t)d;
-                if ((double)t == d) { as_int = t; int_like = 1; }
-            } else if (d == 9223372036854775808.0) {
-                as_int = INT64_MAX; int_like = 1;
-            }
-            if (int_like) {
-                unsigned char tag = 0; taida_fnv_bytes(h, &tag, 1);
-                taida_fnv_bytes(h, &as_int, sizeof(as_int));
-            } else {
-                unsigned char tag = 4; taida_fnv_bytes(h, &tag, 1);
-                int64_t bits = (int64_t)v; taida_fnv_bytes(h, &bits, sizeof(bits));
-            }
             break;
         }
         default:
@@ -6805,9 +6793,10 @@ static void taida_fp_accum_k(taida_val v, uint32_t ekind, uint64_t *h) {
     }
 }
 
-// Kind-aware hashability gate. Float is never hashable (interp parity:
-// NaN / ±0.0 / Int↔Float crossing force the linear path), and an unknown
-// kind also forces the linear path so legacy-fingerprint values and
+// Kind-aware hashability gate. Numeric kinds (Float included) are
+// hashable: the fingerprint is the f64 image of the value, which is
+// exactly the domain the kind-aware equality compares in. An unknown
+// kind forces the linear path so legacy-fingerprint values and
 // kind-fingerprint values can never share one seen-set inconsistently.
 static int taida_ekind_hashable(taida_val v, uint32_t ekind) {
     switch (TAIDA_EKIND_KIND(ekind)) {

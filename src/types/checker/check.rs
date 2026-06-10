@@ -1360,9 +1360,36 @@ impl TypeChecker {
                     self.scan_expr_forward_refs(&u.source, &later_funcs, &defined);
                     defined.insert(u.target.as_str());
                 }
+                // An ErrorCeiling handler runs whenever a LATER protected
+                // statement throws — at that moment only the functions
+                // defined up to the throw site exist on the interpreter.
+                // The throw site is not statically known, so the handler
+                // is conservatively checked against the definitions
+                // available at the ceiling itself; referencing a function
+                // defined further down would make the program's success
+                // depend on where the throw happens (and on the backend,
+                // since the compiled ones hoist).
+                Statement::ErrorCeiling(ec) => {
+                    for st in &ec.handler_body {
+                        match st {
+                            Statement::Expr(e) => {
+                                self.scan_expr_forward_refs(e, &later_funcs, &defined)
+                            }
+                            Statement::Assignment(a) => {
+                                self.scan_expr_forward_refs(&a.value, &later_funcs, &defined)
+                            }
+                            Statement::UnmoldForward(u) => {
+                                self.scan_expr_forward_refs(&u.source, &later_funcs, &defined)
+                            }
+                            Statement::UnmoldBackward(u) => {
+                                self.scan_expr_forward_refs(&u.source, &later_funcs, &defined)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 // Definitions and module plumbing are not executable
-                // expressions; ErrorCeiling handler bodies run only on a
-                // throw and defer resolution like function bodies.
+                // expressions.
                 _ => {}
             }
         }
@@ -1388,10 +1415,17 @@ impl TypeChecker {
             }
             // Deferred-execution bodies: resolution happens at call time.
             Expr::Lambda(..) => {}
+            // The interpreter parses and evaluates `${...}` bodies as
+            // expressions, so a forward reference inside one fails at
+            // runtime like any other — scan them.
+            Expr::TemplateLit(template, _) => {
+                for inner in template_interpolation_exprs(template) {
+                    self.scan_expr_forward_refs(&inner, later_funcs, defined);
+                }
+            }
             Expr::IntLit(..)
             | Expr::FloatLit(..)
             | Expr::StringLit(..)
-            | Expr::TemplateLit(..)
             | Expr::BoolLit(..)
             | Expr::Gorilla(..)
             | Expr::Placeholder(..)
@@ -1617,4 +1651,41 @@ impl TypeChecker {
             _ => {}
         }
     }
+}
+
+/// Extract the interpolation expressions of a template literal the way
+/// the interpreter's `eval_template_string` does: each `${...}` body is
+/// parsed as a standalone program whose first statement is the
+/// expression (unparseable bodies render verbatim at runtime and are
+/// skipped here too). Used by the order-sensitive checks ([E1539] /
+/// [E1540]) so a forward reference inside `${...}` does not slip
+/// through the scan.
+pub(super) fn template_interpolation_exprs(template: &str) -> Vec<Expr> {
+    let mut out = Vec::new();
+    let mut chars = template.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '$' && chars.peek() == Some(&'{') {
+            chars.next();
+            let mut expr_str = String::new();
+            let mut depth = 1;
+            for c in chars.by_ref() {
+                if c == '{' {
+                    depth += 1;
+                } else if c == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                expr_str.push(c);
+            }
+            let (program, errors) = crate::parser::parse(&expr_str);
+            if errors.is_empty()
+                && let Some(Statement::Expr(expr)) = program.statements.into_iter().next()
+            {
+                out.push(expr);
+            }
+        }
+    }
+    out
 }

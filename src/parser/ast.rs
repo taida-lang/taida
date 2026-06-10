@@ -922,8 +922,11 @@ pub fn append_consume_plan(
         let pname = p.name.as_str();
         let mut sites = std::collections::HashSet::new();
         for arm in arms {
+            // The condition must mention neither the accumulator nor
+            // the function itself — a self call inside a condition would
+            // make "every self call is a bare tail call" unprovable.
             if let Some(cond) = &arm.condition
-                && expr_mentions_ident(cond, pname)
+                && (expr_mentions_ident(cond, pname) || expr_mentions_ident(cond, fname))
             {
                 continue 'params;
             }

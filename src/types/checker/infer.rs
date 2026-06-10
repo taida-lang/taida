@@ -305,6 +305,13 @@ impl TypeChecker {
             Expr::StringLit(_, _) => Type::Str,
             Expr::TemplateLit(template, span) => {
                 self.check_comparison_errors_in_template(template, span);
+                // Interpolation bodies are full expressions at runtime —
+                // infer them so an undefined variable inside `${...}`
+                // gets its [E1542] here instead of failing only on the
+                // interpreter (the compiled backends would render 0).
+                for inner in super::check::template_interpolation_exprs(template) {
+                    self.infer_expr_type(&inner);
+                }
                 Type::Str
             }
             Expr::BoolLit(_, _) => Type::Bool,

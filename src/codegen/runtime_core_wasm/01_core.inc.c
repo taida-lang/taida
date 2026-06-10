@@ -4098,39 +4098,27 @@ static int _wasm_ekind_value_eq(int64_t a, uint32_t eka, int64_t b, uint32_t ekb
 static void _wasm_fp_accum_k(int64_t v, uint32_t ekind, uint64_t *h) {
     switch (WASM_EKIND_KIND(ekind)) {
         case WASM_TAG_INT:
-        case WASM_TAG_ENUM: {
+        case WASM_TAG_ENUM:
+        case WASM_TAG_FLOAT: {
+            /* Numeric kinds fingerprint their f64 image (mirror of
+               native): equality crosses Int/Enum/Float by widening to
+               f64, so the fingerprint must live in that domain too —
+               past 2^53, Int(2^60) == Float(2^60) == Int(2^60 + 1).
+               Same-kind Int collisions inside one f64 bucket are split
+               by the equality confirmation; -0.0 canonicalises to +0.0;
+               a NaN keeps its never-equal bits and inserts fresh. */
+            double d = (WASM_EKIND_KIND(ekind) == WASM_TAG_FLOAT)
+                ? _l2d(v)
+                : (double)(int64_t)v;
+            if (d == 0.0) d = 0.0; /* -0.0 -> +0.0 */
             unsigned char tag = 0; _wasm_fnv_bytes(h, &tag, 1);
-            int64_t s = (int64_t)v; _wasm_fnv_bytes(h, &s, sizeof(s));
+            int64_t bits; __builtin_memcpy(&bits, &d, sizeof(bits));
+            _wasm_fnv_bytes(h, &bits, sizeof(bits));
             break;
         }
         case WASM_TAG_BOOL: {
             unsigned char tag = 1; _wasm_fnv_bytes(h, &tag, 1);
             int64_t s = (int64_t)v; _wasm_fnv_bytes(h, &s, sizeof(s));
-            break;
-        }
-        case WASM_TAG_FLOAT: {
-            /* Mirror of native: fingerprint a Float inside its
-               eq-equivalence class. Integer-valued payloads fingerprint
-               as the Int they equal (the crossing must collide before
-               equality confirms; -0.0 lands here as 0), with the bounds
-               keeping the int64 cast defined; everything else keeps its
-               raw bits under the Float tag (a NaN never confirms equal,
-               so it inserts fresh — the linear path's behaviour). */
-            double d = _l2d(v);
-            int64_t as_int = 0; int int_like = 0;
-            if (d >= -9223372036854775808.0 && d < 9223372036854775808.0) {
-                int64_t t = (int64_t)d;
-                if ((double)t == d) { as_int = t; int_like = 1; }
-            } else if (d == 9223372036854775808.0) {
-                as_int = 9223372036854775807LL; int_like = 1;
-            }
-            if (int_like) {
-                unsigned char tag = 0; _wasm_fnv_bytes(h, &tag, 1);
-                _wasm_fnv_bytes(h, &as_int, sizeof(as_int));
-            } else {
-                unsigned char tag = 4; _wasm_fnv_bytes(h, &tag, 1);
-                int64_t bits = (int64_t)v; _wasm_fnv_bytes(h, &bits, sizeof(bits));
-            }
             break;
         }
         default:
@@ -4139,11 +4127,11 @@ static void _wasm_fp_accum_k(int64_t v, uint32_t ekind, uint64_t *h) {
     }
 }
 
-/* Kind-aware hashability gate. A recorded Float kind IS hashable (the
-   fingerprint canonicalises the Int crossing and +/-0.0; confirmation
-   runs the IEEE equality, so a NaN inserts fresh like the linear path).
-   An unknown kind forces the linear path so legacy-fingerprint values
-   and kind-fingerprint values never share one seen-set inconsistently. */
+/* Kind-aware hashability gate. Numeric kinds (Float included) are
+   hashable: the fingerprint is the f64 image of the value — exactly the
+   domain the kind-aware equality compares in. An unknown kind forces
+   the linear path so legacy-fingerprint values and kind-fingerprint
+   values never share one seen-set inconsistently. */
 static int _wasm_ekind_hashable(int64_t v, uint32_t ekind) {
     switch (WASM_EKIND_KIND(ekind)) {
         case WASM_TAG_INT:
@@ -4192,7 +4180,7 @@ static int _wasm_seen_contains(_wasm_seen *s, int64_t v) {
 /* Kind-aware seen-set (mirror of native taida_seen_k): entries carry
    (value, ekind) pairs so collision confirmation runs under
    _wasm_ekind_value_eq. Engaged only when every element kind passes
-   _wasm_ekind_hashable — Float or unknown kinds fall back to the linear
+   _wasm_ekind_hashable — unknown kinds fall back to the linear
    pair-equality scan, matching the interpreter's all-or-nothing ValueKey
    gating (and its complexity profile). Bump-allocated, no free needed. */
 typedef struct {

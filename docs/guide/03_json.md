@@ -182,14 +182,14 @@ JSON["invalid json", Pilot]() >=> pilot2
 
 ### has_value で成功判定
 
-```taida
+```taida fragment
 result <= JSON[raw, Pilot]()
 result.has_value    // true ならパース成功、false なら失敗
 ```
 
 ### getOrDefault でフォールバック
 
-```taida
+```taida fragment
 fallback <= Pilot(name <= "Unknown", age <= 0, active <= false)
 JSON[raw, Pilot]().getOrDefault(fallback)
 ```
@@ -330,7 +330,7 @@ stdout(jsonEncode(rec))
 
 round-trip の確認:
 
-```taida
+```taida fragment
 // encode
 raw <= jsonEncode(rec)
 
