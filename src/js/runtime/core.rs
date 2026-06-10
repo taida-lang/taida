@@ -2273,6 +2273,24 @@ function BytesToList(bytes) {
   return Object.freeze(Array.from(bytes, x => Number(x)));
 }
 function Append(list, val) { return Object.freeze([...(list || []), val]); }
+// Consume variant for the proven-safe tail-recursive accumulator shape
+// (`f(n - 1, Append[acc, x]())`). The codegen emits this only for sites
+// that passed the shared shape analysis; `__taida_append_owned` is set
+// by the trampoline exactly while it runs an iteration whose arguments
+// were produced by such a site, so the push can never touch a list the
+// caller still aliases — the first iteration always detaches via the
+// copy path. The result is intentionally NOT frozen: Taida has no list
+// mutation surface, and the next iteration needs to push in place.
+let __taida_append_owned = false;
+function AppendConsume(list, val) {
+  if (__taida_append_owned && Array.isArray(list) && !Object.isFrozen(list)) {
+    list.push(val);
+    return list;
+  }
+  const next = [...(list || [])];
+  next.push(val);
+  return next;
+}
 function Prepend(list, val) { return Object.freeze([val, ...(list || [])]); }
 function Join(list, sep) { return (list || []).join(sep); }
 function Sum(list) { return (list || []).reduce((a, b) => a + b, 0); }
@@ -2363,16 +2381,27 @@ function Enumerate(list) {
 }
 
 // ── Trampoline for tail recursion (self + mutual) ────────
+// `owned` marks a tail call whose accumulator argument came from an
+// AppendConsume site: the list was either freshly detached or already
+// owned by the loop, so the next iteration may push in place. Calls
+// from anywhere else leave it false and the consume path detaches.
 class __TaidaTailCall {
-  constructor(fn, args) { this.fn = fn; this.args = args; }
+  constructor(fn, args, owned) { this.fn = fn; this.args = args; this.owned = owned === true; }
 }
 function __taida_trampoline(fn) {
   return function(...args) {
-    let result = fn(...args);
-    while (result instanceof __TaidaTailCall) {
-      result = result.fn(...result.args);
+    const __saved_owned = __taida_append_owned;
+    __taida_append_owned = false;
+    try {
+      let result = fn(...args);
+      while (result instanceof __TaidaTailCall) {
+        __taida_append_owned = result.owned;
+        result = result.fn(...result.args);
+      }
+      return result;
+    } finally {
+      __taida_append_owned = __saved_owned;
     }
-    return result;
   };
 }
 

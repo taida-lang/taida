@@ -2,7 +2,7 @@
 /// hints for HOF-mold callbacks, and the Min/Max mold family.
 mod common;
 
-use common::{run_interpreter, taida_bin, unique_temp_dir, wasmtime_bin};
+use common::{node_available, run_interpreter, taida_bin, unique_temp_dir, wasmtime_bin};
 use std::path::Path;
 use std::process::Command;
 
@@ -254,5 +254,86 @@ stdout(neg.toString())
         out,
         "100000000000000000000.0\n123456789012345677877719597056.0\n0.0000001\n-100000000000000000000.0"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The interpreter and JS backends now share the native backend's
+/// consumable-Append analysis (the tail-recursive accumulator build).
+/// Pins the three value-semantics hazards of an in-place push — the
+/// caller's binding surviving detach, an alias of that binding, and
+/// re-feeding a consume-produced list into the same build — plus the
+/// O(n) wall-clock shape: 100k elements on the interpreter completes
+/// orders of magnitude inside the old O(n²) time (which needed seconds
+/// for 5k).
+#[test]
+fn append_consume_keeps_value_semantics_on_interp_and_js() {
+    let dir = unique_temp_dir("f61_consume");
+    let td = dir.join("consume.td");
+    std::fs::write(
+        &td,
+        r#"build acc: @[Int] i: Int =
+  | i >= 3 |> acc
+  | _ |> build(Append[acc, i](), i + 1)
+=> :@[Int]
+xs <= @[100]
+build(xs, 0) >=> r1
+stdout(xs)
+stdout(r1)
+build(r1, 0) >=> r2
+stdout(r1)
+stdout(r2)
+ys <= xs
+build(xs, 1) >=> r3
+stdout(ys)
+stdout(r3)
+"#,
+    )
+    .expect("write fixture");
+    let expected =
+        "@[100]\n@[100, 0, 1, 2]\n@[100, 0, 1, 2]\n@[100, 0, 1, 2, 0, 1, 2]\n@[100]\n@[100, 1, 2]";
+    let interp = run_interpreter(&td).expect("interpreter runs");
+    assert_eq!(interp, expected, "interp consume value semantics");
+
+    if node_available() {
+        let mjs = dir.join("consume.mjs");
+        let status = Command::new(taida_bin())
+            .args(["build", "js"])
+            .arg(&td)
+            .arg("-o")
+            .arg(&mjs)
+            .status()
+            .expect("taida build js runs");
+        assert!(status.success(), "js build failed");
+        let out = Command::new("node").arg(&mjs).output().expect("node runs");
+        assert!(out.status.success(), "js run failed");
+        let js = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
+        assert_eq!(js, expected, "js consume value semantics");
+    } else {
+        eprintln!("SKIP: node not found, js leg skipped");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 100k-element sequential build on the interpreter: O(n²) cloning
+/// needed ~2s for 5k elements, so 100k would take minutes; the consume
+/// path finishes in well under the suite timeout. No wall-clock assert
+/// — completing at all is the pin.
+#[test]
+fn append_consume_interp_100k_completes() {
+    let dir = unique_temp_dir("f61_consume_perf");
+    let td = dir.join("build100k.td");
+    std::fs::write(
+        &td,
+        r#"build acc: @[Int] i: Int =
+  | i >= 100000 |> acc
+  | _ |> build(Append[acc, i](), i + 1)
+=> :@[Int]
+build(@[], 0) >=> result
+stdout(result.length())
+"#,
+    )
+    .expect("write fixture");
+    let interp = run_interpreter(&td).expect("interpreter runs");
+    assert_eq!(interp, "100000");
     let _ = std::fs::remove_dir_all(&dir);
 }
