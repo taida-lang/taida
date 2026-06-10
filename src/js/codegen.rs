@@ -156,6 +156,8 @@ const PRELUDE_RESERVED_IDENTS: &[&str] = &[
     "Log2",
     "Lower",
     "Map",
+    "Max",
+    "Min",
     "Mod_mold",
     "None",
     "Ok",

@@ -98,6 +98,35 @@ impl Lowering {
         }
     }
 
+    /// Statically-known element kind of a list expression: a homogeneous
+    /// literal or a variable tracked via `list_element_types` (literal
+    /// binding or parameter annotation).
+    pub(crate) fn static_list_elem_kind(&self, expr: &Expr) -> Option<&'static str> {
+        match expr {
+            Expr::ListLit(items, _) if !items.is_empty() => {
+                if items.iter().all(|i| self.expr_returns_float(i)) {
+                    Some("Float")
+                } else if items.iter().all(|i| self.expr_is_int(i)) {
+                    Some("Int")
+                } else if items.iter().all(|i| self.expr_is_string_full(i)) {
+                    Some("Str")
+                } else if items.iter().all(|i| self.expr_is_bool(i)) {
+                    Some("Bool")
+                } else {
+                    None
+                }
+            }
+            Expr::Ident(n, _) => match self.list_element_types.get(n).map(String::as_str) {
+                Some("Float") => Some("Float"),
+                Some("Int") => Some("Int"),
+                Some("Str") => Some("Str"),
+                Some("Bool") => Some("Bool"),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Statically-known Float list: a literal whose every element is a
     /// Float expression, or a variable tracked as `@[Float]` (literal
     /// binding or parameter annotation) via `list_element_types`.
@@ -554,13 +583,18 @@ impl Lowering {
         // A rebind always invalidates a previous shadow for this name.
         self.shadow_kind_vars.remove(target);
         // Restricted to the accessors that build their Lax through the
-        // kind-stamping constructor — max/min still use the plain
-        // constructor whose heuristic field tag is NOT trustworthy (a
-        // string payload can read back as a bare INT), so they must not
-        // feed a shadow.
+        // kind-stamping constructor. min/max joined the trustworthy set
+        // when their runtimes switched to the kind-aware comparator and
+        // started stamping the winner's kind into the Lax (they used to
+        // build the plain constructor whose heuristic field tag could
+        // misread a string payload as a bare INT).
         let is_lax_accessor = matches!(
             source,
-            Expr::MethodCall(_, m, _, _) if matches!(m.as_str(), "get" | "first" | "last")
+            Expr::MethodCall(_, m, _, _)
+                if matches!(m.as_str(), "get" | "first" | "last" | "min" | "max")
+        ) || matches!(
+            source,
+            Expr::MoldInst(n, _, _, _) if matches!(n.as_str(), "Min" | "Max")
         );
         if !is_lax_accessor {
             return;
@@ -632,6 +666,56 @@ impl Lowering {
                     && type_args.iter().all(|a| self.expr_is_int(a)) =>
             {
                 self.int_vars.insert(target.to_string());
+            }
+            // List accessor METHODS (min/max/first/last/get) unmold to an
+            // element of their receiver — propagate the statically known
+            // element kind (display dispatch is static; the runtime shadow
+            // kind only feeds tagged comparisons).
+            Expr::MethodCall(obj, m, _, _)
+                if matches!(m.as_str(), "min" | "max" | "first" | "last" | "get") =>
+            {
+                match self.static_list_elem_kind(obj) {
+                    Some("Float") => {
+                        self.float_vars.insert(target.to_string());
+                    }
+                    Some("Int") => {
+                        self.int_vars.insert(target.to_string());
+                    }
+                    Some("Str") => {
+                        self.string_vars.insert(target.to_string());
+                    }
+                    Some("Bool") => {
+                        self.bool_vars.insert(target.to_string());
+                    }
+                    _ => {}
+                }
+            }
+            // Min/Max/Find unmold to an ELEMENT of their list argument —
+            // propagate the statically known element kind so the unmolded
+            // value displays under its real type (same rationale as the
+            // Div/Mod arms above; the runtime Lax also carries the kind,
+            // but display dispatch is decided statically here).
+            Expr::MoldInst(name, type_args, _, _)
+                if matches!(name.as_str(), "Min" | "Max" | "Find") =>
+            {
+                match type_args
+                    .first()
+                    .and_then(|a| self.static_list_elem_kind(a))
+                {
+                    Some("Float") => {
+                        self.float_vars.insert(target.to_string());
+                    }
+                    Some("Int") => {
+                        self.int_vars.insert(target.to_string());
+                    }
+                    Some("Str") => {
+                        self.string_vars.insert(target.to_string());
+                    }
+                    Some("Bool") => {
+                        self.bool_vars.insert(target.to_string());
+                    }
+                    _ => {}
+                }
             }
             // F58B-003: `Lax[x]() >=> v` — propagate x's statically known
             // kind to v (same rationale as the Div/Mod arms above).

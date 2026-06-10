@@ -1427,6 +1427,22 @@ impl Lowering {
                 ));
                 Ok(result)
             }
+            "Min" | "Max" => {
+                if type_args.is_empty() {
+                    return Err(LowerError {
+                        message: format!("{} requires 1 argument: {}[list]()", type_name, type_name),
+                    });
+                }
+                let list = self.lower_expr(func, &type_args[0])?;
+                let result = func.alloc_var();
+                let rt = if type_name == "Min" {
+                    "taida_list_min"
+                } else {
+                    "taida_list_max"
+                };
+                func.push(IrInst::Call(result, rt.to_string(), vec![list]));
+                Ok(result)
+            }
             "Sum" => {
                 if type_args.is_empty() {
                     return Err(LowerError {

@@ -6915,15 +6915,25 @@ taida_val taida_list_flatten(taida_val list_ptr) {
     return new_list;
 }
 
+// min/max order elements with the same kind-aware comparator as
+// Sort[] (raw i64 order inverted negative Floats and ordered strings
+// by pointer), and the winner's kind rides into the Lax so the unmold
+// shadow-kind machinery sees Float/Bool payloads (same contract as
+// first/last).
 taida_val taida_list_max(taida_val list_ptr) {
     taida_val *list = (taida_val*)list_ptr;
     taida_val len = list[2];
     if (len == 0) return taida_lax_empty(0);
     taida_val max = list[4];
+    uint32_t max_ek = taida_elem_kind_at(list, 0);
     for (taida_val i = 1; i < len; i++) {
-        if (list[4 + i] > max) max = list[4 + i];
+        uint32_t ek = taida_elem_kind_at(list, i);
+        if (taida_sort_gt(list[4 + i], ek, max, max_ek)) {
+            max = list[4 + i];
+            max_ek = ek;
+        }
     }
-    return taida_lax_new(max, 0);
+    return taida_lax_new_k(max, 0, max_ek);
 }
 
 taida_val taida_list_min(taida_val list_ptr) {
@@ -6931,10 +6941,15 @@ taida_val taida_list_min(taida_val list_ptr) {
     taida_val len = list[2];
     if (len == 0) return taida_lax_empty(0);
     taida_val min = list[4];
+    uint32_t min_ek = taida_elem_kind_at(list, 0);
     for (taida_val i = 1; i < len; i++) {
-        if (list[4 + i] < min) min = list[4 + i];
+        uint32_t ek = taida_elem_kind_at(list, i);
+        if (taida_sort_gt(min, min_ek, list[4 + i], ek)) {
+            min = list[4 + i];
+            min_ek = ek;
+        }
     }
-    return taida_lax_new(min, 0);
+    return taida_lax_new_k(min, 0, min_ek);
 }
 
 // ── Additional List mold operations ──────────────────────

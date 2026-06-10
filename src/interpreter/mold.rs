@@ -1940,6 +1940,49 @@ impl Interpreter {
                 let result: Vec<String> = list.iter().map(|v| v.to_display_string()).collect();
                 Ok(Some(Signal::Value(Value::str(result.join(&sep)))))
             }
+            "Min" | "Max" => {
+                // Mold twins of the .min()/.max() methods (the spec table
+                // registered them but no backend implemented the mold form:
+                // the interpreter leaked the raw MoldInst pack).
+                if type_args.is_empty() {
+                    return Err(RuntimeError {
+                        message: format!("{} requires 1 argument: {}[list]()", name, name),
+                    });
+                }
+                let list = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::List(items)) => items,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("{}: argument must be a list, got {}", name, v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                if list.is_empty() {
+                    return Ok(Some(Signal::Value(Value::pack(vec![
+                        ("has_value".into(), Value::Bool(false)),
+                        ("__value".into(), Value::Int(0)),
+                        ("__default".into(), Value::Int(0)),
+                        ("__type".into(), Value::str("Lax".into())),
+                    ]))));
+                }
+                let picked = if name == "Min" {
+                    list.iter()
+                        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                } else {
+                    list.iter()
+                        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                }
+                .cloned()
+                .unwrap_or_else(|| Value::default_for_list(&list));
+                let default_val = super::eval::Interpreter::default_for_value(&picked);
+                Ok(Some(Signal::Value(Value::pack(vec![
+                    ("has_value".into(), Value::Bool(true)),
+                    ("__value".into(), picked),
+                    ("__default".into(), default_val),
+                    ("__type".into(), Value::str("Lax".into())),
+                ]))))
+            }
             "Sum" => {
                 if type_args.is_empty() {
                     return Err(RuntimeError {

@@ -2276,6 +2276,14 @@ function Append(list, val) { return Object.freeze([...(list || []), val]); }
 function Prepend(list, val) { return Object.freeze([val, ...(list || [])]); }
 function Join(list, sep) { return (list || []).join(sep); }
 function Sum(list) { return (list || []).reduce((a, b) => a + b, 0); }
+function Min(list) {
+  if (!list || list.length === 0) return Lax(null);
+  return Lax(list.reduce((a, b) => (b < a ? b : a)));
+}
+function Max(list) {
+  if (!list || list.length === 0) return Lax(null);
+  return Lax(list.reduce((a, b) => (a < b ? b : a)));
+}
 function Sort(list, opts) {
   const copy = [...(list || [])];
   if (opts && opts.by) {

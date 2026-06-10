@@ -1518,15 +1518,22 @@ int64_t taida_list_last(int64_t list_ptr) {
     return _wasm_lax_new_k(list[WASM_LIST_ELEMS + len - 1], 0, _wasm_elem_kind_at(list, len - 1));
 }
 
+/* min/max order with the same kind-aware comparator as Sort[] and
+   carry the winner's kind into the Lax (native twin has details). */
 int64_t taida_list_min(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     if (len == 0) return taida_lax_empty(0);
     int64_t min_val = list[WASM_LIST_ELEMS];
+    uint32_t min_ek = _wasm_elem_kind_at(list, 0);
     for (int64_t i = 1; i < len; i++) {
-        if (list[WASM_LIST_ELEMS + i] < min_val) min_val = list[WASM_LIST_ELEMS + i];
+        uint32_t ek = _wasm_elem_kind_at(list, i);
+        if (_wasm_sort_gt(min_val, min_ek, list[WASM_LIST_ELEMS + i], ek)) {
+            min_val = list[WASM_LIST_ELEMS + i];
+            min_ek = ek;
+        }
     }
-    return taida_lax_new(min_val, 0);
+    return _wasm_lax_new_k(min_val, 0, min_ek);
 }
 
 int64_t taida_list_max(int64_t list_ptr) {
@@ -1534,10 +1541,15 @@ int64_t taida_list_max(int64_t list_ptr) {
     int64_t len = list[1];
     if (len == 0) return taida_lax_empty(0);
     int64_t max_val = list[WASM_LIST_ELEMS];
+    uint32_t max_ek = _wasm_elem_kind_at(list, 0);
     for (int64_t i = 1; i < len; i++) {
-        if (list[WASM_LIST_ELEMS + i] > max_val) max_val = list[WASM_LIST_ELEMS + i];
+        uint32_t ek = _wasm_elem_kind_at(list, i);
+        if (_wasm_sort_gt(list[WASM_LIST_ELEMS + i], ek, max_val, max_ek)) {
+            max_val = list[WASM_LIST_ELEMS + i];
+            max_ek = ek;
+        }
     }
-    return taida_lax_new(max_val, 0);
+    return _wasm_lax_new_k(max_val, 0, max_ek);
 }
 
 int64_t taida_list_sum(int64_t list_ptr) {

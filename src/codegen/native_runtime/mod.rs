@@ -877,7 +877,7 @@ mod tests {
         //   +103. 1,310,758 -> 1,310,861.
         // 2026-06-10 consume-variant Append (core.c, F1): +912.
         //   1,310,861 -> 1,311,773.
-        const EXPECTED_TOTAL_LEN: usize = 1_319_338;
+        const EXPECTED_TOTAL_LEN: usize = 1_320_002;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1619,7 +1619,7 @@ mod tests {
         //   taida_list_append_consume — in-place push once the
         //   tail-recursive build loop owns its accumulator (ownership
         //   bit threaded by the emitter). +912. F1 403,062 -> 403,974.
-        const F1_LEN: usize = 410_760;
+        const F1_LEN: usize = 411_424;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1669,6 +1669,8 @@ mod tests {
             // Quality work: f64-aware Sum, structural-equality membership
             // (contains/indexOf), and the kind-aware sort comparator all
             // land before the marker (F1 407,671 -> 410,760); F2 unchanged.
+            // min/max switch to that comparator and stamp the winner's
+            // kind into their Lax (F1 410,760 -> 411,424); F2 unchanged.
             F1_LEN + 228_179,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
