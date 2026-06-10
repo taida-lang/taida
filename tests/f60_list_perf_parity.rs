@@ -149,6 +149,38 @@ stdout(build(3, @[]))
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The method-form unmold fusion: `Mold[...]().unmold()` inside a
+/// lambda body must produce the exact values of the materialised path
+/// — negative operands pin the truncated Div/Mod semantics, the
+/// variable-divisor shape pins the NON-fused path against the fused
+/// one, and the top-level direct form covers the non-lambda receiver.
+#[test]
+fn method_form_unmold_fusion_matches_materialised_path() {
+    let dir = unique_temp_dir("f60_unmold_fusion");
+    let out = assert_parity(
+        &dir,
+        "fusion",
+        r#"applyMod xs: @[Int] = Map[xs, _ x: Int = Mod[x, 4]().unmold()]() => :@[Int]
+applyDiv xs: @[Int] = Map[xs, _ x: Int = Div[x, 3]().unmold()]() => :@[Int]
+applyLax xs: @[Int] = Map[xs, _ x: Int = Lax[x * 10]().unmold()]() => :@[Int]
+applyVar xs: @[Int] d: Int = Map[xs, _ x: Int = Mod[x, d]().unmold()]() => :@[Int]
+
+nums <= @[7, -7, 12, -12, 0, 5]
+stdout(applyMod(nums))
+stdout(applyDiv(nums))
+stdout(applyLax(nums))
+stdout(applyVar(nums, 4))
+stdout(Mod[17, 5]().unmold())
+stdout(Div[-17, 5]().unmold())
+"#,
+    );
+    assert_eq!(
+        out,
+        "@[3, -3, 0, 0, 0, 1]\n@[2, -2, 4, -4, 0, 1]\n@[70, -70, 120, -120, 0, 50]\n@[3, -3, 0, 0, 0, 1]\n2\n-3"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Large sequential builds complete on wasm (the O(n^2) copies used to
 /// exhaust the 2GB boxed-value address space on the second call) and
 /// agree across backends.
