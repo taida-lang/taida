@@ -898,7 +898,11 @@ mod tests {
         //   removed — every display path routes HashMap / Set through
         //   the `HashMap({...})` / `Set({...})` shape. -5,273.
         //   1,330,485 -> 1,325,212.
-        const EXPECTED_TOTAL_LEN: usize = 1_325_212;
+        // 2026-06-11 Slice end-sentinel unification (core.c, F1): +390.
+        //   1,325,212 -> 1,325,602.
+        // 2026-06-11 STR tags on str.get's Lax (core.c, F1): +317.
+        //   1,325,602 -> 1,325,919.
+        const EXPECTED_TOTAL_LEN: usize = 1_325_919;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1648,7 +1652,9 @@ mod tests {
         //   +2,123. F1 417,613 -> 419,736.
         // 2026-06-11 Slice end-sentinel unification (before the
         //   marker): +390. F1 419,736 -> 420,126.
-        const F1_LEN: usize = 420_126;
+        // 2026-06-11 STR tags on str.get's Lax (before the marker):
+        //   +317. F1 420,126 -> 420,443.
+        const F1_LEN: usize = 420_443;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

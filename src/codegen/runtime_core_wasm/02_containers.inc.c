@@ -2645,17 +2645,24 @@ int64_t taida_str_last_index_of(int64_t s_raw, int64_t sub_raw) {
 }
 
 /// str.get(index) -- get character (code point) at index as Lax[Str]
+static int64_t _wasm_str_lax_tagged(int64_t lax) {
+    /* STR tags on value/default so the Lax pack display renders the
+       slots as strings instead of pointer numbers. */
+    taida_pack_set_tag(lax, 1, WASM_TAG_STR);
+    taida_pack_set_tag(lax, 2, WASM_TAG_STR);
+    return lax;
+}
 int64_t taida_str_get(int64_t s_raw, int64_t idx_raw) {
     const char *s = (const char *)s_raw;
-    if (!s || idx_raw < 0) return taida_lax_empty((int64_t)"");
+    if (!s || idx_raw < 0) return _wasm_str_lax_tagged(taida_lax_empty((int64_t)""));
     int byte_len = _wf_strlen(s);
     int off = _wasm_utf8_cp_to_byte(s, byte_len, idx_raw);
-    if (off >= byte_len) return taida_lax_empty((int64_t)"");
+    if (off >= byte_len) return _wasm_str_lax_tagged(taida_lax_empty((int64_t)""));
     int cl = _wasm_utf8_cp_len_at(s, byte_len, off);
     char *r = _wasm_str_alloc((unsigned int)(cl + 1));
     _wf_memcpy(r, s + off, cl);
     r[cl] = '\0';
-    return taida_lax_new((int64_t)r, (int64_t)"");
+    return _wasm_str_lax_tagged(taida_lax_new((int64_t)r, (int64_t)""));
 }
 
 /// cmp_strings -- comparator for sorting string pointers

@@ -235,7 +235,11 @@ mod tests {
         //   edge handler host provides no WASI proc_exit, so the
         //   unhandled report traps there (catchable RuntimeError) and
         //   proc_exits(1) on the WASI profiles. 483,119 -> 483,445.
-        const EXPECTED_TOTAL_LEN: usize = 483_445;
+        // 2026-06-11 Slice end-sentinel unification + list arm
+        //   (02_containers.inc.c): 483,445 -> 484,166.
+        // 2026-06-11 STR tags on str.get's Lax (02_containers.inc.c):
+        //   484,166 -> 484,517.
+        const EXPECTED_TOTAL_LEN: usize = 484_517;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

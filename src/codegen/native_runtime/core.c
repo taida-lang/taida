@@ -4717,15 +4717,20 @@ taida_val taida_str_ends_with(const char* s, const char* suffix) {
 }
 
 taida_val taida_str_get(const char* s, taida_val idx) {
-    if (!s || idx < 0) return taida_lax_empty(TAIDA_EMPTY_STR);
+    // STR tags on value/default: without them the Lax pack display
+    // renders the slots through the Int heuristic and prints the
+    // string pointers as numbers.
+    if (!s || idx < 0)
+        return taida_lax_tag_value_default(taida_lax_empty(TAIDA_EMPTY_STR), TAIDA_TAG_STR);
     // Code-point indexing — see taida_str_char_at.
     size_t byte_len = taida_str_byte_len_or_strlen(s);
     size_t off = taida_utf8_cp_to_byte(s, byte_len, idx);
-    if (off >= byte_len) return taida_lax_empty(TAIDA_EMPTY_STR);
+    if (off >= byte_len)
+        return taida_lax_tag_value_default(taida_lax_empty(TAIDA_EMPTY_STR), TAIDA_TAG_STR);
     size_t cl = taida_utf8_cp_len_at(s, byte_len, off);
     char *r = taida_str_alloc(cl);
     memcpy(r, s + off, cl);
-    return taida_lax_new((taida_val)r, TAIDA_EMPTY_STR);
+    return taida_lax_tag_value_default(taida_lax_new((taida_val)r, TAIDA_EMPTY_STR), TAIDA_TAG_STR);
 }
 
 taida_val taida_str_to_upper(const char* s) {
