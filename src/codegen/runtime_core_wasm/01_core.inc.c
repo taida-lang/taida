@@ -158,6 +158,54 @@ void *memset(void *dest, int c, unsigned long n) {
    this change has zero behavioral effect. */
 unsigned int bump_ptr = 0;  /* 0 = uninitialized */
 
+/* Loud failure exit shared by the slow path below. */
+__attribute__((cold, noinline, noreturn))
+static void wasm_alloc_fail(const char *msg, int32_t len) {
+    wasi_ciovec iov;
+    iov.buf = (int32_t)(intptr_t)msg;
+    iov.len = len;
+    int32_t nwritten;
+    __wasi_fd_write(2, &iov, 1, &nwritten);
+    __builtin_trap();
+}
+
+/* Slow path of wasm_alloc, kept out of line. Two jobs:
+ *
+ * 1. Hard heap ceiling at 2GB: pointers travel the value space as
+ *    int64_t via sign-EXTENDING (intptr_t) casts, so an address past
+ *    2^31 turns negative and every pointer-validity check rejects it
+ *    — results silently degrade to empty objects long before the
+ *    4GB linear-memory limit. Trap loudly at the real boundary
+ *    instead. (Lifting the ceiling means zero-extending every
+ *    pointer-to-value conversion — a representation-level change
+ *    tracked separately.)
+ * 2. Page growth, trapping loudly on exhaustion: returning NULL here
+ *    used to flow into list/pack constructors as an empty object and
+ *    silently corrupt results (a 10k-append loop run twice produced
+ *    an empty second list instead of failing).
+ *
+ * Both used to live inside wasm_alloc itself, which pushed the
+ * allocator past clang's inlining threshold; taida_list_push (which
+ * inlines the allocator) in turn stopped being inlined into the list
+ * runtime, and alloc-heavy benchmarks regressed ~20%. The hot path
+ * keeps a single combined unlikely-branch. */
+__attribute__((cold, noinline))
+static void wasm_alloc_slow(void) {
+    if (bump_ptr > 0x7FFF0000u) {
+        static const char ceil_msg[] = "taida: wasm heap ceiling reached (2GB address space for boxed values)\n";
+        wasm_alloc_fail(ceil_msg, (int32_t)(sizeof(ceil_msg) - 1));
+    }
+    unsigned int pages_needed = (bump_ptr + 65535) / 65536;
+    unsigned int current_pages = __builtin_wasm_memory_size(0);
+    if (pages_needed > current_pages) {
+        int grew = __builtin_wasm_memory_grow(0, pages_needed - current_pages);
+        if (grew == -1) {
+            static const char oom_msg[] = "taida: wasm linear memory exhausted (allocation failed)\n";
+            wasm_alloc_fail(oom_msg, (int32_t)(sizeof(oom_msg) - 1));
+        }
+    }
+}
+
 void *wasm_alloc(unsigned int size) {
     /* Align to 8 bytes */
     size = (size + 7) & ~7u;
@@ -175,42 +223,15 @@ void *wasm_alloc(unsigned int size) {
     WASM_PERF_INC(wasm_perf_alloc_calls);
     WASM_PERF_ADD(wasm_perf_alloc_bytes, size);
 
-    /* Hard heap ceiling at 2GB: pointers travel the value space as
-       int64_t via sign-EXTENDING (intptr_t) casts, so an address past
-       2^31 turns negative and every pointer-validity check rejects it
-       — results silently degrade to empty objects long before the
-       4GB linear-memory limit. Trap loudly at the real boundary
-       instead. (Lifting the ceiling means zero-extending every
-       pointer-to-value conversion — a representation-level change
-       tracked separately.) */
-    if (bump_ptr > 0x7FFF0000u) {
-        static const char ceil_msg[] = "taida: wasm heap ceiling reached (2GB address space for boxed values)\n";
-        wasi_ciovec iov;
-        iov.buf = (int32_t)(intptr_t)ceil_msg;
-        iov.len = (int32_t)(sizeof(ceil_msg) - 1);
-        int32_t nwritten;
-        __wasi_fd_write(2, &iov, 1, &nwritten);
-        __builtin_trap();
-    }
-
-    /* Check if we need to grow memory */
+    /* Ceiling / page-growth check (see wasm_alloc_slow). The ceiling
+       must be tested on every allocation, not only when a grow is
+       due: TAIDA_WASM_INITIAL_PAGES can pre-size memory past 2GB, in
+       which case the bump pointer crosses the boundary without ever
+       needing a grow. */
     unsigned int pages_needed = (bump_ptr + 65535) / 65536;
-    unsigned int current_pages = __builtin_wasm_memory_size(0);
-    if (pages_needed > current_pages) {
-        int grew = __builtin_wasm_memory_grow(0, pages_needed - current_pages);
-        if (grew == -1) {
-            /* Out of memory. Trap loudly: returning NULL here used to
-               flow into list/pack constructors as an empty object and
-               silently corrupt results (a 10k-append loop run twice
-               produced an empty second list instead of failing). */
-            static const char oom_msg[] = "taida: wasm linear memory exhausted (allocation failed)\n";
-            wasi_ciovec iov;
-            iov.buf = (int32_t)(intptr_t)oom_msg;
-            iov.len = (int32_t)(sizeof(oom_msg) - 1);
-            int32_t nwritten;
-            __wasi_fd_write(2, &iov, 1, &nwritten);
-            __builtin_trap();
-        }
+    if (__builtin_expect(
+            bump_ptr > 0x7FFF0000u || pages_needed > __builtin_wasm_memory_size(0), 0)) {
+        wasm_alloc_slow();
     }
 
     return (void *)(unsigned long)result;
