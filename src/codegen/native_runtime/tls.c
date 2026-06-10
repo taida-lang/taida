@@ -374,7 +374,7 @@ static taida_val taida_os_http_default_response(void) {
     taida_pack_set_hash(result, 0, (taida_val)TAIDA_HTTP_STATUS_HASH);
     taida_pack_set(result, 0, 0);
     taida_pack_set_hash(result, 1, (taida_val)TAIDA_HTTP_BODY_HASH);
-    taida_pack_set(result, 1, (taida_val)"");
+    taida_pack_set(result, 1, TAIDA_EMPTY_STR);
     taida_pack_set_hash(result, 2, (taida_val)TAIDA_HTTP_HEADERS_HASH);
     taida_pack_set(result, 2, taida_pack_new(0));
     return result;
@@ -767,13 +767,13 @@ static taida_val taida_os_http_do_curl(const char *method, const char *url, taid
 
     char *resp_body = header_end + 4;
     size_t resp_body_len = resp_len - (size_t)(resp_body - resp_buf);
-    char *body_copy = (char*)malloc(resp_body_len + 1);
-    if (!body_copy) {
-        free(resp_buf);
-        return taida_async_resolved(taida_os_http_failure_lax());
-    }
+    /* The body enters the Taida value space (the `body` field of the
+     * response pack), so it must carry the hidden Str header — a raw
+     * malloc'd char* is not recognised by the positive string
+     * identification and would display as an Int. taida_str_alloc
+     * NUL-terminates and aborts on OOM. */
+    char *body_copy = taida_str_alloc(resp_body_len);
     memcpy(body_copy, resp_body, resp_body_len);
-    body_copy[resp_body_len] = '\0';
 
     taida_val headers_pack = taida_os_http_parse_headers(resp_buf, header_end);
 
@@ -945,9 +945,10 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
 
     char *resp_body = header_end + 4;
     size_t resp_body_len = resp_len - (size_t)(resp_body - resp_buf);
-    char *body_copy = (char*)TAIDA_MALLOC(resp_body_len + 1, "http_body");
+    /* Same as the TLS-path response above: the body enters the Taida
+     * value space, so it must carry the hidden Str header. */
+    char *body_copy = taida_str_alloc(resp_body_len);
     memcpy(body_copy, resp_body, resp_body_len);
-    body_copy[resp_body_len] = '\0';
 
     taida_val headers_pack = taida_os_http_parse_headers(resp_buf, header_end);
 
@@ -1278,11 +1279,11 @@ taida_val taida_os_socket_recv(taida_val socket_fd, taida_val timeout_ms) {
     if (n <= 0) {
         const char *kind = (n == 0) ? "peer_closed" : taida_os_error_kind(errno, strerror(errno));
         taida_val error = taida_make_error_with_kind_code("IoError", "SocketRecv error", kind, 0);
-        return taida_async_resolved(taida_lax_empty_error((taida_val)"", error));
+        return taida_async_resolved(taida_lax_empty_error(TAIDA_EMPTY_STR, error));
     }
     buf[n] = '\0';
     char *result = taida_str_new_copy(buf);
-    return taida_async_resolved(taida_lax_new((taida_val)result, (taida_val)""));
+    return taida_async_resolved(taida_lax_new((taida_val)result, TAIDA_EMPTY_STR));
 }
 
 taida_val taida_os_socket_send_bytes(taida_val socket_fd, taida_val data_ptr, taida_val timeout_ms) {

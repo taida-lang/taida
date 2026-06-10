@@ -327,6 +327,7 @@ pub(crate) const MIRROR_SYNC_ALLOWLIST: &[&str] = &[
     "taida_bool_and",
     "taida_bool_not",
     "taida_bool_or",
+    "taida_div_exact",
     "taida_div_mold",
     "taida_error_type_check_or_rethrow",
     "taida_float_add",
@@ -357,6 +358,7 @@ pub(crate) const MIRROR_SYNC_ALLOWLIST: &[&str] = &[
     "taida_lax_has_value",
     "taida_lax_is_empty",
     "taida_lax_unmold",
+    "taida_mod_exact",
     "taida_mod_mold",
     "taida_poly_neq_tagged",
 ];
@@ -423,6 +425,18 @@ const DIVERGENT_CRYPTO: &[&str] = &[
     // crypto algorithm — same divergence class as the primitives above.
     "taida_constant_time_eq_secret",
     "taida_hmac_sha256_secret",
+];
+
+/// Deliberately divergent: the iteration-scope watermark rides each
+/// backend's own allocator — native encodes {active_chunk, offset} into
+/// the mark, frees chunks past it and gates the freelists via the
+/// thread-local depth; WASM wraps the single bump-pointer
+/// wasm_arena_enter/leave pair (and its call sites stay disabled in the
+/// emitter until WASM strings carry hidden headers).
+const DIVERGENT_ITER_SCOPE: &[&str] = &[
+    "taida_arena_iter_enter",
+    "taida_arena_iter_reset",
+    "taida_arena_iter_exit",
 ];
 
 /// Deliberately divergent: container construction/mutation sits on
@@ -798,6 +812,10 @@ const DIVERGENT_MISC: &[&str] = &[
 /// All divergence groups with their reasons (the group docs above hold
 /// the long form; the strings here surface in test failure messages).
 pub(crate) const DIVERGENT_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "iter-scope watermark: chunked-arena mark vs bump-pointer wrapper",
+        DIVERGENT_ITER_SCOPE,
+    ),
     ("async: pthread vs deterministic stubs", DIVERGENT_ASYNC),
     (
         "io/debug: libc stdio vs fd_write imports",

@@ -396,6 +396,30 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
         writeln!(c).unwrap();
     }
 
+    // F58: every static string literal is laid out behind a hidden magic
+    // word so the positive string identification (_wasm_is_string_ptr)
+    // recognises it. The struct keeps the data NUL-terminated and 8-byte
+    // aligned; user code receives the .s pointer, exactly as it used to
+    // receive the bare C literal.
+    let mut str_table: Vec<String> = Vec::new();
+    let mut str_index: HashMap<String, usize> = HashMap::new();
+    for func in &ir_module.functions {
+        collect_string_literals(&func.body, &mut str_table, &mut str_index);
+    }
+    for (i, s) in str_table.iter().enumerate() {
+        writeln!(
+            c,
+            "static const struct {{ int64_t m; char s[{}]; }} __taida_sl_{} = {{ 0x5441494453545300LL, {} }};",
+            s.len() + 1,
+            i,
+            c_string_literal(s)
+        )
+        .unwrap();
+    }
+    if !str_table.is_empty() {
+        writeln!(c).unwrap();
+    }
+
     // runtime 関数のプロトタイプ宣言（必要なもののみ）
     let mut needed_funcs = HashSet::new();
     for func in &ir_module.functions {
@@ -452,10 +476,35 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
     // 関数定義
     for func in &ir_module.functions {
         writeln!(c).unwrap();
-        emit_function(&mut c, func, &global_map, &func_user_arity)?;
+        emit_function(&mut c, func, &global_map, &func_user_arity, &str_index)?;
     }
 
     Ok(c)
+}
+
+/// Collect every distinct string literal (recursing into cond arms)
+/// for the header-carrying static table.
+fn collect_string_literals(
+    insts: &[IrInst],
+    table: &mut Vec<String>,
+    index: &mut HashMap<String, usize>,
+) {
+    for inst in insts {
+        match inst {
+            IrInst::ConstStr(_, s) => {
+                if !index.contains_key(s) {
+                    index.insert(s.clone(), table.len());
+                    table.push(s.clone());
+                }
+            }
+            IrInst::CondBranch(_, arms) => {
+                for arm in arms {
+                    collect_string_literals(&arm.body, table, index);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn collect_needed_runtime_funcs(insts: &[IrInst], set: &mut HashSet<String>) {
@@ -805,6 +854,16 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             "int64_t taida_abi_host_cage(int64_t capability, int64_t call);".to_string()
         }
         // W-5: Lax runtime functions
+        // F58 P2-4: divisor-proven exact division (fused unmold form).
+        "taida_div_exact" => "int64_t taida_div_exact(int64_t a, int64_t b);".to_string(),
+        "taida_mod_exact" => "int64_t taida_mod_exact(int64_t a, int64_t b);".to_string(),
+        // F58 P2-2: iteration-scope watermark hooks (wrappers over
+        // wasm_arena_enter/leave in 01_core; available on every profile).
+        "taida_arena_iter_enter" => "int64_t taida_arena_iter_enter(void);".to_string(),
+        "taida_arena_iter_reset" => {
+            "int64_t taida_arena_iter_reset(int64_t mark);".to_string()
+        }
+        "taida_arena_iter_exit" => "int64_t taida_arena_iter_exit(int64_t mark);".to_string(),
         "taida_lax_new" => {
             "int64_t taida_lax_new(int64_t value, int64_t default_value);".to_string()
         }
@@ -1619,6 +1678,7 @@ struct FuncContext<'a> {
     param_names: Vec<String>,
     global_map: &'a HashMap<i64, String>,
     func_user_arity: &'a HashMap<String, usize>,
+    str_index: &'a HashMap<String, usize>,
 }
 
 /// 単一関数を C コードに変換
@@ -1627,6 +1687,7 @@ fn emit_function(
     func: &IrFunction,
     global_map: &HashMap<i64, String>,
     func_user_arity: &HashMap<String, usize>,
+    str_index: &HashMap<String, usize>,
 ) -> Result<(), WasmCEmitError> {
     // 関数シグネチャ
     write!(c, "int64_t {}(", func.name).unwrap();
@@ -1670,6 +1731,7 @@ fn emit_function(
         param_names: func.params.clone(),
         global_map,
         func_user_arity,
+        str_index,
     };
 
     // 末尾再帰のサポート: TailCall を含む場合はループで囲む
@@ -1747,13 +1809,16 @@ fn emit_inst(
             writeln!(c, "{}v_{} = {};", indent, dst, if *val { 1 } else { 0 }).unwrap();
         }
         IrInst::ConstStr(dst, s) => {
-            // 静的文字列リテラル: ポインタを i64 として格納
+            // 静的文字列リテラル: hidden-magic 構造体の .s を i64 として格納
+            let idx = fctx
+                .str_index
+                .get(s)
+                .copied()
+                .unwrap_or_else(|| unreachable!("string literal not collected: {s:?}"));
             writeln!(
                 c,
-                "{}v_{} = (int64_t)(intptr_t){};",
-                indent,
-                dst,
-                c_string_literal(s)
+                "{}v_{} = (int64_t)(intptr_t)__taida_sl_{}.s;",
+                indent, dst, idx
             )
             .unwrap();
         }

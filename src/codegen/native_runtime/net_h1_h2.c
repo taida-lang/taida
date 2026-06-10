@@ -4506,7 +4506,7 @@ static void *net_worker_thread(void *arg) {
                         taida_pack_set(effective_response, 1, taida_list_new());
                         taida_pack_set_tag(effective_response, 1, TAIDA_TAG_LIST);
                         taida_pack_set_hash(effective_response, 2, taida_str_hash((taida_val)"body"));
-                        taida_pack_set(effective_response, 2, (taida_val)"");
+                        taida_pack_set(effective_response, 2, TAIDA_EMPTY_STR);
                         taida_pack_set_tag(effective_response, 2, TAIDA_TAG_STR);
                     }
                     // NB6-1: Scatter-gather send — head and body as separate buffers.

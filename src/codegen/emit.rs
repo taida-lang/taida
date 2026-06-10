@@ -2,7 +2,7 @@ use cranelift_codegen::ir::types;
 /// Taida IR → CLIF IR 変換（Cranelift Emission）
 use cranelift_codegen::ir::{self as clif, AbiParam, InstBuilder};
 use cranelift_codegen::isa::CallConv;
-use cranelift_codegen::settings;
+use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
@@ -1221,6 +1221,24 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         },
 
         // ── Lax ──
+        // ── F58 P2-4: divisor-proven exact division (fused unmold) ──
+        "taida_div_exact" | "taida_mod_exact" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        // ── F58 P2-2: iteration-scope arena watermark ──
+        "taida_arena_iter_enter" => RuntimeAbi {
+            params: &[],
+            returns: &[Val],
+        },
+        "taida_arena_iter_reset" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_arena_iter_exit" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
         "taida_lax_new" => RuntimeAbi {
             params: &[Val, Val],
             returns: &[Ptr],
@@ -2127,7 +2145,18 @@ impl Emitter {
     pub fn new_with_target(target: CompileTarget) -> Result<Self, EmitError> {
         let abi = AbiHelper::new(target);
 
-        let shared_builder = settings::builder();
+        let mut shared_builder = settings::builder();
+        // Run Cranelift's optimizing pipeline (e-graph based GVN / LICM /
+        // alias analysis and better regalloc decisions). The default is
+        // "none", which emits straight-line unoptimized code — measured on
+        // the bench suite this left 1.2-3x on the table for codegen-bound
+        // loops while keeping observable behaviour identical (the IR is
+        // semantics-preserving either way).
+        shared_builder
+            .set("opt_level", "speed")
+            .map_err(|e| EmitError {
+                message: format!("failed to set Cranelift opt_level: {}", e),
+            })?;
         let shared_flags = settings::Flags::new(shared_builder);
 
         let triple = abi.triple();

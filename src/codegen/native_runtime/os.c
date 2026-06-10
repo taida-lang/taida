@@ -69,7 +69,7 @@ static taida_val taida_os_ok_inner(void) {
     taida_pack_set(inner, 1, 0);
     taida_val msg_hash = 0x546401b5d2a8d2a4ULL;
     taida_pack_set_hash(inner, 2, (taida_val)msg_hash);
-    taida_pack_set(inner, 2, (taida_val)"");
+    taida_pack_set(inner, 2, TAIDA_EMPTY_STR);
     return inner;
 }
 
@@ -115,7 +115,7 @@ static taida_val taida_os_extract_wait_code(int status) {
 // ── Read[path]() → Lax[Str] ──────────────────────────────
 static taida_val taida_os_read_lax_error(const char *kind) {
     taida_val error = taida_make_error_with_kind_code("IoError", "Read error", kind, 0);
-    return taida_lax_empty_error((taida_val)"", error);
+    return taida_lax_empty_error(TAIDA_EMPTY_STR, error);
 }
 
 #include <poll.h>  // G3: poll() for concurrent stdout/stderr drain
@@ -204,7 +204,7 @@ taida_val taida_os_read(taida_val path_ptr) {
     fclose(f);
     buf[read_bytes] = '\0';
 
-    return taida_lax_new((taida_val)buf, (taida_val)"");
+    return taida_lax_new((taida_val)buf, TAIDA_EMPTY_STR);
 }
 
 // ── readBytes(path) → Lax[Bytes] ──────────────────────────
@@ -374,7 +374,7 @@ static taida_val taida_os_stat_default_pack(void) {
     taida_pack_set_hash(default_pack, 0, (taida_val)size_hash);
     taida_pack_set(default_pack, 0, 0);
     taida_pack_set_hash(default_pack, 1, (taida_val)modified_hash);
-    taida_pack_set(default_pack, 1, (taida_val)"");
+    taida_pack_set(default_pack, 1, TAIDA_EMPTY_STR);
     taida_pack_set_hash(default_pack, 2, (taida_val)is_dir_hash);
     taida_pack_set(default_pack, 2, 0);
     return default_pack;
@@ -456,7 +456,7 @@ taida_val taida_os_exists(taida_val path_ptr) {
 // ── EnvVar[name]() → Lax[Str] ─────────────────────────────
 static taida_val taida_os_env_var_lax_error(const char *kind) {
     taida_val error = taida_make_error_with_kind_code("IoError", "EnvVar error", kind, 0);
-    return taida_lax_empty_error((taida_val)"", error);
+    return taida_lax_empty_error(TAIDA_EMPTY_STR, error);
 }
 
 taida_val taida_os_env_var(taida_val name_ptr) {
@@ -465,7 +465,7 @@ taida_val taida_os_env_var(taida_val name_ptr) {
     const char *val = getenv(name);
     if (!val) return taida_os_env_var_lax_error("not_found");
     char *copy = taida_str_new_copy(val);
-    return taida_lax_new((taida_val)copy, (taida_val)"");
+    return taida_lax_new((taida_val)copy, TAIDA_EMPTY_STR);
 }
 
 // ── F56 Phase 2: MoltenizeSecretFromEnv[name]() → Lax[Secret[Str]] ──

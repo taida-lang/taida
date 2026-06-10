@@ -20,6 +20,44 @@
 #include <sys/random.h>
 #endif
 
+// Allocation-path counters for the perf measurement build. Compiled in only
+// with -DTAIDA_PERF_COUNTERS (the normal build reduces every hook to a
+// no-op). Counters are process-global with relaxed atomic adds so worker
+// threads are counted exactly without imposing ordering cost; the dump runs
+// as a destructor after main() returns and emits a single machine-parsable
+// line on stderr.
+#ifdef TAIDA_PERF_COUNTERS
+static unsigned long long taida_perf_arena_calls;
+static unsigned long long taida_perf_arena_bytes;
+static unsigned long long taida_perf_malloc_calls;
+static unsigned long long taida_perf_malloc_bytes;
+static unsigned long long taida_perf_freelist_hits;
+static unsigned long long taida_perf_arena_resets;
+static unsigned long long taida_perf_ptr_readable_calls;
+static unsigned long long taida_perf_arena_contains_calls;
+#define TAIDA_PERF_INC(c) __atomic_fetch_add(&(c), 1ULL, __ATOMIC_RELAXED)
+#define TAIDA_PERF_ADD(c, n) \
+    __atomic_fetch_add(&(c), (unsigned long long)(n), __ATOMIC_RELAXED)
+__attribute__((destructor)) static void taida_perf_dump(void) {
+    fprintf(stderr,
+            "TAIDA_PERF native arena_calls=%llu arena_bytes=%llu "
+            "malloc_calls=%llu malloc_bytes=%llu freelist_hits=%llu "
+            "arena_resets=%llu ptr_readable_calls=%llu "
+            "arena_contains_calls=%llu\n",
+            __atomic_load_n(&taida_perf_arena_calls, __ATOMIC_RELAXED),
+            __atomic_load_n(&taida_perf_arena_bytes, __ATOMIC_RELAXED),
+            __atomic_load_n(&taida_perf_malloc_calls, __ATOMIC_RELAXED),
+            __atomic_load_n(&taida_perf_malloc_bytes, __ATOMIC_RELAXED),
+            __atomic_load_n(&taida_perf_freelist_hits, __ATOMIC_RELAXED),
+            __atomic_load_n(&taida_perf_arena_resets, __ATOMIC_RELAXED),
+            __atomic_load_n(&taida_perf_ptr_readable_calls, __ATOMIC_RELAXED),
+            __atomic_load_n(&taida_perf_arena_contains_calls, __ATOMIC_RELAXED));
+}
+#else
+#define TAIDA_PERF_INC(c) ((void)0)
+#define TAIDA_PERF_ADD(c, n) ((void)0)
+#endif
+
 // FL-9: Safe realloc wrapper — aborts on NULL with a diagnostic message.
 // Usage: TAIDA_REALLOC(ptr, new_size, context_label)
 // ptr is reassigned in-place; on failure, prints OOM message and exits.
@@ -39,6 +77,8 @@ static inline void *taida_safe_malloc(size_t size, const char *label) {
     if (size == 0) size = 1;
     void *p = malloc(size);
     if (!p) { fprintf(stderr, "taida: out of memory (%s)\n", label); exit(1); }
+    TAIDA_PERF_INC(taida_perf_malloc_calls);
+    TAIDA_PERF_ADD(taida_perf_malloc_bytes, size);
     // C26B-024 (Round 10 / wepsilon Step 4): track heap extent so
     // taida_ptr_is_readable can skip mincore for heap pointers.
     // (Inline expansion — heap_range globals declared later via __thread; we
@@ -135,6 +175,16 @@ typedef intptr_t  taida_fn_ptr;  // 関数ポインタ
 // backed inputs without an ABI break (§ 6.2 widening addition).
 #define TAIDA_STR_ROPE_MAGIC 0x5441494452505400LL // "TAIDRPT\0"
 #define TAIDA_CLOSURE_MAGIC 0x54414944434C4F00LL // "TAIDCLO\0"
+
+// A single static empty-string *value* carrying the hidden 16-byte header
+// ([magic][len=0] | "\0"). Runtime sites that need an empty Str in the
+// Taida value space (Lax defaults, empty pack fields) must use this
+// instead of casting a raw C "" literal: string-value identification is
+// positive (hidden-header magic), so a header-less char* would not be
+// recognised as a Str by taida_is_string_value / the polymorphic
+// operators.
+static const taida_val taida_empty_str_obj[3] = { TAIDA_STR_STATIC_MAGIC, 0, 0 };
+#define TAIDA_EMPTY_STR ((taida_val)(intptr_t)&taida_empty_str_obj[2])
 
 // Type tags for BuchiPack field values (A-4a)
 #define TAIDA_TAG_INT     0
@@ -472,6 +522,7 @@ static __thread int taida_pack4_freelist_count = 0;
 // Returns NULL if the freelist is empty — caller must fall back to malloc.
 static inline taida_val *taida_pack4_freelist_pop(void) {
     if (taida_pack4_freelist_count == 0) return NULL;
+    TAIDA_PERF_INC(taida_perf_freelist_hits);
     return taida_pack4_freelist[--taida_pack4_freelist_count];
 }
 
@@ -505,6 +556,7 @@ static __thread int taida_list_freelist_count = 0;
 
 static inline taida_val *taida_list_freelist_pop(void) {
     if (taida_list_freelist_count == 0) return NULL;
+    TAIDA_PERF_INC(taida_perf_freelist_hits);
     return taida_list_freelist[--taida_list_freelist_count];
 }
 
@@ -633,12 +685,59 @@ typedef struct taida_arena_chunk {
 static __thread taida_arena_chunk_t taida_arena_chunks[TAIDA_ARENA_MAX_CHUNKS];
 static __thread int taida_arena_chunk_count = 0;
 static __thread int taida_arena_active_chunk = -1;
+// F58 P2-1: bounding box over all chunks. Chunks come from malloc with no
+// address-order guarantee, so containment still needs a per-chunk check —
+// but the vast majority of probes are for non-arena pointers (string
+// literals, malloc'd objects, scalars that look like pointers), and those
+// are rejected here in O(1) instead of walking up to 128 chunks. The box
+// is widened on chunk allocation and recomputed on reset.
+static __thread uintptr_t taida_arena_lo = UINTPTR_MAX;
+static __thread uintptr_t taida_arena_hi = 0;
+
+static inline void taida_arena_bounds_add(unsigned char *base, size_t size) {
+    uintptr_t b = (uintptr_t)base;
+    if (b < taida_arena_lo) taida_arena_lo = b;
+    if (b + size > taida_arena_hi) taida_arena_hi = b + size;
+}
+
+static inline void taida_arena_bounds_recompute(void) {
+    taida_arena_lo = UINTPTR_MAX;
+    taida_arena_hi = 0;
+    for (int i = 0; i < taida_arena_chunk_count; i++) {
+        taida_arena_bounds_add(taida_arena_chunks[i].base,
+                               taida_arena_chunks[i].size);
+    }
+}
+
+// F58 P2-2: iteration-scope watermark depth. While > 0, arena-backed
+// objects must not enter the small-object freelists: the enclosing
+// iteration scope will rewind the arena past them, so a freelist entry
+// would dangle. malloc-backed objects are unaffected. The depth is
+// thread-local (worker threads have independent arenas) and is cleared
+// on taida_throw — a longjmp escapes every active iteration scope, after
+// which the arena follows the normal leak-until-reset discipline again.
+static __thread int taida_arena_iter_depth = 0;
 
 static inline int taida_arena_contains(void *ptr) {
-    unsigned char *p = (unsigned char *)ptr;
+    TAIDA_PERF_INC(taida_perf_arena_contains_calls);
+    uintptr_t p = (uintptr_t)ptr;
+    // O(1) reject for pointers outside the arena bounding box (the common
+    // case on type-judgment paths).
+    if (p < taida_arena_lo || p >= taida_arena_hi) return 0;
+    // Active chunk first: recent allocations dominate containment hits.
+    int ai = taida_arena_active_chunk;
+    if (ai >= 0) {
+        unsigned char *base = taida_arena_chunks[ai].base;
+        if ((unsigned char *)ptr >= base
+            && (unsigned char *)ptr < base + taida_arena_chunks[ai].size)
+            return 1;
+    }
     for (int i = 0; i < taida_arena_chunk_count; i++) {
+        if (i == ai) continue;
         unsigned char *base = taida_arena_chunks[i].base;
-        if (p >= base && p < base + taida_arena_chunks[i].size) return 1;
+        if ((unsigned char *)ptr >= base
+            && (unsigned char *)ptr < base + taida_arena_chunks[i].size)
+            return 1;
     }
     return 0;
 }
@@ -653,6 +752,8 @@ static void *taida_arena_alloc(size_t size) {
         if (c->offset + aligned <= c->size) {
             void *p = c->base + c->offset;
             c->offset += aligned;
+            TAIDA_PERF_INC(taida_perf_arena_calls);
+            TAIDA_PERF_ADD(taida_perf_arena_bytes, aligned);
             return p;
         }
     }
@@ -665,6 +766,9 @@ static void *taida_arena_alloc(size_t size) {
     c->size = TAIDA_ARENA_CHUNK_SIZE;
     taida_arena_active_chunk = taida_arena_chunk_count;
     taida_arena_chunk_count++;
+    taida_arena_bounds_add(base, TAIDA_ARENA_CHUNK_SIZE);
+    TAIDA_PERF_INC(taida_perf_arena_calls);
+    TAIDA_PERF_ADD(taida_perf_arena_bytes, aligned);
     return base;
 }
 
@@ -718,6 +822,7 @@ static void *taida_arena_alloc(size_t size) {
  *     B) are not arena-backed and are unaffected by this reset.
  */
 static void taida_arena_request_reset(void) {
+    TAIDA_PERF_INC(taida_perf_arena_resets);
     /* Drain pack4 freelist: arena entries die with arena reset, malloc
      * entries must be freed. Distinguish via taida_arena_contains. */
     for (int i = 0; i < taida_pack4_freelist_count; i++) {
@@ -763,6 +868,7 @@ static void taida_arena_request_reset(void) {
         }
         taida_arena_chunk_count = 1;
     }
+    taida_arena_bounds_recompute();
     if (taida_arena_chunk_count == 1 && taida_arena_chunks[0].base) {
         taida_arena_chunks[0].offset = 0;
         taida_arena_active_chunk = 0;
@@ -776,6 +882,82 @@ static void taida_arena_request_reset(void) {
          * an explicit if. */
         taida_arena_active_chunk = -1;
     }
+}
+
+// F58 P2-2: iteration-scope watermark over the chunked arena. The lowerer
+// inserts these around tail-recursive loops whose iteration-local values
+// provably cannot escape (scalar-annotated TailCall params, no
+// GlobalSet / closures / indirect or user calls, runtime calls limited
+// to a retention-free whitelist):
+//
+//   mark = taida_arena_iter_enter()        — function entry
+//   taida_arena_iter_reset(mark)           — after the TailCall arguments
+//                                            are evaluated, right before
+//                                            the loop back-edge
+//   taida_arena_iter_exit(mark)            — right before return
+//
+// The mark encodes {active_chunk + 1, offset} in one taida_val (an
+// offset never exceeds the 2 MiB chunk, so 32 bits each are plenty).
+// reset frees every chunk allocated after the mark, rewinds the offset,
+// and recomputes the containment bounding box. Values allocated before
+// the mark are never touched, so freelist entries from outside the
+// scope stay valid; values allocated inside the scope are kept out of
+// the freelists by the taida_arena_iter_depth gate in the push helpers.
+// A throw longjmps past every active scope, so taida_throw clears the
+// depth — the arena then simply follows the normal leak-until-reset
+// discipline for whatever the escaped scopes had allocated.
+taida_val taida_arena_iter_enter(void) {
+    taida_arena_iter_depth++;
+    int ai = taida_arena_active_chunk;
+    size_t off = (ai >= 0) ? taida_arena_chunks[ai].offset : 0;
+    return (((taida_val)(ai + 1)) << 32) | (taida_val)off;
+}
+
+taida_val taida_arena_iter_reset(taida_val mark) {
+    int ai = (int)(mark >> 32) - 1;
+    size_t off = (size_t)(mark & 0xFFFFFFFFLL);
+    if (ai >= taida_arena_chunk_count) return 0;  // defensive: stale mark
+    if (ai < 0) {
+        // No chunk existed at enter time: mirror request_reset's
+        // keep-chunk-zero discipline so the next allocation reuses a
+        // warm slab instead of round-tripping malloc.
+        if (taida_arena_chunk_count > 1) {
+            for (int i = 1; i < taida_arena_chunk_count; i++) {
+                free(taida_arena_chunks[i].base);
+                taida_arena_chunks[i].base = NULL;
+                taida_arena_chunks[i].offset = 0;
+                taida_arena_chunks[i].size = 0;
+            }
+            taida_arena_chunk_count = 1;
+            taida_arena_bounds_recompute();
+        }
+        if (taida_arena_chunk_count == 1 && taida_arena_chunks[0].base) {
+            taida_arena_chunks[0].offset = 0;
+            taida_arena_active_chunk = 0;
+        }
+        TAIDA_PERF_INC(taida_perf_arena_resets);
+        return 0;
+    }
+    if (taida_arena_chunk_count > ai + 1) {
+        for (int i = ai + 1; i < taida_arena_chunk_count; i++) {
+            free(taida_arena_chunks[i].base);
+            taida_arena_chunks[i].base = NULL;
+            taida_arena_chunks[i].offset = 0;
+            taida_arena_chunks[i].size = 0;
+        }
+        taida_arena_chunk_count = ai + 1;
+        taida_arena_bounds_recompute();
+    }
+    taida_arena_chunks[ai].offset = off;
+    taida_arena_active_chunk = ai;
+    TAIDA_PERF_INC(taida_perf_arena_resets);
+    return 0;
+}
+
+taida_val taida_arena_iter_exit(taida_val mark) {
+    (void)mark;
+    if (taida_arena_iter_depth > 0) taida_arena_iter_depth--;
+    return 0;
 }
 
 extern taida_val _taida_main(void);
@@ -929,6 +1111,7 @@ static const char *taida_os_error_kind(int err_code, const char *err_msg);
 static taida_val taida_make_io_error(int err_code, const char *err_msg);
 static int taida_ptr_is_readable(taida_val ptr, size_t bytes);
 static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_len);
+static int taida_is_string_value(taida_val v);
 static int taida_str_byte_len(const char *s, size_t *out_len);
 static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
@@ -1260,11 +1443,11 @@ static taida_val taida_digit_to_char(taida_val digit) {
 }
 
 taida_val taida_to_radix(taida_val value, taida_val base) {
-    if (base < 2 || base > 36) return taida_lax_empty((taida_val)"");
+    if (base < 2 || base > 36) return taida_lax_empty(TAIDA_EMPTY_STR);
     if (value == 0) {
         char *out = taida_str_alloc(1);
         out[0] = '0';
-        return taida_lax_new((taida_val)out, (taida_val)"");
+        return taida_lax_new((taida_val)out, TAIDA_EMPTY_STR);
     }
 
     uint64_t mag = value < 0
@@ -1283,7 +1466,7 @@ taida_val taida_to_radix(taida_val value, taida_val base) {
     for (size_t i = 0; i < pos; i++) {
         out[i] = tmp[pos - 1 - i];
     }
-    return taida_lax_new((taida_val)out, (taida_val)"");
+    return taida_lax_new((taida_val)out, TAIDA_EMPTY_STR);
 }
 // FNV-1a hashes for error field names
 #define HASH_TYPE    0xa79439ef7bfa9c2dULL
@@ -1797,19 +1980,37 @@ taida_val taida_todo_new(taida_val id, taida_val task, taida_val sol, taida_val 
     return pack;
 }
 
-static int taida_is_molten(taida_val ptr) {
-    if (!TAIDA_IS_PACK(ptr)) return 0;
-    if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 5)) return 0;
-    taida_val *obj = (taida_val*)ptr;
-    if (obj[1] != 1) return 0;
-    if (obj[2] != (taida_val)HASH___TYPE) return 0;  // hash at stride-3 offset 0
-    taida_val type_ptr = obj[4];  // value at stride-3 offset 2
+// F58 P2-1: type-slot matchers shared by taida_is_molten /
+// taida_is_moltenized / taida_detect_gorillax_type and the single-probe
+// dispatch inside taida_generic_unmold. The caller must have validated
+// the enclosing pack header (magic) before reading the slot.
+static int taida_molten_type_slot_matches(taida_val type_ptr) {
     if (type_ptr == (taida_val)__molten_type_str) return 1;
     if (!taida_ptr_is_readable(type_ptr, 1)) return 0;
     const char *type_str = (const char*)type_ptr;
     size_t len = 0;
     if (!taida_read_cstr_len_safe(type_str, 32, &len)) return 0;
     return len == 6 && memcmp(type_str, "Molten", 6) == 0;
+}
+
+static int taida_moltenized_type_slot_matches(taida_val type_ptr) {
+    if (type_ptr == (taida_val)__moltenized_type_str) return 1;
+    if (type_ptr == (taida_val)__secret_type_str) return 1;
+    if (!taida_ptr_is_readable(type_ptr, 1)) return 0;
+    const char *type_str = (const char*)type_ptr;
+    size_t len = 0;
+    if (!taida_read_cstr_len_safe(type_str, 32, &len)) return 0;
+    return (len == 10 && memcmp(type_str, "Moltenized", 10) == 0)
+        || (len == 6 && memcmp(type_str, "Secret", 6) == 0);
+}
+
+static int taida_is_molten(taida_val ptr) {
+    if (!TAIDA_IS_PACK(ptr)) return 0;
+    if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 5)) return 0;
+    taida_val *obj = (taida_val*)ptr;
+    if (obj[1] != 1) return 0;
+    if (obj[2] != (taida_val)HASH___TYPE) return 0;  // hash at stride-3 offset 0
+    return taida_molten_type_slot_matches(obj[4]);  // value at stride-3 offset 2
 }
 
 // F56: detect a Moltenized/Secret carrier pack (fc=2, __type = "Moltenized"
@@ -1820,15 +2021,7 @@ static int taida_is_moltenized(taida_val ptr) {
     taida_val *obj = (taida_val*)ptr;
     if (obj[1] != 2) return 0;
     if (obj[2] != (taida_val)HASH___TYPE) return 0;
-    taida_val type_ptr = obj[4];
-    if (type_ptr == (taida_val)__moltenized_type_str) return 1;
-    if (type_ptr == (taida_val)__secret_type_str) return 1;
-    if (!taida_ptr_is_readable(type_ptr, 1)) return 0;
-    const char *type_str = (const char*)type_ptr;
-    size_t len = 0;
-    if (!taida_read_cstr_len_safe(type_str, 32, &len)) return 0;
-    return (len == 10 && memcmp(type_str, "Moltenized", 10) == 0)
-        || (len == 6 && memcmp(type_str, "Secret", 6) == 0);
+    return taida_moltenized_type_slot_matches(obj[4]);
 }
 
 // F56: render a sealed carrier as "<Secret>" / "<Moltenized>" (policy label
@@ -1977,9 +2170,11 @@ taida_val taida_relaxed_gorillax_to_string(taida_val ptr) {
 
 // Helper: check __type field of fc=4 BuchiPack for Gorillax/RelaxedGorillax
 // Returns: 0 = Lax, 1 = Gorillax, 2 = RelaxedGorillax
-static int taida_detect_gorillax_type(taida_val ptr) {
-    if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 10)) return 0;
-    taida_val type_ptr = taida_pack_get_idx(ptr, 3);  // __type field
+// F58 P2-1: __type-slot classifier shared by taida_detect_gorillax_type
+// and the single-probe dispatch in taida_generic_unmold. Returns
+// 1=Gorillax / 2=RelaxedGorillax / 0=Lax. The caller must have validated
+// the enclosing pack header.
+static int taida_gorillax_type_from_slot(taida_val type_ptr) {
     if (type_ptr == 0 || type_ptr < 4096) return 0;
     if (type_ptr == (taida_val)__gorillax_type_str) return 1;
     if (type_ptr == (taida_val)__relaxed_gorillax_type_str) return 2;
@@ -1989,6 +2184,11 @@ static int taida_detect_gorillax_type(taida_val ptr) {
     if (len == 8 && memcmp(type_str, "Gorillax", 8) == 0) return 1;
     if (len == 15 && memcmp(type_str, "RelaxedGorillax", 15) == 0) return 2;
     return 0;  // Lax
+}
+
+static int taida_detect_gorillax_type(taida_val ptr) {
+    if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 10)) return 0;
+    return taida_gorillax_type_from_slot(taida_pack_get_idx(ptr, 3));  // __type field
 }
 
 // taida_int_div and taida_int_mod removed — use Div/Mod molds
@@ -2001,6 +2201,12 @@ taida_val taida_mod_mold(taida_val a, taida_val b) {
     if (b == 0) return taida_lax_empty(0);
     return taida_lax_new(a % b, 0);
 }
+
+// F58 P2-4: division/modulo with a compiler-proven non-zero divisor —
+// the fused form of `Div[a, b]() >=> v` where `b` is a non-zero Int
+// literal, so the empty-Lax path is unreachable and no Lax is built.
+taida_val taida_div_exact(taida_val a, taida_val b) { return a / b; }
+taida_val taida_mod_exact(taida_val a, taida_val b) { return a % b; }
 
 // ── Type conversion molds (Str/Int/Float/Bool) ──────────────
 // Each returns a Lax BuchiPack. Str default="", Int default=0, Float default=0.0, Bool default=false(0).
@@ -2058,16 +2264,16 @@ taida_val taida_mod_mold_f(double a, double b) {
 
 // Str[x]() — always succeeds
 taida_val taida_str_mold_int(taida_val v) {
-    return taida_lax_tag_value_default(taida_lax_new(taida_str_from_int(v), (taida_val)""), TAIDA_TAG_STR);
+    return taida_lax_tag_value_default(taida_lax_new(taida_str_from_int(v), TAIDA_EMPTY_STR), TAIDA_TAG_STR);
 }
 taida_val taida_str_mold_float(double v) {
-    return taida_lax_tag_value_default(taida_lax_new(taida_str_from_float(v), (taida_val)""), TAIDA_TAG_STR);
+    return taida_lax_tag_value_default(taida_lax_new(taida_str_from_float(v), TAIDA_EMPTY_STR), TAIDA_TAG_STR);
 }
 taida_val taida_str_mold_bool(taida_val v) {
-    return taida_lax_tag_value_default(taida_lax_new(taida_str_from_bool(v), (taida_val)""), TAIDA_TAG_STR);
+    return taida_lax_tag_value_default(taida_lax_new(taida_str_from_bool(v), TAIDA_EMPTY_STR), TAIDA_TAG_STR);
 }
 taida_val taida_str_mold_str(taida_val v) {
-    return taida_lax_tag_value_default(taida_lax_new(v, (taida_val)""), TAIDA_TAG_STR);
+    return taida_lax_tag_value_default(taida_lax_new(v, TAIDA_EMPTY_STR), TAIDA_TAG_STR);
 }
 
 // C23-2: generic Str[x]() entry for non-primitive values (List/Pack/Lax/Result/…).
@@ -2080,7 +2286,7 @@ taida_val taida_str_mold_str(taida_val v) {
 // molds above.
 taida_val taida_str_mold_any(taida_val v) {
     taida_val str = taida_stdout_display_string(v);
-    return taida_lax_tag_value_default(taida_lax_new(str, (taida_val)""), TAIDA_TAG_STR);
+    return taida_lax_tag_value_default(taida_lax_new(str, TAIDA_EMPTY_STR), TAIDA_TAG_STR);
 }
 
 // Int[x]() — Str parse can fail
@@ -2116,7 +2322,7 @@ taida_val taida_int_mold_auto(taida_val v) {
     }
 
     size_t len = 0;
-    if (taida_read_cstr_len_safe((const char*)v, 4096, &len)) {
+    if (taida_is_string_value(v) && taida_read_cstr_len_safe((const char*)v, 4096, &len)) {
         return taida_int_mold_str(v);
     }
 
@@ -2454,27 +2660,27 @@ static int taida_utf8_single_scalar(const unsigned char *buf, size_t len, uint32
 }
 
 taida_val taida_char_mold_int(taida_val value) {
-    if (value < 0 || value > 0x10FFFF) return taida_lax_empty((taida_val)"");
-    if (value >= 0xD800 && value <= 0xDFFF) return taida_lax_empty((taida_val)"");
+    if (value < 0 || value > 0x10FFFF) return taida_lax_empty(TAIDA_EMPTY_STR);
+    if (value >= 0xD800 && value <= 0xDFFF) return taida_lax_empty(TAIDA_EMPTY_STR);
     unsigned char utf8[4];
     size_t out_len = 0;
     if (!taida_utf8_encode_scalar((uint32_t)value, utf8, &out_len)) {
-        return taida_lax_empty((taida_val)"");
+        return taida_lax_empty(TAIDA_EMPTY_STR);
     }
     char *out = taida_str_alloc(out_len);
     memcpy(out, utf8, out_len);
-    return taida_lax_new((taida_val)out, (taida_val)"");
+    return taida_lax_new((taida_val)out, TAIDA_EMPTY_STR);
 }
 
 taida_val taida_char_mold_str(taida_val value) {
     const char *s = (const char*)value;
     size_t len = 0;
     if (!taida_read_cstr_len_safe(s, 4096, &len) || len == 0) {
-        return taida_lax_empty((taida_val)"");
+        return taida_lax_empty(TAIDA_EMPTY_STR);
     }
     uint32_t cp = 0;
     if (!taida_utf8_single_scalar((const unsigned char*)s, len, &cp)) {
-        return taida_lax_empty((taida_val)"");
+        return taida_lax_empty(TAIDA_EMPTY_STR);
     }
     return taida_char_mold_int((taida_val)cp);
 }
@@ -2519,7 +2725,7 @@ taida_val taida_bytes_mold(taida_val value, taida_val fill) {
 
     const char *s = (const char*)value;
     size_t slen = 0;
-    if (taida_read_cstr_len_safe(s, 65536, &slen)) {
+    if (taida_is_string_value(value) && taida_read_cstr_len_safe(s, 65536, &slen)) {
         taida_val out = taida_bytes_from_raw((const unsigned char*)s, (taida_val)slen);
         return taida_lax_new(out, taida_bytes_default_value());
     }
@@ -2698,7 +2904,7 @@ taida_val taida_bytes_cursor_u8(taida_val cursor_ptr) {
 taida_val taida_utf8_encode_mold(taida_val value) {
     const char *s = (const char*)value;
     size_t len = 0;
-    if (!taida_read_cstr_len_safe(s, 65536, &len)) {
+    if (!taida_is_string_value(value) || !taida_read_cstr_len_safe(s, 65536, &len)) {
         return taida_lax_empty(taida_bytes_default_value());
     }
     taida_val out = taida_bytes_from_raw((const unsigned char*)s, (taida_val)len);
@@ -2714,7 +2920,7 @@ taida_val taida_utf8_decode_mold(taida_val value) {
     taida_val len = 0;
     if (TAIDA_IS_BYTES_CONTIG(value)) {
         len = taida_bytes_contig_len(value);
-        if (len <= 0) return taida_lax_new((taida_val)taida_str_new_copy(""), (taida_val)"");
+        if (len <= 0) return taida_lax_new((taida_val)taida_str_new_copy(""), TAIDA_EMPTY_STR);
         raw_ptr = taida_bytes_contig_data(value);
     } else if (TAIDA_IS_BYTES(value)) {
         taida_val *bytes = (taida_val*)value;
@@ -2722,12 +2928,12 @@ taida_val taida_utf8_decode_mold(taida_val value) {
         // R-01: Guard against negative length — a corrupted Bytes header could
         // pass a negative len, which would be cast to a huge size_t and trigger
         // a massive malloc followed by OOM abort.
-        if (len <= 0) return taida_lax_new((taida_val)taida_str_new_copy(""), (taida_val)"");
+        if (len <= 0) return taida_lax_new((taida_val)taida_str_new_copy(""), TAIDA_EMPTY_STR);
         raw_owned = (unsigned char*)TAIDA_MALLOC((size_t)len, "bytes_decode");
         for (taida_val i = 0; i < len; i++) raw_owned[i] = (unsigned char)bytes[2 + i];
         raw_ptr = raw_owned;
     } else {
-        return taida_lax_empty((taida_val)"");
+        return taida_lax_empty(TAIDA_EMPTY_STR);
     }
 
     size_t pos = 0;
@@ -2736,7 +2942,7 @@ taida_val taida_utf8_decode_mold(taida_val value) {
         uint32_t cp = 0;
         if (!taida_utf8_decode_one(raw_ptr + pos, (size_t)len - pos, &consumed, &cp)) {
             if (raw_owned) free(raw_owned);
-            return taida_lax_empty((taida_val)"");
+            return taida_lax_empty(TAIDA_EMPTY_STR);
         }
         pos += consumed;
     }
@@ -2744,7 +2950,7 @@ taida_val taida_utf8_decode_mold(taida_val value) {
     char *out = taida_str_alloc((size_t)len);
     memcpy(out, raw_ptr, (size_t)len);
     if (raw_owned) free(raw_owned);
-    return taida_lax_new((taida_val)out, (taida_val)"");
+    return taida_lax_new((taida_val)out, TAIDA_EMPTY_STR);
 }
 
 taida_val taida_int_neg(taida_val a) { return (taida_val)(0ULL - ((uint64_t)a)); }
@@ -2756,35 +2962,28 @@ taida_val taida_int_neq(taida_val a, taida_val b) { return a != b ? 1 : 0; }
 taida_val taida_str_eq(taida_val a, taida_val b)  { return (a && b) ? (strcmp((char*)a, (char*)b) == 0 ? 1 : 0) : (a == b ? 1 : 0); }
 taida_val taida_str_neq(taida_val a, taida_val b) { return (a && b) ? (strcmp((char*)a, (char*)b) != 0 ? 1 : 0) : (a != b ? 1 : 0); }
 static int taida_is_string_value(taida_val v) {
+    // Positive identification via the hidden 16-byte header. A Taida Str
+    // value always points just past its header ([magic|rc][byte_len] |
+    // bytes...), produced by taida_str_alloc (heap / freelist / arena),
+    // the static-literal emitter (TAIDA_STR_STATIC_MAGIC, 8-aligned,
+    // value = data_start + 16) or TAIDA_EMPTY_STR. The previous
+    // heuristic ("mapped page without a container magic at v[0] ->
+    // raw char*") misclassified large Int values as strings the moment
+    // an accumulator crossed into a mapped address range (e.g. the
+    // no-pie ELF load base 0x400000 = 4,194,304), silently turning
+    // polymorphic `+` into string concatenation and `==` into strcmp
+    // on a fabricated pointer. Raw C string literals must never enter
+    // the Taida value space (use TAIDA_EMPTY_STR / taida_str_new_copy).
     if (v == 0 || v == 1 || v < 4096) return 0;
-    // C26B-024 (Round 10 / wepsilon Step 4): arena / heap-range / mincore-
-    // cache fast path. Checks the page this pointer lives on against the
-    // same fast-paths as taida_ptr_is_readable so string-equality hot
-    // paths in poly_eq don't syscall per compare.
-    uintptr_t page = (uintptr_t)v & ~((uintptr_t)4095);
-    int page_mapped;
-    if (taida_arena_contains((void *)(uintptr_t)v)
-        || taida_heap_range_contains((uintptr_t)v)
-        || taida_mincore_cache_hit(page)) {
-        page_mapped = 1;
-    } else {
-        unsigned char vec = 0;
-        if (mincore((void*)page, 4096, &vec) != 0) {
-            page_mapped = 0;
-        } else {
-            taida_mincore_cache_add(page);
-            page_mapped = 1;
-        }
-    }
-    if (!page_mapped) return 0;
-    // Check if 8-byte aligned (heap object) and has magic header
-    if ((v & 0x7) == 0) {
-        taida_val first = ((taida_val*)v)[0];
-        if (taida_has_magic_header(first)) return 0;
-    }
-    // Not a heap object -> treat as raw char* string (already validated
-    // the page is mapped).
-    return 1;
+    // Str data is always 8-byte aligned (16-byte header on a 16-aligned
+    // allocation; static literals are emitted with align(8)).
+    if ((v & 0x7) != 0) return 0;
+    // The two header words live at v-16; require them readable before
+    // dereferencing (arena / heap-range / mincore fast paths inside).
+    if (!taida_ptr_is_readable(v - 16, 16)) return 0;
+    taida_val magic = ((const taida_val *)v)[-2] & TAIDA_MAGIC_MASK;
+    return magic == TAIDA_STR_MAGIC || magic == TAIDA_STR_STATIC_MAGIC
+        || magic == TAIDA_STR_ROPE_MAGIC;
 }
 taida_val taida_poly_eq(taida_val a, taida_val b) {
     // F56: a sealed carrier (Moltenized/Secret) is never equal — not even to
@@ -3054,7 +3253,13 @@ taida_val taida_release(taida_ptr ptr) {
             // re-uses the cached pointer as-is), so pushing an arena
             // pointer is sound. The arena chunks stay alive until process
             // exit, so the cached pointer remains valid.
-            if (TAIDA_IS_PACK(ptr) && obj[1] == TAIDA_PACK_FC_FOR_FREELIST) {
+            // F58 P2-2: inside an iteration scope an arena-backed object
+            // must not enter the freelist — the scope reset will rewind
+            // the arena past it. Skipping the push routes it to the
+            // arena-containment fall-through below (no free, reclaimed by
+            // the rewind).
+            if (TAIDA_IS_PACK(ptr) && obj[1] == TAIDA_PACK_FC_FOR_FREELIST
+                && (taida_arena_iter_depth == 0 || !taida_arena_contains(obj))) {
                 if (taida_pack4_freelist_push(obj)) {
                     return 0;  // recycled — skip free()
                 }
@@ -3065,7 +3270,8 @@ taida_val taida_release(taida_ptr ptr) {
             // C27B-018 (Round 2 wH): same reasoning as the pack4 freelist —
             // entries are uniformly cap=16 lists, so push/pop sizes match
             // exactly. Arena-backed slabs are now safely recycled.
-            if (TAIDA_IS_LIST(ptr) && obj[1] == TAIDA_LIST_INIT_CAP) {
+            if (TAIDA_IS_LIST(ptr) && obj[1] == TAIDA_LIST_INIT_CAP
+                && (taida_arena_iter_depth == 0 || !taida_arena_contains(obj))) {
                 if (taida_list_freelist_push(obj)) {
                     return 0;  // recycled -- skip free()
                 }
@@ -3087,8 +3293,10 @@ taida_val taida_release(taida_ptr ptr) {
 // ── Heap String helpers (A-4k) ────────────────────────────
 // Hidden header layout: [magic+rc (8 bytes), len (8 bytes)] + [bytes...\0]
 // The returned char* points to the bytes area (header + 16).
-// Static strings (string literals, ConstStr) have no header and are
-// identified by the absence of TAIDA_STR_MAGIC at ptr - 16.
+// Static strings (string literals, ConstStr) carry the same 16-byte
+// header with TAIDA_STR_STATIC_MAGIC instead of TAIDA_STR_MAGIC; the
+// magic distinguishes the RC paths (static strings are never
+// retained/released or freed).
 
 // Allocate a heap string with room for `len` characters (+ \0).
 // Returns pointer to the bytes area.  Caller must fill the bytes.
@@ -3128,6 +3336,10 @@ static char* taida_str_alloc(size_t len) {
             cached[1] = (taida_val)len;
             char *bytes = (char*)(cached + 2);
             bytes[len] = '\0';
+            // Counted here (not in the pop helper) because a popped slot can
+            // still be dropped by the capacity check above — only an actual
+            // reuse is a freelist hit.
+            TAIDA_PERF_INC(taida_perf_freelist_hits);
             return bytes;
         }
     }
@@ -3149,6 +3361,18 @@ static char* taida_str_alloc(size_t len) {
     char *bytes = (char*)(hdr + 2);
     bytes[len] = '\0';
     return bytes;
+}
+
+// Wrap a malloc'd C-string builder buffer into a Taida Str value (hidden
+// header) and free the original buffer. Builders that grow a raw buffer
+// via TAIDA_REALLOC cannot allocate through taida_str_alloc up front
+// (realloc would have to move the header), so they finish by copying
+// into a header-carrying Str. String values must never enter the Taida
+// value space as raw char* — identification is positive (header magic).
+static taida_val taida_str_adopt_buf(char *buf) {
+    taida_val r = (taida_val)taida_str_new_copy(buf ? buf : "");
+    free(buf);
+    return r;
 }
 
 // Copy a C string into a new heap string with hidden header.
@@ -3220,6 +3444,12 @@ static void taida_str_release(taida_val ptr) {
             size_t slen = (size_t)hdr[1];
             size_t rel_total = sizeof(taida_val) * 2 + slen + 1;
             int bucket = taida_str_bucket_for(rel_total);
+            // F58 P2-2: arena-backed strings stay out of the freelist
+            // inside an iteration scope (see the pack4 note above).
+            if (bucket >= 0 && taida_arena_iter_depth > 0
+                && taida_arena_contains(hdr)) {
+                bucket = -1;
+            }
             if (bucket >= 0) {
                 size_t aligned_total = (rel_total + 15) & ~((size_t)15);
                 size_t cap = aligned_total - sizeof(taida_val) * 2;
@@ -4388,12 +4618,12 @@ taida_val taida_str_ends_with(const char* s, const char* suffix) {
 }
 
 taida_val taida_str_get(const char* s, taida_val idx) {
-    if (!s) return taida_lax_empty((taida_val)"");
+    if (!s) return taida_lax_empty(TAIDA_EMPTY_STR);
     taida_val len = (taida_val)strlen(s);
-    if (idx < 0 || idx >= len) return taida_lax_empty((taida_val)"");
+    if (idx < 0 || idx >= len) return taida_lax_empty(TAIDA_EMPTY_STR);
     char *r = taida_str_alloc(1);
     r[0] = s[idx];
-    return taida_lax_new((taida_val)r, (taida_val)"");
+    return taida_lax_new((taida_val)r, TAIDA_EMPTY_STR);
 }
 
 taida_val taida_str_to_upper(const char* s) {
@@ -7086,6 +7316,7 @@ static taida_val taida_is_hashmap(taida_val ptr) {
 }
 
 static int taida_ptr_is_readable(taida_val ptr, size_t bytes) {
+    TAIDA_PERF_INC(taida_perf_ptr_readable_calls);
     if (ptr == 0 || ptr < 4096) return 0;
     // Taida heap objects are always 8-byte aligned.
     if (ptr & 0x7) return 0;
@@ -7257,7 +7488,7 @@ taida_val taida_value_hash(taida_val val) {
     size_t len = 0;
     taida_val h = val;
     // Check if it's a valid string pointer
-    if (taida_read_cstr_len_safe((const char*)val, 8192, &len)) {
+    if (taida_is_string_value(val) && taida_read_cstr_len_safe((const char*)val, 8192, &len)) {
         h = taida_str_hash(val);
     }
     // Identity hash for scalars (ints/floats), or FNV-1a for strings.
@@ -8781,6 +9012,11 @@ void taida_error_ceiling_pop(void) {
 }
 
 taida_val taida_throw(taida_val error_val) {
+    // F58 P2-2: a longjmp escapes every active iteration scope without
+    // running its exit hook; clear the depth so the freelists resume
+    // normal recycling. The escaped scopes' allocations follow the
+    // ordinary leak-until-reset arena discipline.
+    taida_arena_iter_depth = 0;
     if (__taida_error_depth > 0) {
         int depth = __taida_error_depth - 1;
         __taida_error_val[depth] = error_val;
@@ -8980,7 +9216,7 @@ static int taida_can_throw_payload(taida_val val) {
         return 1;
     }
     size_t sl = 0;
-    return taida_read_cstr_len_safe((const char*)val, 65536, &sl);
+    return taida_is_string_value(val) && taida_read_cstr_len_safe((const char*)val, 65536, &sl);
 }
 
 // ── Result constructors ──
@@ -9201,7 +9437,7 @@ static taida_val taida_throw_to_display_string(taida_val throw_val) {
     // String error message
     const char *s = (const char*)throw_val;
     size_t sl = 0;
-    if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_read_cstr_len_safe(s, 65536, &sl)) {
         return (taida_val)taida_str_new_copy(s);
     }
     return taida_value_to_display_string(throw_val);
@@ -9801,7 +10037,7 @@ static taida_val taida_value_to_display_string(taida_val val) {
     // Check if it's a safely readable string (char*).
     const char *s = (const char*)val;
     size_t sl = 0;
-    if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_read_cstr_len_safe(s, 65536, &sl)) {
         char *r = taida_str_alloc(sl);
         memcpy(r, s, sl);
         return (taida_val)r;
@@ -9834,7 +10070,7 @@ static taida_val taida_value_to_debug_string(taida_val val) {
     // Check for string (quoted in debug output)
     const char *s = (const char*)val;
     size_t sl = 0;
-    if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_read_cstr_len_safe(s, 65536, &sl)) {
         char *r = taida_str_alloc(sl + 2);
         r[0] = '"';
         memcpy(r + 1, s, sl);
@@ -9906,7 +10142,7 @@ static taida_val taida_value_to_debug_string_full(taida_val val) {
     // Quoted string for non-pack Str (same as the short helper).
     const char *s = (const char*)val;
     size_t sl = 0;
-    if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_read_cstr_len_safe(s, 65536, &sl)) {
         char *r = taida_str_alloc(sl + 2);
         r[0] = '"';
         memcpy(r + 1, s, sl);
@@ -10175,7 +10411,7 @@ taida_val taida_typeof(taida_val val, taida_val tag) {
         // Check if it's a string pointer
         const char *s = (const char*)val;
         size_t sl = 0;
-        if (taida_read_cstr_len_safe(s, 65536, &sl)) {
+        if (taida_is_string_value((taida_val)(intptr_t)s) && taida_read_cstr_len_safe(s, 65536, &sl)) {
             return (taida_val)taida_str_new_copy("Str");
         }
     }
@@ -10657,27 +10893,44 @@ taida_val taida_async_race(taida_val list_ptr) {
 taida_val taida_generic_unmold(taida_val ptr) {
     if (ptr == 0) return 0;
 
-    if (taida_is_molten(ptr)) {
-        taida_val error = taida_make_error(
-            "TypeError",
-            "Cannot unmold Molten directly. Molten can only be used inside Cage."
-        );
-        return taida_throw(error);
-    }
-    // F56: a sealed carrier (Moltenized/Secret) cannot be unmolded directly.
-    if (taida_is_moltenized(ptr)) {
-        taida_val error = taida_make_error(
-            "TypeError",
-            "Cannot unmold a sealed carrier (Moltenized/Secret) directly. Use a secret-aware consumer."
-        );
-        return taida_throw(error);
-    }
+    // F58 P2-1: one readability probe + one magic load for the whole
+    // dispatch. The previous structure re-probed the same pointer through
+    // taida_is_molten / taida_is_moltenized / TAIDA_IS_PACK /
+    // taida_detect_gorillax_type — at least six arena/heap-range/mincore
+    // walks per unmold, the dominant cost of the mold-unmold hot loop.
+    // A matching 64-bit magic is the ABI proof of a well-formed object,
+    // so after probing the two header words the field slots are read
+    // directly (same trust rule the probe helper documents: "callers
+    // later validate the magic-header tag").
+    if (ptr < 4096 || (ptr & 0x7) != 0) return ptr;
+    if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 2)) return ptr;
+    taida_val unmold_magic = ((taida_val*)ptr)[0] & TAIDA_MAGIC_MASK;
 
     // Check for BuchiPack (monadic types) using magic
-    if (TAIDA_IS_PACK(ptr)) {
+    if (unmold_magic == TAIDA_PACK_MAGIC) {
         taida_val *obj = (taida_val*)ptr;
         taida_val field_count = obj[1];
         taida_val hash0 = obj[2];
+
+        // Molten (fc=1, sole field __type): only usable inside Cage.
+        if (field_count == 1 && hash0 == (taida_val)HASH___TYPE
+            && taida_molten_type_slot_matches(obj[4])) {
+            taida_val error = taida_make_error(
+                "TypeError",
+                "Cannot unmold Molten directly. Molten can only be used inside Cage."
+            );
+            return taida_throw(error);
+        }
+        // F56: a sealed carrier (fc=2, first field __type = Moltenized /
+        // Secret) cannot be unmolded directly.
+        if (field_count == 2 && hash0 == (taida_val)HASH___TYPE
+            && taida_moltenized_type_slot_matches(obj[4])) {
+            taida_val error = taida_make_error(
+                "TypeError",
+                "Cannot unmold a sealed carrier (Moltenized/Secret) directly. Use a secret-aware consumer."
+            );
+            return taida_throw(error);
+        }
 
         // Result (fc=4, hash0=HASH_RES___VALUE): evaluate predicate + check throw.
         if (field_count == 4 && hash0 == (taida_val)HASH_RES___VALUE) {
@@ -10717,9 +10970,12 @@ taida_val taida_generic_unmold(taida_val ptr) {
             return value;
         }
 
-    // Lax/Gorillax/RelaxedGorillax (fc=4, hash0=HASH_HAS_VALUE)
+    // Lax/Gorillax/RelaxedGorillax (fc=4, hash0=HASH_HAS_VALUE).
+    // F58 P2-1: the pack header is already validated, so classify via the
+    // __type slot directly instead of taida_detect_gorillax_type (which
+    // re-probes 80 bytes of readability).
     if ((field_count == 4 || field_count == 5) && hash0 == (taida_val)HASH_HAS_VALUE) {
-        int gtype = taida_detect_gorillax_type(ptr);
+        int gtype = taida_gorillax_type_from_slot(taida_pack_get_idx(ptr, 3));
         if (gtype == 1) return taida_gorillax_unmold(ptr);
         if (gtype == 2) return taida_relaxed_gorillax_unmold(ptr);
         return taida_lax_unmold(ptr);
@@ -10766,7 +11022,7 @@ taida_val taida_generic_unmold(taida_val ptr) {
     }
 
     // Check if this is an Async: [ASYNC_MAGIC, status, value, error, thread_handle, value_tag, error_tag]
-    if (TAIDA_IS_ASYNC(ptr)) {
+    if (unmold_magic == TAIDA_ASYNC_MAGIC) {
         return taida_async_unmold(ptr);
     }
     // Not a monadic type or Async — return as-is (e.g., list, string, plain value)
@@ -11742,25 +11998,17 @@ taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
 taida_val taida_json_parse(taida_val str_ptr) {
     const char *src = (const char*)str_ptr;
     if (!src) src = "{}";
-    size_t len = strlen(src);
-    char *buf = (char*)TAIDA_MALLOC(len + 1, "json_parse");
-    memcpy(buf, src, len + 1);
-    return (taida_val)buf;
+    return (taida_val)taida_str_new_copy(src);
 }
 
 taida_val taida_json_empty(void) {
-    char *buf = (char*)TAIDA_MALLOC(3, "json_empty");
-    buf[0] = '{'; buf[1] = '}'; buf[2] = '\0';
-    return (taida_val)buf;
+    return (taida_val)taida_str_new_copy("{}");
 }
 
 taida_val taida_json_from_int(taida_val value) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%" PRId64 "", value);
-    size_t len = strlen(buf);
-    char *result = (char*)TAIDA_MALLOC(len + 1, "json_from_int");
-    memcpy(result, buf, len + 1);
-    return (taida_val)result;
+    return (taida_val)taida_str_new_copy(buf);
 }
 
 taida_val taida_json_from_str(taida_val str_ptr) {
@@ -11773,16 +12021,13 @@ taida_val taida_json_from_str(taida_val str_ptr) {
     memcpy(buf + 1, src, src_len);
     buf[new_len - 1] = '"';
     buf[new_len] = '\0';
-    return (taida_val)buf;
+    return taida_str_adopt_buf(buf);
 }
 
 taida_val taida_json_unmold(taida_val json_ptr) {
     const char *src = (const char*)json_ptr;
-    if (!src) { char *e = (char*)TAIDA_MALLOC(1, "json_unmold_empty"); e[0]='\0'; return (taida_val)e; }
-    size_t len = strlen(src);
-    char *buf = (char*)TAIDA_MALLOC(len + 1, "json_unmold");
-    memcpy(buf, src, len + 1);
-    return (taida_val)buf;
+    if (!src) src = "";
+    return (taida_val)taida_str_new_copy(src);
 }
 
 taida_val taida_json_stringify(taida_val json_ptr) {
@@ -12189,6 +12434,7 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
                 size_t __slen = 0;
                 if (value_slot_val > 0 &&
                     value_slot_val > 4096 &&
+                    taida_is_string_value(value_slot_val) &&
                     taida_read_cstr_len_safe((const char*)value_slot_val, 65536, &__slen)) {
                     lax_default_force_type = 3;
                 } else if (value_slot_val == 0 ||
@@ -12244,7 +12490,7 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
             // Str-forced value with val=0: replace with an empty-string
             // pointer so json_serialize_typed doesn't deref NULL.
             if (ftype == 3 && field_val == 0) {
-                field_val = (taida_val)"";
+                field_val = TAIDA_EMPTY_STR;
             }
         }
         // C18B-003 fix: prefer per-pack descriptor (keyed by pack_ptr +
@@ -12437,7 +12683,7 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val
 
     // Default: only serialize as string when safely readable.
     size_t str_len = 0;
-    if (taida_read_cstr_len_safe((const char*)val, 65536, &str_len)) {
+    if (taida_is_string_value(val) && taida_read_cstr_len_safe((const char*)val, 65536, &str_len)) {
         json_append_escaped_str(buf, cap, len, (const char*)val);
     } else {
         // Not a safe C-string pointer — treat as integer
@@ -12453,7 +12699,7 @@ taida_val taida_json_encode(taida_val val) {
     char *buf = (char*)TAIDA_MALLOC(cap, "json_encode");
     buf[0] = '\0';
     json_serialize_typed(&buf, &cap, &len, val, 0, 0, 0);
-    return (taida_val)buf;
+    return taida_str_adopt_buf(buf);
 }
 
 taida_val taida_json_pretty(taida_val val) {
@@ -12462,7 +12708,7 @@ taida_val taida_json_pretty(taida_val val) {
     char *buf = (char*)TAIDA_MALLOC(cap, "json_pretty");
     buf[0] = '\0';
     json_serialize_typed(&buf, &cap, &len, val, 2, 0, 0);
-    return (taida_val)buf;
+    return taida_str_adopt_buf(buf);
 }
 
 // ── taida-lang/abi native handler JSON bridge ─────────────
@@ -12990,7 +13236,7 @@ taida_val taida_abi_web_store_response_json_native(taida_val response) {
     json_append(&out, &cap, &out_len, "\"}");
 
     if (body_owner) taida_str_release(body_owner);
-    return (taida_val)out;
+    return taida_str_adopt_buf(out);
 }
 
 // ── stdlib I/O (native) ───────────────────────────────────
@@ -13447,7 +13693,7 @@ static taida_val taida_sha512_family(taida_val value, const uint64_t iv[8], size
     size_t len = 0;
     if (!taida_crypto_materialize(value, &raw, &len)) {
         unsigned char zero = 0;
-        taida_crypto_materialize((taida_val)"", &raw, &len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &raw, &len);
         (void)zero;
     }
     taida_sha512_ctx ctx;
@@ -13482,7 +13728,7 @@ taida_val taida_crypto_sha224(taida_val value) {
     unsigned char *raw = (unsigned char*)0;
     size_t len = 0;
     if (!taida_crypto_materialize(value, &raw, &len)) {
-        taida_crypto_materialize((taida_val)"", &raw, &len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &raw, &len);
     }
     taida_sha256_ctx ctx;
     ctx.state[0] = 0xc1059ed8U; ctx.state[1] = 0x367cd507U;
@@ -13503,10 +13749,10 @@ taida_val taida_crypto_hmac_sha256(taida_val key_val, taida_val data_val) {
     unsigned char *key = (unsigned char*)0; size_t key_len = 0;
     unsigned char *data = (unsigned char*)0; size_t data_len = 0;
     if (!taida_crypto_materialize(key_val, &key, &key_len)) {
-        taida_crypto_materialize((taida_val)"", &key, &key_len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &key, &key_len);
     }
     if (!taida_crypto_materialize(data_val, &data, &data_len)) {
-        taida_crypto_materialize((taida_val)"", &data, &data_len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &data, &data_len);
     }
     unsigned char key_block[64];
     memset(key_block, 0, 64);
@@ -13542,10 +13788,10 @@ taida_val taida_crypto_constant_time_equals(taida_val a_val, taida_val b_val) {
     unsigned char *a = (unsigned char*)0; size_t a_len = 0;
     unsigned char *b = (unsigned char*)0; size_t b_len = 0;
     if (!taida_crypto_materialize(a_val, &a, &a_len)) {
-        taida_crypto_materialize((taida_val)"", &a, &a_len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &a, &a_len);
     }
     if (!taida_crypto_materialize(b_val, &b, &b_len)) {
-        taida_crypto_materialize((taida_val)"", &b, &b_len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &b, &b_len);
     }
     unsigned char diff = (a_len != b_len) ? 1 : 0;
     for (size_t i = 0; i < a_len; i++) {
@@ -13593,7 +13839,7 @@ taida_val taida_constant_time_eq_secret(taida_val secret_ptr, taida_val cand_val
 taida_val taida_crypto_hex_encode(taida_val value) {
     unsigned char *raw = (unsigned char*)0; size_t len = 0;
     if (!taida_crypto_materialize(value, &raw, &len)) {
-        taida_crypto_materialize((taida_val)"", &raw, &len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &raw, &len);
     }
     taida_val out = taida_crypto_hex_str(raw, len);
     if (raw) free(raw);
@@ -13637,7 +13883,7 @@ static const char TAIDA_B64_ALPHABET[64] =
 taida_val taida_crypto_base64_encode(taida_val value) {
     unsigned char *raw = (unsigned char*)0; size_t len = 0;
     if (!taida_crypto_materialize(value, &raw, &len)) {
-        taida_crypto_materialize((taida_val)"", &raw, &len);
+        taida_crypto_materialize(TAIDA_EMPTY_STR, &raw, &len);
     }
     size_t out_len = ((len + 2) / 3) * 4;
     char *out = taida_str_alloc(out_len);
@@ -14010,7 +14256,7 @@ static taida_val taida_io_stdin_line_failure(void) {
 static taida_val taida_io_stdin_line_success(const char *buf, size_t n) {
     char *r = taida_str_alloc(n);
     if (n > 0) memcpy(r, buf, n);
-    return taida_io_stdin_line_async_wrap(taida_lax_new((taida_val)r, (taida_val)""));
+    return taida_io_stdin_line_async_wrap(taida_lax_new((taida_val)r, TAIDA_EMPTY_STR));
 }
 
 // Fallback: non-TTY (pipe / redirect). Use getline semantics shared with

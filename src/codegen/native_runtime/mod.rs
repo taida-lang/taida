@@ -844,7 +844,38 @@ mod tests {
         //   (parity with the interpreter/JS, which throw; closes the `--no-check`
         //   pass-through. Definitions sit after the marker -> F2, so F1_LEN is
         //   unchanged). 1,295,944 -> 1,296,814.
-        const EXPECTED_TOTAL_LEN: usize = 1_296_814;
+        // 2026-06-10 F58 T-M (core.c): +2,384 bytes for the TAIDA_PERF_COUNTERS
+        //   measurement-build hooks (counter block + destructor stderr dump +
+        //   hooks in safe_malloc / freelist pops / arena alloc / request reset).
+        //   Compiled in only with -DTAIDA_PERF_COUNTERS (env-gated dev build);
+        //   the normal build reduces every hook to a no-op. All before the
+        //   marker -> F1. 1,296,814 -> 1,299,198.
+        // 2026-06-10 F58 poly-string-misclassification fix: +1,511 bytes
+        //   (core.c +1,491 = TAIDA_EMPTY_STR static + magic-required
+        //   taida_is_string_value + judgment-site guards; os.c / tls.c /
+        //   net_h1_h2.c +20 = raw `(taida_val)""` value-space casts replaced
+        //   by TAIDA_EMPTY_STR). Closes the large-Int -> string
+        //   misclassification on every polymorphic / display / hash / JSON
+        //   path. 1,299,198 -> 1,300,709.
+        // 2026-06-10 F58 poly-string fix round 2 (core.c): +144 bytes net —
+        //   the eight json/abi builder returns adopt header-carrying Str
+        //   values (taida_str_adopt_buf helper +581 in F1, simplified
+        //   legacy json helpers -437 in F2). 1,300,709 -> 1,300,853.
+        // 2026-06-10 F58 poly-string fix round 2 (tls.c): +159 bytes — the
+        //   HTTP client response body is allocated via taida_str_alloc
+        //   (hidden header) instead of raw malloc before entering the
+        //   response pack's `body` field. 1,300,853 -> 1,301,012. Same fix
+        //   on the plaintext-HTTP response path: 1,301,012 -> 1,301,087.
+        // 2026-06-10 F58 P2-1 (core.c): guard fast path — see the F1/F2
+        //   notes above. 1,301,087 -> 1,305,437.
+        // 2026-06-10 F58 P2-2: iteration-scope watermark (core.c, F1).
+        // 2026-06-10 F58 P2-4: divisor-proven exact div/mod helpers (core.c,
+        //   F1; mirrored on WASM). 1,310,405 -> 1,310,758.
+        // 2026-06-10 F58 stale-comment refresh (core.c, F1): the heap-string
+        //   helper header described static strings as header-less; they have
+        //   carried a TAIDA_STR_STATIC_MAGIC header since the F58 rework.
+        //   +103. 1,310,758 -> 1,310,861.
+        const EXPECTED_TOTAL_LEN: usize = 1_310_861;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1548,7 +1579,41 @@ mod tests {
         // 2026-06-09 F56 Phase 6+ review: the polymorphic contains/index_of/
         //   last_index_of receiver guards are before the marker: +462 bytes.
         //   F1_LEN 390,445 -> 390,907.
-        const F1_LEN: usize = 390_907;
+        // 2026-06-10 F58 T-M: TAIDA_PERF_COUNTERS measurement-build hooks —
+        //   counter block + destructor dump after the includes, hooks in
+        //   taida_safe_malloc / pack4 + list freelist pops / str freelist
+        //   reuse / taida_arena_alloc / taida_arena_request_reset. All sit
+        //   before the Error-ceiling marker; the normal build compiles them
+        //   away (#ifdef). +2,384 bytes. F1_LEN 390,907 -> 393,291.
+        // 2026-06-10 F58 poly-string-misclassification fix: positive
+        //   string identification. TAIDA_EMPTY_STR static (header-carrying
+        //   empty Str value) + taida_is_string_value rewritten to require
+        //   the hidden-header magic (STR / STATIC / ROPE) instead of the
+        //   "mapped page without container magic" heuristic that turned
+        //   large Ints (>= the no-pie ELF base 0x400000) into strings on
+        //   the polymorphic paths; raw `(taida_val)""` casts in the value
+        //   space replaced by TAIDA_EMPTY_STR; is_string_value guards on
+        //   the display / debug / typeof / hash / JSON / mold judgment
+        //   sites. F1 +1,105 bytes: 393,291 -> 394,396.
+        // 2026-06-10 F58 poly-string fix round 2: taida_str_adopt_buf helper
+        //   (malloc'd builder buffer -> header-carrying Str) lands next to
+        //   taida_str_new_copy, before the marker. +581 bytes:
+        //   394,396 -> 394,977.
+        // 2026-06-10 F58 P2-1 guard fast path: perf counters
+        //   (ptr_readable_calls / arena_contains_calls), arena bounding box
+        //   (taida_arena_lo/hi + bounds_add/recompute + active-chunk-first
+        //   contains), molten/moltenized type-slot matchers shared with the
+        //   single-probe unmold dispatch. All before the marker.
+        //   394,977 -> 397,931.
+        // 2026-06-10 F58 P2-2 iteration-scope watermark: iter_enter/reset/
+        //   exit + depth gate + freelist-push guards + throw depth clear,
+        //   all before the marker. F1 -> 402,606.
+        // 2026-06-10 F58 P2-4: taida_div_exact / taida_mod_exact (next to
+        //   div_mold, before the marker). +353. F1 402,606 -> 402,959.
+        // 2026-06-10 F58 stale-comment refresh: the heap-string helper
+        //   header comment now matches the static-string header reality
+        //   (before the marker). +103. F1 402,959 -> 403,062.
+        const F1_LEN: usize = 403_062;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1575,7 +1640,19 @@ mod tests {
             // (after the marker): +899 bytes. F2 223,993 -> 224,892.
             // F56-FB-002: the non-sealed first-arg reject in the two consumer
             // definitions (after the marker): +870 bytes. F2 224,892 -> 225,762.
-            F1_LEN + 225_762,
+            // F58 poly-string fix: is_string_value guards on the display /
+            // typeof / value-hash / JSON-serialize / enum-detect judgment
+            // sites after the marker: +386 bytes. F2 225,762 -> 226,148.
+            // F58 poly-string fix round 2: the legacy json helpers return
+            // through taida_str_new_copy / taida_str_adopt_buf instead of
+            // raw malloc'd buffers (after the marker): -437 bytes.
+            // F2 226,148 -> 225,711.
+            // F58 P2-1: taida_generic_unmold single-probe dispatch +
+            // gorillax type-slot classifier split (after the marker).
+            // F2 225,711 -> 227,107.
+            // F58 P2-2: (no change after the marker for the watermark itself;
+            // recompute keeps this in lockstep). F2 -> 227,400.
+            F1_LEN + 227_400,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
@@ -1753,7 +1830,9 @@ mod tests {
         // 2026-05-30 HTTP/1.1 head-scan O(H) fix: +639 bytes inside fragment 5
         //   (HTTP/1 worker, before the divider) for the resumable CRLFCRLF scan
         //   (head_scan_pos). F5_LEN: 223,917 + 639 = 224,556.
-        const F5_LEN: usize = 224_556;
+        // 2026-06-10 F58 poly-string fix: +2 (TAIDA_EMPTY_STR replacement
+        // before the HTTP/2 divider). 224,556 -> 224,558.
+        const F5_LEN: usize = 224_558;
         // 2026-05-30 HTTP/2 request body cap lands inside fragment 6 (net_h2
         //   server, after the divider): the H2_MAX_REQUEST_BODY_SIZE guard +
         //   ENHANCE_YOUR_CALM reset + the two new #defines net to +1,113 bytes.
@@ -1768,9 +1847,12 @@ mod tests {
         // 2026-06-07 comment neutralisation: the two streaming-handler
         //   comment blocks after the divider are rewritten to self-contained
         //   wording. F6: 114,617 - 21 = 114,596. F5 untouched.
+        // 2026-06-10 F58 poly-string fix: the one value-space `(taida_val)""`
+        //   cast before the HTTP/2 divider becomes TAIDA_EMPTY_STR (+2).
+        //   F5: 224,556 + 2 = 224,558. F6 untouched.
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            224_556 + 114_596,
+            224_558 + 114_596,
             "net_h1_h2.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";

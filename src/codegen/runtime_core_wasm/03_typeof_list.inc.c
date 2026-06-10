@@ -486,7 +486,7 @@ int64_t taida_float_to_fixed(int64_t a, int64_t digits_raw) {
 
     // Handle NaN
     if (d != d) {
-        char *r = (char *)wasm_alloc(4);
+        char *r = _wasm_str_alloc(4);
         r[0] = 'N'; r[1] = 'a'; r[2] = 'N'; r[3] = '\0';
         return (int64_t)r;
     }
@@ -498,11 +498,11 @@ int64_t taida_float_to_fixed(int64_t a, int64_t digits_raw) {
     double zero_test = d * 0.0;
     if (zero_test != 0.0 || (d > 0.0 && d == d + d)) {
         if (negative) {
-            char *r = (char *)wasm_alloc(5);
+            char *r = _wasm_str_alloc(5);
             r[0] = '-'; r[1] = 'i'; r[2] = 'n'; r[3] = 'f'; r[4] = '\0';
             return (int64_t)r;
         } else {
-            char *r = (char *)wasm_alloc(4);
+            char *r = _wasm_str_alloc(4);
             r[0] = 'i'; r[1] = 'n'; r[2] = 'f'; r[3] = '\0';
             return (int64_t)r;
         }
@@ -537,7 +537,7 @@ int64_t taida_float_to_fixed(int64_t a, int64_t digits_raw) {
     }
     buf[pos] = '\0';
 
-    char *r = (char *)wasm_alloc((unsigned int)(pos + 1));
+    char *r = _wasm_str_alloc((unsigned int)(pos + 1));
     _wf_memcpy(r, buf, pos + 1);
     return (int64_t)r;
 }
@@ -673,7 +673,7 @@ int64_t taida_int_mold_str_base(int64_t v, int64_t base) {
 int64_t taida_to_radix(int64_t value, int64_t base) {
     if (base < 2 || base > 36) return taida_lax_empty((int64_t)"");
     if (value == 0) {
-        char *out = (char *)wasm_alloc(2);
+        char *out = _wasm_str_alloc(2);
         out[0] = '0';
         out[1] = '\0';
         return taida_lax_new((int64_t)out, (int64_t)"");
@@ -691,7 +691,7 @@ int64_t taida_to_radix(int64_t value, int64_t base) {
     }
     if (value < 0) tmp[pos++] = '-';
 
-    char *out = (char *)wasm_alloc((unsigned int)(pos + 1));
+    char *out = _wasm_str_alloc((unsigned int)(pos + 1));
     for (int i = 0; i < pos; i++) {
         out[i] = tmp[pos - 1 - i];
     }
@@ -1187,7 +1187,7 @@ int64_t taida_list_join(int64_t list_ptr, int64_t sep_raw) {
         if (i > 0) total += sep_len;
     }
 
-    char *r = (char *)wasm_alloc((unsigned int)(total + 1));
+    char *r = _wasm_str_alloc((unsigned int)(total + 1));
     char *dst = r;
     for (int64_t i = 0; i < len; i++) {
         if (i > 0 && sep_len > 0) { _wf_memcpy(dst, sep, sep_len); dst += sep_len; }
@@ -1373,7 +1373,7 @@ int64_t taida_list_to_display_string(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     if (len == 0) {
-        char *result = (char *)wasm_alloc(4);
+        char *result = _wasm_str_alloc(4);
         _wf_memcpy(result, "@[]", 4);
         return (int64_t)result;
     }
@@ -1385,7 +1385,7 @@ int64_t taida_list_to_display_string(int64_t list_ptr) {
         total += _wf_strlen(strs[i]);
         if (i > 0) total += 2; /* ", " */
     }
-    char *r = (char *)wasm_alloc((unsigned int)(total + 1));
+    char *r = _wasm_str_alloc((unsigned int)(total + 1));
     r[0] = '@'; r[1] = '[';
     char *dst = r + 2;
     for (int64_t i = 0; i < len; i++) {

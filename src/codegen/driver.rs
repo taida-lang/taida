@@ -49,13 +49,28 @@ const WASM_CLANG_FLAGS_WASI: &[&str] = &["-msimd128"];
 const WASM_CLANG_FLAGS_EDGE: &[&str] = &["-msimd128"];
 const WASM_CLANG_FLAGS_FULL: &[&str] = &["-msimd128"];
 
+/// Measurement-build gate: when the `TAIDA_PERF_COUNTERS=1` environment
+/// variable is set at `taida build` time, the runtime C is compiled with
+/// `-DTAIDA_PERF_COUNTERS` so the allocation-path counters (and their exit
+/// dump on stderr) are compiled in. This is a development-only measurement
+/// surface, not a public CLI option; the normal build is byte-identical to
+/// before because every counter hook reduces to a no-op without the define.
+pub(crate) fn perf_counters_enabled() -> bool {
+    std::env::var("TAIDA_PERF_COUNTERS")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
 /// Return the merged clang flag list for a given wasm profile.
 ///
 /// Order: profile-agnostic base (target, nostdlib, `-O2`, `-c`) first, then
-/// profile-specific additions (`-msimd128` for every profile except `Min`).
+/// profile-specific additions (`-msimd128` for every profile except `Min`),
+/// then the optional measurement-build define (`-DTAIDA_PERF_COUNTERS`).
 /// This is the authoritative ordering used by both the cache key hash and the
 /// actual clang invocation; if the two diverged, cached runtime objects would
-/// silently serve the wrong profile's bytes.
+/// silently serve the wrong profile's bytes. The perf define participating in
+/// the cache key is what keeps measurement-build `.o` files from ever being
+/// served to a normal build (and vice versa).
 pub(crate) fn wasm_clang_flags_for(profile: emit_wasm_c::WasmProfile) -> Vec<&'static str> {
     let mut v: Vec<&'static str> = WASM_CLANG_FLAGS_COMMON.to_vec();
     let extra: &[&'static str] = match profile {
@@ -65,6 +80,9 @@ pub(crate) fn wasm_clang_flags_for(profile: emit_wasm_c::WasmProfile) -> Vec<&'s
         emit_wasm_c::WasmProfile::Full => WASM_CLANG_FLAGS_FULL,
     };
     v.extend_from_slice(extra);
+    if perf_counters_enabled() {
+        v.push("-DTAIDA_PERF_COUNTERS");
+    }
     v
 }
 
@@ -985,7 +1003,11 @@ fn link_objects_inner(
     let mut cmd = {
         // Unix: cc でコンパイル + リンク（-no-pie で PIE 警告を回避）
         let mut c = Command::new("cc");
-        c.arg("-no-pie").arg("-fwrapv").arg(&c_path);
+        c.arg("-no-pie").arg("-fwrapv");
+        if perf_counters_enabled() {
+            c.arg("-DTAIDA_PERF_COUNTERS");
+        }
+        c.arg(&c_path);
         for obj in obj_paths {
             c.arg(obj);
         }

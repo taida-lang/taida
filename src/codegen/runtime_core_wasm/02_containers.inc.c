@@ -1192,7 +1192,7 @@ static int64_t _taida_float_to_str_mold(int64_t val) {
        have no trailing `.0` so they pass through unchanged. */
     if (len >= 3 && s[len - 2] == '.' && s[len - 1] == '0') {
         int keep = len - 2;
-        char *buf = (char *)wasm_alloc(keep + 1);
+        char *buf = _wasm_str_alloc(keep + 1);
         if (!buf) return raw;
         for (int i = 0; i < keep; i++) buf[i] = s[i];
         buf[keep] = '\0';
@@ -1437,7 +1437,7 @@ int64_t taida_can_throw_payload(int64_t val) {
 int64_t taida_str_alloc(int64_t len_raw) {
     int len = (int)len_raw;
     if (len < 0) len = 0;
-    char *buf = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *buf = _wasm_str_alloc((unsigned int)(len + 1));
     if (!buf) return 0;
     buf[len] = '\0';
     return (int64_t)buf;
@@ -1447,12 +1447,12 @@ int64_t taida_str_alloc(int64_t len_raw) {
 int64_t taida_str_new_copy(int64_t src_raw) {
     const char *src = (const char *)src_raw;
     if (!src) {
-        char *r = (char *)wasm_alloc(1);
+        char *r = _wasm_str_alloc(1);
         r[0] = '\0';
         return (int64_t)r;
     }
     int len = _wf_strlen(src);
-    char *r = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *r = _wasm_str_alloc((unsigned int)(len + 1));
     _wf_memcpy(r, src, len);
     r[len] = '\0';
     return (int64_t)r;
@@ -2140,7 +2140,7 @@ int64_t taida_str_to_upper(int64_t s_raw) {
     const char *s = (const char *)s_raw;
     if (!s) { return taida_str_alloc(0); }
     int len = _wf_strlen(s);
-    char *r = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *r = _wasm_str_alloc((unsigned int)(len + 1));
     for (int i = 0; i < len; i++) {
         r[i] = (s[i] >= 'a' && s[i] <= 'z') ? s[i] - 32 : s[i];
     }
@@ -2153,7 +2153,7 @@ int64_t taida_str_to_lower(int64_t s_raw) {
     const char *s = (const char *)s_raw;
     if (!s) { return taida_str_alloc(0); }
     int len = _wf_strlen(s);
-    char *r = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *r = _wasm_str_alloc((unsigned int)(len + 1));
     for (int i = 0; i < len; i++) {
         r[i] = (s[i] >= 'A' && s[i] <= 'Z') ? s[i] + 32 : s[i];
     }
@@ -2170,7 +2170,7 @@ int64_t taida_str_trim(int64_t s_raw) {
     while (start < len && _wf_is_whitespace(s[start])) start++;
     while (end > start && _wf_is_whitespace(s[end - 1])) end--;
     int slen = end - start;
-    char *r = (char *)wasm_alloc((unsigned int)(slen + 1));
+    char *r = _wasm_str_alloc((unsigned int)(slen + 1));
     _wf_memcpy(r, s + start, slen);
     r[slen] = '\0';
     return (int64_t)r;
@@ -2184,7 +2184,7 @@ int64_t taida_str_trim_start(int64_t s_raw) {
     int start = 0;
     while (start < len && _wf_is_whitespace(s[start])) start++;
     int slen = len - start;
-    char *r = (char *)wasm_alloc((unsigned int)(slen + 1));
+    char *r = _wasm_str_alloc((unsigned int)(slen + 1));
     _wf_memcpy(r, s + start, slen);
     r[slen] = '\0';
     return (int64_t)r;
@@ -2197,7 +2197,7 @@ int64_t taida_str_trim_end(int64_t s_raw) {
     int len = _wf_strlen(s);
     int end = len;
     while (end > 0 && _wf_is_whitespace(s[end - 1])) end--;
-    char *r = (char *)wasm_alloc((unsigned int)(end + 1));
+    char *r = _wasm_str_alloc((unsigned int)(end + 1));
     _wf_memcpy(r, s, end);
     r[end] = '\0';
     return (int64_t)r;
@@ -2214,7 +2214,7 @@ int64_t taida_str_split(int64_t s_raw, int64_t sep_raw) {
         /* Split into individual characters */
         int len = _wf_strlen(s);
         for (int i = 0; i < len; i++) {
-            char *c = (char *)wasm_alloc(2);
+            char *c = _wasm_str_alloc(2);
             c[0] = s[i];
             c[1] = '\0';
             list = taida_list_push(list, (int64_t)c);
@@ -2227,14 +2227,14 @@ int64_t taida_str_split(int64_t s_raw, int64_t sep_raw) {
         const char *found = _wf_strstr(p, sep);
         if (!found) {
             int slen = _wf_strlen(p);
-            char *part = (char *)wasm_alloc((unsigned int)(slen + 1));
+            char *part = _wasm_str_alloc((unsigned int)(slen + 1));
             _wf_memcpy(part, p, slen);
             part[slen] = '\0';
             list = taida_list_push(list, (int64_t)part);
             break;
         }
         int plen = (int)(found - p);
-        char *part = (char *)wasm_alloc((unsigned int)(plen + 1));
+        char *part = _wasm_str_alloc((unsigned int)(plen + 1));
         _wf_memcpy(part, p, plen);
         part[plen] = '\0';
         list = taida_list_push(list, (int64_t)part);
@@ -2263,7 +2263,7 @@ int64_t taida_str_replace(int64_t s_raw, int64_t from_raw, int64_t to_raw) {
     while ((p = _wf_strstr(p, from)) != (const char *)0) { count++; p += from_len; }
     int s_len = _wf_strlen(s);
     int new_len = s_len + count * (to_len - from_len);
-    char *r = (char *)wasm_alloc((unsigned int)(new_len + 1));
+    char *r = _wasm_str_alloc((unsigned int)(new_len + 1));
     char *dst = r;
     p = s;
     while (1) {
@@ -2303,7 +2303,7 @@ int64_t taida_str_replace_first(int64_t s_raw, int64_t from_raw, int64_t to_raw)
     }
     int s_len = _wf_strlen(s);
     int new_len = s_len - from_len + to_len;
-    char *r = (char *)wasm_alloc((unsigned int)(new_len + 1));
+    char *r = _wasm_str_alloc((unsigned int)(new_len + 1));
     int prefix = (int)(found - s);
     _wf_memcpy(r, s, prefix);
     _wf_memcpy(r + prefix, to, to_len);
@@ -2373,7 +2373,7 @@ int64_t taida_str_slice(int64_t s_raw, int64_t start_raw, int64_t end_raw) {
     if (end > len) end = len;
     if (start >= end) { return taida_str_alloc(0); }
     int slen = end - start;
-    char *r = (char *)wasm_alloc((unsigned int)(slen + 1));
+    char *r = _wasm_str_alloc((unsigned int)(slen + 1));
     _wf_memcpy(r, s + start, slen);
     r[slen] = '\0';
     return (int64_t)r;
@@ -2386,7 +2386,7 @@ int64_t taida_str_char_at(int64_t s_raw, int64_t idx_raw) {
     if (!s) { return taida_str_alloc(0); }
     int len = _wf_strlen(s);
     if (idx < 0 || idx >= len) { return taida_str_alloc(0); }
-    char *r = (char *)wasm_alloc(2);
+    char *r = _wasm_str_alloc(2);
     r[0] = s[idx];
     r[1] = '\0';
     return (int64_t)r;
@@ -2401,7 +2401,7 @@ int64_t taida_str_repeat(int64_t s_raw, int64_t n_raw) {
     if (slen == 0) { return taida_str_alloc(0); }
     if (n > (TAIDA_WASM_I32_MAX - 1) / slen) { return taida_str_alloc(0); }
     int total = slen * n;
-    char *r = (char *)wasm_alloc((unsigned int)(total + 1));
+    char *r = _wasm_str_alloc((unsigned int)(total + 1));
     if (!r) { return taida_str_alloc(0); }
     for (int i = 0; i < n; i++) {
         _wf_memcpy(r + i * slen, s, slen);
@@ -2415,7 +2415,7 @@ int64_t taida_str_reverse(int64_t s_raw) {
     const char *s = (const char *)s_raw;
     if (!s) { return taida_str_alloc(0); }
     int len = _wf_strlen(s);
-    char *r = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *r = _wasm_str_alloc((unsigned int)(len + 1));
     for (int i = 0; i < len; i++) {
         r[i] = s[len - 1 - i];
     }
@@ -2440,7 +2440,7 @@ int64_t taida_str_pad(int64_t s_raw, int64_t target_len_raw, int64_t pad_char_ra
     int pad_len = target_len - slen;
     char pc = ' ';
     if (pad_char && _wf_strlen(pad_char) > 0) pc = pad_char[0];
-    char *r = (char *)wasm_alloc((unsigned int)(target_len + 1));
+    char *r = _wasm_str_alloc((unsigned int)(target_len + 1));
     if (!r) { return taida_str_new_copy(s_raw); }
     if (pad_end) {
         _wf_memcpy(r, s, slen);
@@ -2536,7 +2536,7 @@ int64_t taida_str_get(int64_t s_raw, int64_t idx_raw) {
     if (!s) return taida_lax_empty((int64_t)"");
     int len = _wf_strlen(s);
     if (idx < 0 || idx >= len) return taida_lax_empty((int64_t)"");
-    char *r = (char *)wasm_alloc(2);
+    char *r = _wasm_str_alloc(2);
     r[0] = s[idx];
     r[1] = '\0';
     return taida_lax_new((int64_t)r, (int64_t)"");
@@ -2651,7 +2651,7 @@ int64_t taida_char_mold_int(int64_t value) {
     if (!_wc_utf8_encode_scalar((uint32_t)value, utf8, &out_len)) {
         return taida_lax_empty(taida_str_alloc(0));
     }
-    char *out = (char *)wasm_alloc((unsigned int)(out_len + 1));
+    char *out = _wasm_str_alloc((unsigned int)(out_len + 1));
     for (int i = 0; i < out_len; i++) out[i] = (char)utf8[i];
     out[out_len] = '\0';
     return taida_lax_new((int64_t)(intptr_t)out, taida_str_alloc(0));
