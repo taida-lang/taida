@@ -1357,6 +1357,11 @@ taida_val taida_get_return_tag(void) {
 
 void taida_gorilla(void) { exit(1); }
 
+/* F62B-030: exit(code) prelude builtin — terminate the process with the
+   given code. exit() flushes stdio buffers per the C standard; the
+   declared Taida return type is :Int but control never returns. */
+taida_val taida_exit(taida_val code) { exit((int)code); }
+
 // C18B-005 fix: print a `RuntimeError: <msg>` line to stderr and exit
 // with status 1. Used by the native Ordinal[] lowering to reject
 // non-Enum arguments — mirrors the interpreter's

@@ -3106,6 +3106,8 @@ impl JsCodegen {
                             "jsonPretty" => self.write("__taida_jsonPretty"),
                             "nowMs" => self.write("__taida_nowMs"),
                             "sleep" => self.write("__taida_sleep"),
+                            // F62B-030: exit(code) terminates the process.
+                            "exit" => self.write("__taida_exit"),
                             // D28B-015: `strOf(span, raw)` lowercase function-form
                             // delegates to the existing `__taida_net_StrOf`
                             // runtime helper (always present in `RUNTIME_JS`).
@@ -3216,6 +3218,8 @@ impl JsCodegen {
                             "jsonPretty" => self.write("__taida_jsonPretty"),
                             "nowMs" => self.write("__taida_nowMs"),
                             "sleep" => self.write("__taida_sleep"),
+                            // F62B-030: exit(code) terminates the process.
+                            "exit" => self.write("__taida_exit"),
                             // D28B-015: `strOf(span, raw)` lowercase function-form
                             // delegates to the existing `__taida_net_StrOf`
                             // runtime helper (always present in `RUNTIME_JS`).

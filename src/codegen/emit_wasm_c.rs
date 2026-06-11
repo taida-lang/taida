@@ -936,6 +936,8 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         // BE-WASM-2: Gorilla literal (exit with status 1)
         "taida_gorilla" => "void taida_gorilla(void);".to_string(),
+        // F62B-030: exit(code) prelude builtin (proc_exit on WASI profiles)
+        "taida_exit" => "int64_t taida_exit(int64_t code);".to_string(),
         // W-5: Type molds that return Lax
         "taida_str_mold_int" => "int64_t taida_str_mold_int(int64_t v);".to_string(),
         "taida_str_mold_float" => "int64_t taida_str_mold_float(int64_t v);".to_string(),

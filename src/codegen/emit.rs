@@ -149,6 +149,12 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[],
             returns: &[],
         },
+        // F62B-030: exit(code) — terminates the process; the nominal
+        // return slot keeps the uniform value ABI.
+        "taida_exit" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
         // C18B-005 fix: runtime abort with message. Used by the
         // Ordinal[] lowering to reject non-Enum arguments at run time
         // with the same shape as the interpreter's RuntimeError.

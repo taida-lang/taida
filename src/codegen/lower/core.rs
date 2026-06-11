@@ -17,6 +17,8 @@ impl Lowering {
         stdlib_runtime_funcs.insert("stdin".to_string(), "taida_io_stdin".to_string());
         // C20-2: UTF-8-aware Async[Lax[Str]] line editor (linenoise-backed)
         stdlib_runtime_funcs.insert("stdinLine".to_string(), "taida_io_stdin_line".to_string());
+        // F62B-030: exit(code) terminates with the given code.
+        stdlib_runtime_funcs.insert("exit".to_string(), "taida_exit".to_string());
         // Prelude JSON functions (output-direction only)
         stdlib_runtime_funcs.insert("jsonEncode".to_string(), "taida_json_encode".to_string());
         stdlib_runtime_funcs.insert("jsonPretty".to_string(), "taida_json_pretty".to_string());

@@ -1220,6 +1220,22 @@ void taida_gorilla(void) {
     __builtin_trap();
 }
 
+/* F62B-030: exit(code) prelude builtin. WASI profiles terminate through
+   proc_exit so the code reaches the host; the edge handler host provides
+   no WASI proc_exit, so a trap surfaces as that runtime's uncaught-throw
+   contract (the code is not observable there). */
+int64_t taida_exit(int64_t code) {
+#ifdef TAIDA_WASM_PROFILE_EDGE
+    (void)code;
+    __builtin_trap();
+#else
+    extern void proc_exit(int code)
+        __attribute__((import_module("wasi_snapshot_preview1"), import_name("proc_exit")));
+    proc_exit((int)code);
+    __builtin_trap(); /* unreachable */
+#endif
+}
+
 /* ── W-5: Type conversion molds (returning Lax) ── */
 /* These wrap taida_lax_new with conversion logic, matching native_runtime.c */
 /*

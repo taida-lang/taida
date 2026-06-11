@@ -307,6 +307,47 @@ impl Interpreter {
                 };
                 Ok(Some(Signal::Throw(val)))
             }
+            // ── exit(code): terminate the process with the given code ──
+            // F62B-030: documented in prelude.md §6.1 (and registered in the
+            // checker) since gen-D, but never implemented — `exit(2)` died
+            // with `Undefined variable: 'exit'`. The declared return type is
+            // `:Int` (the annotation must name a concrete type, PHILOSOPHY I)
+            // but control never reaches past the call. Buffered output is
+            // flushed by `exit()`'s stdio cleanup; the interpreter's own
+            // buffered mode flushes explicitly so REPL / harness captures
+            // are not lost.
+            "exit" => {
+                let code = match args.first() {
+                    Some(arg) => match self.eval_expr(arg)? {
+                        Signal::Value(Value::Int(n)) => n,
+                        Signal::Value(v) => {
+                            return Err(RuntimeError {
+                                message: format!(
+                                    "exit: argument must be an Int exit code, got {}",
+                                    v
+                                ),
+                            });
+                        }
+                        other => return Ok(Some(other)),
+                    },
+                    None => {
+                        return Err(RuntimeError {
+                            message: "exit requires 1 argument: exit(code)".into(),
+                        });
+                    }
+                };
+                if !self.output.is_empty() {
+                    use std::io::Write;
+                    let stdout = std::io::stdout();
+                    let mut lock = stdout.lock();
+                    for line in &self.output {
+                        let _ = writeln!(lock, "{}", line);
+                    }
+                    let _ = lock.flush();
+                }
+                std::process::exit(code as i32);
+            }
+
             // ── stdout(...args): write to output buffer (prelude) ──
             // C12-5 (FB-18): returns the byte count (Int) of the written
             // content so that `n <= stdout("hi")` binds `n = 2`. `Value::Unit`

@@ -179,6 +179,15 @@ function __taida_solidify(value) {
   return value;
 }
 
+function __taida_exit(code) {
+  // F62B-030: exit(code) prelude builtin. Flush is implicit (process.exit
+  // flushes stdout on node when not piped; pending async writes may be
+  // truncated, matching node semantics).
+  const c = typeof code === 'number' ? code : 0;
+  if (typeof process !== 'undefined' && process.exit) process.exit(c);
+  throw new __TaidaError('ExitError', `exit(${c})`, {});
+}
+
 function __taida_pipe_apply(stage, value) {
   if (typeof stage !== 'function') {
     throw new __TaidaError('PipeError', '[E1544] Pipeline stage evaluated to a non-function value. A `_`-free stage is evaluated as written and must produce a function for the piped value.', {});
