@@ -24,11 +24,12 @@ stdout(chars.length())
 stdout(If[true, "yes", "no"]())
 stdout(If[false, "yes", "no"]())
 
-// Pipeline with placeholder
-150 => If[_ > 100, 100, _]() => clamped
+// Pipeline clamp: one `_` per stage (F62B-025 rule 1) — re-using the
+// piped value in several positions goes through a `=> v` bind-and-forward
+150 => v => If[v > 100, 100, v]() => clamped
 stdout(clamped)
 
-50 => If[_ > 100, 100, _]() => not_clamped
+50 => w => If[w > 100, 100, w]() => not_clamped
 stdout(not_clamped)
 
 // Nested If

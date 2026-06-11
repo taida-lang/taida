@@ -319,13 +319,18 @@ impl TypeChecker {
             Expr::Placeholder(span) => {
                 if !self.in_pipeline {
                     self.errors.push(TypeError {
-                        message: "[E1502] `_` is only valid inside a pipeline placeholder position. \
-                                  Hint: Use `_` in an expression after `=>`, such as `value => f(_)`."
+                        message: "[E1502] `_` is the pipe injection position and is only valid \
+                                  inside a pipeline stage (`value => f(_)`). \
+                                  Hint: For partial application use an empty slot: `f(5, )`."
                             .to_string(),
                         span: span.clone(),
                     });
                 }
-                Type::Unknown
+                // F62B-025 rule 1: `_` is the piped value — carry the previous
+                // stage's result type so argument / operand validation sees it.
+                self.pipeline_placeholder_type
+                    .clone()
+                    .unwrap_or(Type::Unknown)
             }
             Expr::Hole(span) => {
                 self.errors.push(TypeError {
@@ -641,29 +646,17 @@ impl TypeChecker {
             }
 
             Expr::FuncCall(func, args, span) => {
-                // A placeholder-free call that is itself a pipeline stage
-                // receives the piped value as an implicit first argument
-                // at runtime (`data => f()` runs as `f(data)`). Take
-                // (consume) the stage state here so calls nested inside
-                // the arguments don't see it; when the injection applies,
-                // keep the previous stage's result type so arity and
-                // argument-type validation below can cover the injected
-                // value.
-                let pipeline_stage_type = std::mem::take(&mut self.pipeline_stage_injected_type);
-                let injected_first_arg: Option<Type> = if args.iter().any(expr_contains_placeholder)
-                {
-                    None
-                } else {
-                    pipeline_stage_type
-                };
                 // C-5c: Reject old `_` partial application syntax in function call args.
                 // Pipeline context (`data => f(_)`) is allowed — `_` refers to pipe value.
                 if !self.in_pipeline {
                     for arg in args.iter() {
                         if let Expr::Placeholder(ph_span) = arg {
                             self.errors.push(TypeError {
-                                message: "[E1502] Use empty slot syntax `f(5, )` instead of `f(5, _)` for partial application. \
-                                     Hint: Remove the `_` and leave the argument position empty.".to_string(),
+                                message:
+                                    "[E1502] `_` is the pipe injection position and is only valid \
+                                     inside a pipeline stage (`value => f(_)`). \
+                                     Hint: For partial application use an empty slot: `f(5, )`."
+                                        .to_string(),
                                 span: ph_span.clone(),
                             });
                         }
@@ -736,25 +729,13 @@ impl TypeChecker {
                             fd.type_params.iter().map(|tp| tp.name.clone()).collect();
                         let mut bindings = HashMap::<String, Type>::new();
 
-                        // POST-STABLE-006: a placeholder/hole-free pipeline
-                        // stage call receives the piped value as an implicit
-                        // first argument, so count it toward the effective
-                        // arity (`data => f(a, b)` runs as `f(data, a, b)`).
-                        let injects_pipe = injected_first_arg.is_some() && hole_count == 0;
-                        let effective_args = args.len() + usize::from(injects_pipe);
-                        if effective_args > fd.params.len() {
-                            let pipe_note = if injects_pipe {
-                                " (the piped value counts as the first argument)"
-                            } else {
-                                ""
-                            };
+                        if args.len() > fd.params.len() {
                             self.errors.push(TypeError {
                                 message: format!(
-                                    "[E1301] Function '{}' takes at most {} argument(s), got {}.{} Hint: Remove extra arguments or update the function signature.",
+                                    "[E1301] Function '{}' takes at most {} argument(s), got {}. Hint: Remove extra arguments or update the function signature.",
                                     name,
                                     fd.params.len(),
-                                    effective_args,
-                                    pipe_note
+                                    args.len()
                                 ),
                                 span: span.clone(),
                             });
@@ -772,41 +753,11 @@ impl TypeChecker {
                             });
                         }
 
-                        // POST-STABLE-006 type-shift follow-up: a placeholder/
-                        // hole-free pipeline stage injects the piped value as
-                        // param 0. Bind it to pattern 0 first (preserving the
-                        // generic binding order: injected, then written) and
-                        // shift the written-arg checks to patterns 1.. so each
-                        // written value is checked against the slot it fills.
-                        let generic_injects = injected_first_arg.is_some() && hole_count == 0;
-                        if generic_injects
-                            && let Some(injected_ty) = &injected_first_arg
-                            && *injected_ty != Type::Unknown
-                            && let Some(pattern) = param_patterns.first()
-                            && !self.bind_generic_type_pattern(
-                                pattern,
-                                injected_ty,
-                                &generic_names,
-                                &mut bindings,
-                            )
-                        {
-                            let expected_ty =
-                                self.substitute_generic_type(pattern, &generic_names, &bindings);
-                            self.errors.push(TypeError {
-                                message: format!(
-                                    "[E1506] Argument 1 of '{}' has type {}, expected {} (the piped value is the first argument). \
-                                     Hint: Pass a value of the correct type, or use an explicit conversion.",
-                                    name, injected_ty, expected_ty
-                                ),
-                                span: span.clone(),
-                            });
-                        }
-                        let written_base = usize::from(generic_injects);
                         for (i, arg) in args.iter().enumerate() {
-                            if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                            if matches!(arg, Expr::Hole(_)) {
                                 continue;
                             }
-                            let Some(pattern) = param_patterns.get(i + written_base) else {
+                            let Some(pattern) = param_patterns.get(i) else {
                                 continue;
                             };
                             let expected_hint =
@@ -833,7 +784,7 @@ impl TypeChecker {
                                     message: format!(
                                         "[E1506] Argument {} of '{}' has type {}, expected {}. \
                                          Hint: Pass a value of the correct type, or use an explicit conversion.",
-                                        i + written_base + 1,
+                                        i + 1,
                                         name,
                                         actual_ty,
                                         expected_ty
@@ -876,34 +827,12 @@ impl TypeChecker {
 
                     // First check func_types (registered function return types)
                     if let Some(ret_ty) = self.func_types.get(name).cloned() {
-                        // POST-STABLE-006 (+ type-shift follow-up): crypto runs
-                        // its own injection-aware arity and argument-type checks
-                        // (`validate_crypto*`), so the general pipeline-injection
-                        // handling below — both the effective-arity count and the
-                        // injected-first-arg type check — excludes it.
-                        let is_crypto = self.crypto_sha256_funcs.contains(name)
-                            || self.crypto_funcs.contains_key(name);
-                        // A placeholder/hole-free pipeline stage injects the
-                        // piped value as param 0, so written args fill slots
-                        // 1.. and the injected value fills slot 0.
-                        let reg_injects =
-                            injected_first_arg.is_some() && hole_count == 0 && !is_crypto;
                         if let Some(expected) = self.func_param_counts.get(name).copied() {
-                            // POST-STABLE-006: count the implicit pipeline first
-                            // argument toward the effective arity, the same way
-                            // `validate_crypto*` already does.
-                            let injects_pipe = reg_injects;
-                            let effective_args = args.len() + usize::from(injects_pipe);
-                            if effective_args > expected {
-                                let pipe_note = if injects_pipe {
-                                    " (the piped value counts as the first argument)"
-                                } else {
-                                    ""
-                                };
+                            if args.len() > expected {
                                 self.errors.push(TypeError {
                                     message: format!(
-                                        "[E1301] Function '{}' takes at most {} argument(s), got {}.{} Hint: Remove extra arguments or update the function signature.",
-                                        name, expected, effective_args, pipe_note
+                                        "[E1301] Function '{}' takes at most {} argument(s), got {}. Hint: Remove extra arguments or update the function signature.",
+                                        name, expected, args.len()
                                     ),
                                     span: span.clone(),
                                 });
@@ -921,42 +850,20 @@ impl TypeChecker {
                             }
                         }
                         if self.crypto_sha256_funcs.contains(name) {
-                            let injected = injected_first_arg.clone();
-                            self.validate_crypto_sha256_call(name, args, span, injected.as_ref());
+                            self.validate_crypto_sha256_call(name, args, span);
                         } else if let Some(kind) = self.crypto_funcs.get(name).copied() {
-                            let injected = injected_first_arg.clone();
-                            self.validate_crypto_call(name, kind, args, span, injected.as_ref());
+                            self.validate_crypto_call(name, kind, args, span);
                         }
                         // E1506: Check argument types against registered parameter types
                         if let Some(param_types) = self.func_param_types.get(name).cloned() {
-                            // POST-STABLE-006 type-shift follow-up: when a
-                            // pipeline injects param 0, validate the injected
-                            // value against param 0 and shift the written-arg
-                            // checks to params 1.. so each written value is
-                            // checked against the slot it actually fills.
-                            if reg_injects
-                                && let Some(injected_ty) = &injected_first_arg
-                                && *injected_ty != Type::Unknown
-                                && let Some(expected_ty) = param_types.first()
-                                && *expected_ty != Type::Unknown
-                                && !self.registry.is_subtype_of(injected_ty, expected_ty)
-                            {
-                                self.errors.push(TypeError {
-                                    message: format!(
-                                        "[E1506] Argument 1 of '{}' has type {}, expected {} (the piped value is the first argument). \
-                                         Hint: Pass a value of the correct type, or use an explicit conversion.",
-                                        name, injected_ty, expected_ty
-                                    ),
-                                    span: span.clone(),
-                                });
-                            }
-                            let written_base = usize::from(reg_injects);
                             for (i, arg) in args.iter().enumerate() {
-                                // Skip holes (partial application) and placeholders
-                                if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                                // Skip holes (partial application); a `_`
+                                // placeholder infers to the piped value's type
+                                // and participates in the checks below.
+                                if matches!(arg, Expr::Hole(_)) {
                                     continue;
                                 }
-                                if let Some(expected_ty) = param_types.get(i + written_base) {
+                                if let Some(expected_ty) = param_types.get(i) {
                                     if *expected_ty == Type::Unknown {
                                         continue;
                                     }
@@ -975,7 +882,7 @@ impl TypeChecker {
                                             message: format!(
                                                 "[E1506] Argument {} of '{}' has type {}, expected {}. \
                                                  Hint: Add annotations or simplify the function body so inference can resolve the argument type.",
-                                                i + written_base + 1,
+                                                i + 1,
                                                 name,
                                                 actual_ty,
                                                 expected_ty
@@ -989,7 +896,7 @@ impl TypeChecker {
                                             message: format!(
                                                 "[E1506] Argument {} of '{}' has type {}, expected {}. \
                                                  Hint: Pass a value of the correct type, or use an explicit conversion.",
-                                                i + written_base + 1, name, actual_ty, expected_ty
+                                                i + 1, name, actual_ty, expected_ty
                                             ),
                                             span: span.clone(),
                                         });
@@ -1672,17 +1579,32 @@ impl TypeChecker {
                 // known function / type / mold / builtin, we register it as
                 // a local binding carrying the current step's type rather
                 // than reporting `[E1542] Undefined variable`.
+                //
+                // F62B-025: every other stage closes over exactly two rules.
+                // Rule 1 — the stage contains `_` (one at most, E1543): the
+                // piped value is injected at the placeholder; `_` carries the
+                // previous stage's type via `pipeline_placeholder_type`.
+                // Rule 2 — no `_`: the stage is evaluated as written; a
+                // function-typed result receives the piped value (the stage
+                // types as the function's return type), a concrete
+                // non-function result is a pipe into a non-function value
+                // (E1544). The legacy implicit first-argument injection is
+                // gone.
                 let old_in_pipeline = self.in_pipeline;
                 let last_idx = exprs.len().saturating_sub(1);
                 // A fresh scope holds any intermediate bind-and-forward bindings.
                 self.push_scope();
+                let mut bound_names: Vec<String> = Vec::new();
                 let mut result_type = Type::Unknown;
                 for (i, pipe_expr) in exprs.iter().enumerate() {
                     if i > 0 {
                         self.in_pipeline = true;
                     }
-                    if i > 0
-                        && i < last_idx
+                    if i == 0 {
+                        result_type = self.infer_expr_type(pipe_expr);
+                        continue;
+                    }
+                    if i < last_idx
                         && let Expr::Ident(name, _) = pipe_expr
                         && !self.is_pipeline_callable_ident(name)
                     {
@@ -1690,19 +1612,64 @@ impl TypeChecker {
                         // step's type and make `name` visible to later steps.
                         // result_type is unchanged (value passes through).
                         self.define_var(name, result_type.clone());
+                        bound_names.push(name.clone());
                         continue;
                     }
-                    if i > 0 && matches!(pipe_expr, Expr::FuncCall(..)) {
-                        // The runtime hands the piped value to a
-                        // placeholder-free stage call as its implicit
-                        // first argument — pass the previous stage's
-                        // result type to the FuncCall arm (which
-                        // takes/consumes it) so arity and argument-type
-                        // validation can cover the injected value.
-                        self.pipeline_stage_injected_type = Some(result_type.clone());
+                    if !bound_names.is_empty() && expr_references_any_name(pipe_expr, &bound_names)
+                    {
+                        // The stage explicitly consumes a pipeline-scope
+                        // binding — it is evaluated as written, without
+                        // receiving the piped value.
+                        result_type = self.infer_expr_type(pipe_expr);
+                        continue;
                     }
-                    result_type = self.infer_expr_type(pipe_expr);
-                    self.pipeline_stage_injected_type = None;
+                    let placeholder_count = expr_count_placeholders(pipe_expr);
+                    if placeholder_count > 1 {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1543] A pipeline stage can contain at most one `_` (found {}). \
+                                 The pipe carries exactly one value. Hint: bind the value first \
+                                 (`x => v => f(v, v)`) to use it more than once, and use empty \
+                                 slots (`f(, _)`) for partial-application holes.",
+                                placeholder_count
+                            ),
+                            span: pipe_expr.span().clone(),
+                        });
+                    }
+                    if placeholder_count >= 1 {
+                        // Rule 1: type `_` as the piped value for this stage.
+                        let saved = self.pipeline_placeholder_type.replace(result_type.clone());
+                        result_type = self.infer_expr_type(pipe_expr);
+                        self.pipeline_placeholder_type = saved;
+                        continue;
+                    }
+                    // Rule 2: the stage is evaluated as written.
+                    let stage_type = self.infer_expr_type(pipe_expr);
+                    result_type = match (&stage_type, pipe_expr) {
+                        (Type::Function(_, ret), _) => (**ret).clone(),
+                        // Divergent stages (`=> ><`, `=> throw ...`) never
+                        // produce a value to apply — keep their type.
+                        (_, Expr::Gorilla(_)) | (_, Expr::Throw(..)) => stage_type,
+                        // Bare identifiers stay permissive: function names
+                        // type as Unknown here, and the runtime applies
+                        // function values / reports E1544 for the rest.
+                        (_, Expr::Ident(..)) => stage_type,
+                        (Type::Unknown | Type::Any, _) => Type::Unknown,
+                        _ => {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1544] Pipeline stage evaluates to a non-function value of type {}. \
+                                     A `_`-free stage is evaluated as written and must produce a \
+                                     function for the piped value. Hint: use `_` to mark the \
+                                     injection position (`x => f(_, a)`), or an empty slot for \
+                                     partial application (`x => f(, a)`).",
+                                    stage_type
+                                ),
+                                span: pipe_expr.span().clone(),
+                            });
+                            Type::Unknown
+                        }
+                    };
                 }
                 self.pop_scope();
                 self.in_pipeline = old_in_pipeline;

@@ -179,6 +179,13 @@ function __taida_solidify(value) {
   return value;
 }
 
+function __taida_pipe_apply(stage, value) {
+  if (typeof stage !== 'function') {
+    throw new __TaidaError('PipeError', '[E1544] Pipeline stage evaluated to a non-function value. A `_`-free stage is evaluated as written and must produce a function for the piped value.', {});
+  }
+  return stage(value);
+}
+
 function __taida_defaultValue(typeName) {
   switch (typeName) {
     case 'Int': return 0;

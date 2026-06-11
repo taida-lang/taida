@@ -879,11 +879,13 @@ fn wasm_full_parity_allowlist_guard() {
     //
     //   92 fixtures - 14 skip - 1 rejected - 9 native_fail - 0 diff = 68
     //   F56: +compile_f56_secret_carrier (parity-OK across all profiles) -> 69.
+    //   F62: +compile_f62b025_pipe_semantics (pipe two-rule semantics,
+    //   parity-OK across all profiles) -> 70.
     assert_eq!(
         expected_parity_ok,
-        69,
+        70,
         "WF-5: parity-OK count drift — got {} = |fixtures {}| - |skip {}| - |rejected {}| - \
-         |native_fail {}| - |diff {}|. Expected 68. Update this constant deliberately.",
+         |native_fail {}| - |diff {}|. Expected 70. Update this constant deliberately.",
         expected_parity_ok,
         all.len(),
         FULL_SKIP_STEMS.len(),

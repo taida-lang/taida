@@ -1585,10 +1585,13 @@ Parent[T] => Expanded[T, U] = @(
 )
 Expanded[T, U] => Child[T] = @()"#;
     let (_, errors) = check(source);
+    // Historically this surfaced the same [E1407] twice (two validation
+    // passes reach the header); identical (span, message) duplicates are
+    // now collapsed at the end of check_program.
     assert_eq!(
         errors.len(),
-        2,
-        "Expected exactly 2 errors, got: {:?}",
+        1,
+        "Expected exactly 1 error, got: {:?}",
         errors
     );
     assert!(

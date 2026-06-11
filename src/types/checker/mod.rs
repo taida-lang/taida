@@ -362,15 +362,14 @@ pub struct TypeChecker {
     /// restored at every scope boundary (function body, lambda, error
     /// ceiling, branch arm).
     descriptor_scope_shadows: HashSet<String>,
-    /// While `infer_expr_type` descends into a `FuncCall` that is itself
-    /// a pipeline stage (`data => f(...)`), this holds the *previous
-    /// stage's* result type — the value the runtime injects as the
-    /// implicit first argument when the stage call carries no
-    /// placeholder. Consumed (taken) by the FuncCall arm so calls nested
-    /// inside the stage's arguments do not inherit it; arity *and* type
-    /// validation must count / check that injected argument. `None`
-    /// outside pipeline stages.
-    pipeline_stage_injected_type: Option<Type>,
+    /// While `infer_expr_type` descends into a pipeline stage that
+    /// contains a `_` placeholder (`data => f(_, a)`), this holds the
+    /// *previous stage's* result type — the value the runtime injects at
+    /// the placeholder (F62B-025 rule 1). The `Expr::Placeholder` arm
+    /// reads it so `_` carries the piped value's type into argument and
+    /// operand validation at any nesting depth. `None` outside pipeline
+    /// stages.
+    pipeline_placeholder_type: Option<Type>,
     /// Typed HIR / expression type table. `infer_expr_type` records
     /// every observed `Expr` here so codegen lowering can answer
     /// "is this expression Bool?" by looking up the recorded type.
@@ -474,7 +473,7 @@ impl TypeChecker {
             descriptor_binding_names: HashSet::new(),
             descriptor_shadow_names: HashSet::new(),
             descriptor_scope_shadows: HashSet::new(),
-            pipeline_stage_injected_type: None,
+            pipeline_placeholder_type: None,
             typed_expr_table: super::typed_hir::TypedExprTable::new(),
         };
         // C19B-002 (import-less): the C19 interactive variants are core-bundled
@@ -1054,6 +1053,22 @@ impl TypeChecker {
                 span: Span::new(0, 0, 1, 1),
             });
         }
+
+        // Drop exact duplicates (same span, same message) while keeping the
+        // first occurrence's position. Overlapping validation passes can
+        // legitimately reach the same node twice (e.g. the call-argument
+        // walk and the expression-arm walk both seeing a misplaced `_`);
+        // reporting the identical diagnostic twice adds no information.
+        let mut seen = std::collections::HashSet::new();
+        self.errors.retain(|err| {
+            seen.insert((
+                err.span.line,
+                err.span.column,
+                err.span.start,
+                err.span.end,
+                err.message.clone(),
+            ))
+        });
     }
 
     fn type_expr_to_string(ty: &TypeExpr) -> String {

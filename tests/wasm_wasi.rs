@@ -1317,11 +1317,12 @@ fn wasm_wasi_parity_allowlist_guard() {
     // Historical target count (WC-4 through C13-1): 71. D28 adds six
     // harness-dependent examples, all intentionally skipped here.
     // F56: +compile_f56_secret_carrier (parity-OK on wasm-wasi) -> 70.
+    // F62: +compile_f62b025_pipe_semantics (parity-OK on wasm-wasi) -> 71.
     assert_eq!(
         expected_parity_ok,
-        70,
+        71,
         "WW-3: parity-OK count drift — got {} = |fixtures {}| - |skip {}| - |rejected {}| - \
-         |native_fail {}| - |diff {}|. Expected 70. Update this constant deliberately.",
+         |native_fail {}| - |diff {}|. Expected 71. Update this constant deliberately.",
         expected_parity_ok,
         all.len(),
         WASI_SKIP_STEMS.len(),
@@ -1471,9 +1472,10 @@ fn wasm_wasi_superset_of_wasm_min() {
     // F56: compile_f56_secret_carrier added (68 → 69)
     // F62B-013/014: entry files with exports now keep _taida_main, and
     // nowMs links on wasm-wasi (69 → 72)
+    // F62B-025: compile_f62b025_pipe_semantics added (72 → 73)
     assert_eq!(
-        superset_ok, 72,
-        "WW-3: Expected exactly 72 superset-verified examples, got {}. \
+        superset_ok, 73,
+        "WW-3: Expected exactly 73 superset-verified examples, got {}. \
          If superset coverage improved, update the expected count.",
         superset_ok
     );

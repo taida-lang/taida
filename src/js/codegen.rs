@@ -4438,277 +4438,47 @@ impl JsCodegen {
                 self.write(";\n");
                 continue;
             }
+            // F62B-025: pipeline application closes over exactly two rules
+            // (mirror of the interpreter's `eval_pipeline_step`).
+            //
+            // Rule 1 — the stage contains `_` (one at most, E1543): rewrite
+            // the placeholder to `__p` and emit the stage as a normal
+            // expression (the main `gen_expr` paths handle molds, method
+            // calls, OS mappings, and solidify).
+            //
+            // Rule 2 — no `_`: emit the stage as written and apply the piped
+            // value through `__taida_pipe_apply` (throws on non-function
+            // values; the checker rejects statically known cases as E1544).
+            // Bare identifiers keep their dedicated builtin-name mapping
+            // below. The legacy implicit first-argument injection is gone.
+            let placeholder_count = expr_count_placeholders(expr);
+            if placeholder_count > 1 {
+                return Err(JsError {
+                    message: format!(
+                        "[E1543] A pipeline stage can contain at most one `_` (found {}).",
+                        placeholder_count
+                    ),
+                });
+            }
+            if placeholder_count == 1 {
+                // Rewrite `_` to a per-stage const snapshot of `__p`, not to
+                // `__p` itself: `__p` is a mutable accumulator, so a closure
+                // produced by the stage (positional injection like
+                // `5 => addThree(, _, 3)`) would otherwise capture the live
+                // binding instead of the stage-time value.
+                let snapshot = format!("__pv_{}", i);
+                self.write_indent();
+                self.write(&format!("const {} = __p;\n", snapshot));
+                self.write_indent();
+                self.write("__p = ");
+                let rewritten = js_rewrite_placeholder(expr, &snapshot, expr.span());
+                self.gen_expr(&rewritten)?;
+                self.write(";\n");
+                continue;
+            }
             self.write_indent();
             self.write("__p = ");
             match expr {
-                Expr::FuncCall(callee, args, _) => {
-                    let has_placeholder = args.iter().any(js_expr_has_placeholder);
-                    if let Expr::Ident(name, _) = callee.as_ref() {
-                        match name.as_str() {
-                            "debug" => self.write("__taida_debug"),
-                            "typeof" => self.write("__taida_typeof"),
-                            "assert" => self.write("__taida_assert"),
-                            "throw" => self.write("__taida_throw"),
-                            "stdout" => self.write("__taida_stdout"),
-                            "stderr" => self.write("__taida_stderr"),
-                            "stdin" => self.write("__taida_stdin"),
-                            // C20-2: stdinLine is the UTF-8-aware Async[Lax[Str]] successor
-                            "stdinLine" => self.write("__taida_stdinLine"),
-                            "jsonEncode" => self.write("__taida_jsonEncode"),
-                            "jsonPretty" => self.write("__taida_jsonPretty"),
-                            "nowMs" => self.write("__taida_nowMs"),
-                            "sleep" => self.write("__taida_sleep"),
-                            // D28B-015: `strOf(span, raw)` lowercase function-form
-                            // delegates to the existing `__taida_net_StrOf`
-                            // runtime helper (always present in `RUNTIME_JS`).
-                            "strOf" => self.write("__taida_net_StrOf"),
-                            "readBytes" => self.write("__taida_os_readBytes"),
-                            "readBytesAt" => self.write("__taida_os_readBytesAt"),
-                            "writeFile" => self.write("__taida_os_writeFile"),
-                            "writeBytes" => self.write("__taida_os_writeBytes"),
-                            "appendFile" => self.write("__taida_os_appendFile"),
-                            "remove" => self.write("__taida_os_remove"),
-                            "createDir" => self.write("__taida_os_createDir"),
-                            "rename" => self.write("__taida_os_rename"),
-                            "run" => self.write("__taida_os_run"),
-                            "execShell" => self.write("__taida_os_execShell"),
-                            // C19: interactive TTY-passthrough variants
-                            "runInteractive" => self.write("__taida_os_runInteractive"),
-                            "execShellInteractive" => self.write("__taida_os_execShellInteractive"),
-                            "allEnv" => self.write("__taida_os_allEnv"),
-                            "argv" => self.write("__taida_os_argv"),
-                            "tcpConnect" => self.write("__taida_os_tcpConnect"),
-                            "tcpListen" => self.write("__taida_os_tcpListen"),
-                            "tcpAccept" => self.write("__taida_os_tcpAccept"),
-                            "socketSend" => self.write("__taida_os_socketSend"),
-                            "socketSendAll" => self.write("__taida_os_socketSendAll"),
-                            "socketRecv" => self.write("__taida_os_socketRecv"),
-                            "socketSendBytes" => self.write("__taida_os_socketSendBytes"),
-                            "socketRecvBytes" => self.write("__taida_os_socketRecvBytes"),
-                            "socketClose" => self.write("__taida_os_socketClose"),
-                            "listenerClose" => self.write("__taida_os_listenerClose"),
-                            "udpBind" => self.write("__taida_os_udpBind"),
-                            "udpSendTo" => self.write("__taida_os_udpSendTo"),
-                            "udpRecvFrom" => self.write("__taida_os_udpRecvFrom"),
-                            "udpClose" => self.write("__taida_os_udpClose"),
-                            "socketRecvExact" => self.write("__taida_os_socketRecvExact"),
-                            "dnsResolve" => self.write("__taida_os_dnsResolve"),
-                            "poolCreate" => self.write("__taida_os_poolCreate"),
-                            "poolAcquire" => self.write("__taida_os_poolAcquire"),
-                            "poolRelease" => self.write("__taida_os_poolRelease"),
-                            "poolClose" => self.write("__taida_os_poolClose"),
-                            "poolHealth" => self.write("__taida_os_poolHealth"),
-                            // C12-6a: Regex(pattern, flags?) prelude constructor
-                            "Regex" => self.write("__taida_regex"),
-                            // taida-lang/net HTTP v1 (only when imported)
-                            _ if self.try_write_net_builtin(name, "") => {}
-                            _ => self.write(name),
-                        }
-                    } else {
-                        self.gen_expr(callee)?;
-                    }
-                    self.write("(");
-                    if !has_placeholder {
-                        self.write("__p");
-                        if !args.is_empty() {
-                            self.write(", ");
-                        }
-                    }
-                    for (i, arg) in args.iter().enumerate() {
-                        if i > 0 {
-                            self.write(", ");
-                        }
-                        if js_expr_has_placeholder(arg) {
-                            let rewritten = js_rewrite_placeholder(arg, "__p", arg.span());
-                            self.gen_expr(&rewritten)?;
-                        } else {
-                            self.gen_expr(arg)?;
-                        }
-                    }
-                    self.write(")");
-                }
-                Expr::MethodCall(obj, method, args, _) => {
-                    // Pipeline method call: replace _ placeholder in obj with __p
-                    {
-                        if is_removed_list_method(method) {
-                            self.write("__taida_list_method_removed(");
-                            self.write(&format!("{:?}", method));
-                            self.write(")");
-                            return Ok(());
-                        }
-                        if method == "fold" || method == "reduce" {
-                            self.write(if method == "fold" { "Fold(" } else { "Reduce(" });
-                            if matches!(obj.as_ref(), Expr::Placeholder(_)) {
-                                self.write("__p");
-                            } else {
-                                self.gen_expr(obj)?;
-                            }
-                            for arg in args.iter() {
-                                self.write(", ");
-                                if matches!(arg, Expr::Placeholder(_)) {
-                                    self.write("__p");
-                                } else {
-                                    self.gen_expr(arg)?;
-                                }
-                            }
-                            self.write(")");
-                            return Ok(());
-                        }
-                        let js_method = match method.as_str() {
-                            "length" => "length_",
-                            other => other,
-                        };
-                        if js_expr_has_placeholder(obj) {
-                            let rewritten = js_rewrite_placeholder(obj, "__p", obj.span());
-                            self.gen_expr(&rewritten)?;
-                            self.write(&format!(".{}(", js_method));
-                        } else {
-                            self.gen_expr(obj)?;
-                            self.write(&format!(".{}(", js_method));
-                        }
-                        for (i, arg) in args.iter().enumerate() {
-                            if i > 0 {
-                                self.write(", ");
-                            }
-                            if js_expr_has_placeholder(arg) {
-                                let rewritten = js_rewrite_placeholder(arg, "__p", arg.span());
-                                self.gen_expr(&rewritten)?;
-                            } else {
-                                self.gen_expr(arg)?;
-                            }
-                        }
-                        self.write(")");
-                    }
-                }
-                Expr::MoldInst(name, type_args, fields, _) => {
-                    // B11-5b: If[cond, then, else]() in pipeline
-                    // → ((_) => (cond ? then : else))(__p)
-                    // The IIFE binds `_` so gen_expr emits it as the parameter name,
-                    // achieving correct short-circuit and placeholder substitution.
-                    if name == "If" && type_args.len() >= 3 {
-                        self.write("((_) => (");
-                        self.gen_expr(&type_args[0])?;
-                        self.write(" ? ");
-                        self.gen_expr(&type_args[1])?;
-                        self.write(" : ");
-                        self.gen_expr(&type_args[2])?;
-                        self.write("))(__p)");
-                    }
-                    // B11-6c: TypeIs in pipeline — bind _ to __p via IIFE
-                    else if name == "TypeIs" && type_args.len() >= 2 {
-                        self.write("((_) => ");
-                        // Reuse main TypeIs codegen by constructing a temporary MoldInst
-                        let temp = Expr::MoldInst(
-                            name.clone(),
-                            type_args.clone(),
-                            fields.clone(),
-                            type_args[0].span().clone(),
-                        );
-                        self.gen_expr(&temp)?;
-                        self.write(")(__p)");
-                    }
-                    // B11-6c: TypeExtends in pipeline — no placeholder needed, compile-time
-                    else if name == "TypeExtends" && type_args.len() >= 2 {
-                        let temp = Expr::MoldInst(
-                            name.clone(),
-                            type_args.clone(),
-                            fields.clone(),
-                            type_args[0].span().clone(),
-                        );
-                        self.gen_expr(&temp)?;
-                    }
-                    // JSNew in pipeline: JSNew[ClassName](__p, ...) or JSNew[ClassName](...)
-                    else if name == "JSNew" {
-                        if let Some(Expr::Ident(class_name, _)) = type_args.first() {
-                            self.write(&format!("new {}(", class_name));
-                            // Pipeline value __p as first arg, followed by fields
-                            let has_placeholder =
-                                fields.iter().any(|f| js_expr_has_placeholder(&f.value));
-                            if has_placeholder {
-                                for (i, field) in fields.iter().enumerate() {
-                                    if i > 0 {
-                                        self.write(", ");
-                                    }
-                                    if js_expr_has_placeholder(&field.value) {
-                                        let rewritten = js_rewrite_placeholder(
-                                            &field.value,
-                                            "__p",
-                                            field.value.span(),
-                                        );
-                                        self.gen_expr(&rewritten)?;
-                                    } else {
-                                        self.gen_expr(&field.value)?;
-                                    }
-                                }
-                            } else if fields.is_empty() {
-                                self.write("__p");
-                            } else {
-                                self.write("__p");
-                                for field in fields {
-                                    self.write(", ");
-                                    self.gen_expr(&field.value)?;
-                                }
-                            }
-                            self.write(")");
-                        }
-                    } else {
-                        // Pipeline MoldInst: replace _ placeholders in type_args with __p
-                        // OS molds need to be mapped to runtime function names
-                        let js_name = match name.as_str() {
-                            "Read" => "__taida_os_read",
-                            "ListDir" => "__taida_os_listdir",
-                            "Stat" => "__taida_os_stat",
-                            "Exists" => "__taida_os_exists",
-                            "EnvVar" => "__taida_os_envvar",
-                            _ => name.as_str(),
-                        };
-                        self.write("__taida_solidify(");
-                        self.write(&format!("{}(", js_name));
-                        let has_placeholder = type_args.iter().any(js_expr_has_placeholder);
-                        if has_placeholder {
-                            for (i, arg) in type_args.iter().enumerate() {
-                                if i > 0 {
-                                    self.write(", ");
-                                }
-                                if js_expr_has_placeholder(arg) {
-                                    let rewritten = js_rewrite_placeholder(arg, "__p", arg.span());
-                                    self.gen_expr(&rewritten)?;
-                                } else {
-                                    self.gen_expr(arg)?;
-                                }
-                            }
-                        } else {
-                            // No placeholder — insert __p as first type arg
-                            self.write("__p");
-                            for arg in type_args {
-                                self.write(", ");
-                                self.gen_expr(arg)?;
-                            }
-                        }
-                        if !fields.is_empty() {
-                            self.write(", { ");
-                            for (i, field) in fields.iter().enumerate() {
-                                if i > 0 {
-                                    self.write(", ");
-                                }
-                                self.write(&format!("{}: ", field.name));
-                                if js_expr_has_placeholder(&field.value) {
-                                    let rewritten = js_rewrite_placeholder(
-                                        &field.value,
-                                        "__p",
-                                        field.value.span(),
-                                    );
-                                    self.gen_expr(&rewritten)?;
-                                } else {
-                                    self.gen_expr(&field.value)?;
-                                }
-                            }
-                            self.write(" }");
-                        }
-                        self.write(")");
-                        self.write(")");
-                    }
-                }
                 Expr::Ident(name, _) => match name.as_str() {
                     "debug" => self.write("__taida_debug(__p)"),
                     "typeof" => self.write("__taida_typeof(__p)"),
@@ -4770,15 +4540,14 @@ impl JsCodegen {
                         self.write(&format!("{}(__p)", emitted));
                     }
                 },
-                // C12B-020: `expr => _` is a no-op transform that discards
-                // the pipeline value while keeping the preceding expression's
-                // side effect. Keep `__p` unchanged instead of emitting
-                // `__p = _;` which is a ReferenceError.
-                Expr::Placeholder(_) => {
-                    self.write("__p");
-                }
                 _ => {
+                    // Rule 2: evaluate the stage as written and apply the
+                    // piped value to the resulting function (partial
+                    // application `add(, 3)`, a lambda, or a call returning
+                    // a function). Non-function values throw E1544.
+                    self.write("__taida_pipe_apply(");
                     self.gen_expr(expr)?;
+                    self.write(", __p)");
                 }
             }
             self.write(";\n");
@@ -4835,47 +4604,6 @@ fn expr_references_any_name(expr: &Expr, bound_names: &[String]) -> bool {
         }
     }
     walk(expr, bound_names)
-}
-
-fn js_expr_has_placeholder(expr: &Expr) -> bool {
-    match expr {
-        Expr::Placeholder(_) => true,
-        Expr::BinaryOp(lhs, _, rhs, _) => {
-            js_expr_has_placeholder(lhs) || js_expr_has_placeholder(rhs)
-        }
-        Expr::UnaryOp(_, inner, _) => js_expr_has_placeholder(inner),
-        Expr::FuncCall(callee, args, _) => {
-            js_expr_has_placeholder(callee) || args.iter().any(js_expr_has_placeholder)
-        }
-        Expr::MethodCall(obj, _, args, _) => {
-            js_expr_has_placeholder(obj) || args.iter().any(js_expr_has_placeholder)
-        }
-        Expr::FieldAccess(obj, _, _) => js_expr_has_placeholder(obj),
-        Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
-            items.iter().any(js_expr_has_placeholder)
-        }
-        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => fields
-            .iter()
-            .any(|field| js_expr_has_placeholder(&field.value)),
-        Expr::MoldInst(_, type_args, fields, _) => {
-            type_args.iter().any(js_expr_has_placeholder)
-                || fields
-                    .iter()
-                    .any(|field| js_expr_has_placeholder(&field.value))
-        }
-        Expr::Unmold(inner, _) | Expr::Lambda(_, inner, _) | Expr::Throw(inner, _) => {
-            js_expr_has_placeholder(inner)
-        }
-        Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
-            arm.condition.as_ref().is_some_and(js_expr_has_placeholder)
-                || arm
-                    .body
-                    .iter()
-                    .filter_map(|stmt| stmt.yielded_expr())
-                    .any(js_expr_has_placeholder)
-        }),
-        _ => false,
-    }
 }
 
 fn js_rewrite_placeholder(expr: &Expr, replacement: &str, span: &crate::lexer::Span) -> Expr {

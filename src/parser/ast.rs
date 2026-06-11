@@ -844,6 +844,175 @@ pub fn expr_contains_placeholder(expr: &Expr) -> bool {
     }
 }
 
+/// Count the pipeline placeholders `_` in an expression tree.
+///
+/// Mirrors [`expr_contains_placeholder`]'s traversal exactly so the
+/// "at most one `_` per pipeline stage" rule (E1543) and the placeholder
+/// rewrite that injects the piped value can never disagree about which
+/// `_` nodes belong to a stage.
+pub fn expr_count_placeholders(expr: &Expr) -> usize {
+    match expr {
+        Expr::Placeholder(_) => 1,
+        Expr::BuchiPack(fields, _) => fields
+            .iter()
+            .map(|field| expr_count_placeholders(&field.value))
+            .sum(),
+        Expr::ListLit(items, _) => items.iter().map(expr_count_placeholders).sum(),
+        Expr::BinaryOp(lhs, _, rhs, _) => {
+            expr_count_placeholders(lhs) + expr_count_placeholders(rhs)
+        }
+        Expr::UnaryOp(_, inner, _) => expr_count_placeholders(inner),
+        Expr::FuncCall(callee, args, _) => {
+            expr_count_placeholders(callee)
+                + args.iter().map(expr_count_placeholders).sum::<usize>()
+        }
+        Expr::MethodCall(obj, _, args, _) => {
+            expr_count_placeholders(obj) + args.iter().map(expr_count_placeholders).sum::<usize>()
+        }
+        Expr::FieldAccess(obj, _, _) => expr_count_placeholders(obj),
+        Expr::CondBranch(arms, _) => arms
+            .iter()
+            .map(|arm| {
+                arm.condition
+                    .as_ref()
+                    .map(expr_count_placeholders)
+                    .unwrap_or(0)
+                    + arm
+                        .body
+                        .iter()
+                        .map(statement_count_placeholders)
+                        .sum::<usize>()
+            })
+            .sum(),
+        Expr::Pipeline(steps, _) => steps.iter().map(expr_count_placeholders).sum(),
+        Expr::MoldInst(_, type_args, fields, _) => {
+            type_args.iter().map(expr_count_placeholders).sum::<usize>()
+                + fields
+                    .iter()
+                    .map(|field| expr_count_placeholders(&field.value))
+                    .sum::<usize>()
+        }
+        Expr::Unmold(inner, _) => expr_count_placeholders(inner),
+        Expr::Lambda(params, body, _) => {
+            params
+                .iter()
+                .map(|param| {
+                    param
+                        .default_value
+                        .as_ref()
+                        .map(expr_count_placeholders)
+                        .unwrap_or(0)
+                })
+                .sum::<usize>()
+                + expr_count_placeholders(body)
+        }
+        Expr::TypeInst(_, fields, _) => fields
+            .iter()
+            .map(|field| expr_count_placeholders(&field.value))
+            .sum(),
+        Expr::Throw(inner, _) => expr_count_placeholders(inner),
+        _ => 0,
+    }
+}
+
+/// Return true if `expr` contains an `Expr::Ident(name, _)` whose name
+/// appears in `bound_names`. Used to decide whether a pipeline stage
+/// explicitly consumes a `=> name` bind-and-forward binding, in which
+/// case the stage is evaluated as written instead of receiving the
+/// piped value. The interpreter, type checker, and code generators all
+/// follow this rule.
+pub fn expr_references_any_name(expr: &Expr, bound_names: &[String]) -> bool {
+    match expr {
+        Expr::Ident(n, _) => bound_names.iter().any(|bn| bn == n),
+        Expr::BinaryOp(l, _, r, _) => {
+            expr_references_any_name(l, bound_names) || expr_references_any_name(r, bound_names)
+        }
+        Expr::UnaryOp(_, inner, _) => expr_references_any_name(inner, bound_names),
+        Expr::FuncCall(callee, args, _) => {
+            expr_references_any_name(callee, bound_names)
+                || args
+                    .iter()
+                    .any(|a| expr_references_any_name(a, bound_names))
+        }
+        Expr::MethodCall(obj, _, args, _) => {
+            expr_references_any_name(obj, bound_names)
+                || args
+                    .iter()
+                    .any(|a| expr_references_any_name(a, bound_names))
+        }
+        Expr::FieldAccess(obj, _, _) => expr_references_any_name(obj, bound_names),
+        Expr::BuchiPack(fields, _) => fields
+            .iter()
+            .any(|f| expr_references_any_name(&f.value, bound_names)),
+        Expr::ListLit(items, _) => items
+            .iter()
+            .any(|x| expr_references_any_name(x, bound_names)),
+        Expr::Pipeline(steps, _) => steps
+            .iter()
+            .any(|s| expr_references_any_name(s, bound_names)),
+        Expr::MoldInst(_, type_args, fields, _) => {
+            type_args
+                .iter()
+                .any(|a| expr_references_any_name(a, bound_names))
+                || fields
+                    .iter()
+                    .any(|f| expr_references_any_name(&f.value, bound_names))
+        }
+        Expr::Unmold(inner, _) => expr_references_any_name(inner, bound_names),
+        Expr::Lambda(_, body, _) => expr_references_any_name(body, bound_names),
+        Expr::TypeInst(_, fields, _) => fields
+            .iter()
+            .any(|f| expr_references_any_name(&f.value, bound_names)),
+        Expr::Throw(inner, _) => expr_references_any_name(inner, bound_names),
+        Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
+            arm.condition
+                .as_ref()
+                .is_some_and(|c| expr_references_any_name(c, bound_names))
+                || arm.body.iter().any(|s| {
+                    if let Statement::Expr(e) = s {
+                        expr_references_any_name(e, bound_names)
+                    } else {
+                        false
+                    }
+                })
+        }),
+        _ => false,
+    }
+}
+
+/// Statement-level companion of [`expr_count_placeholders`].
+pub fn statement_count_placeholders(stmt: &Statement) -> usize {
+    match stmt {
+        Statement::Expr(expr) => expr_count_placeholders(expr),
+        Statement::Assignment(assign) => expr_count_placeholders(&assign.value),
+        Statement::FuncDef(func) => func.body.iter().map(statement_count_placeholders).sum(),
+        Statement::ErrorCeiling(ceiling) => ceiling
+            .handler_body
+            .iter()
+            .map(statement_count_placeholders)
+            .sum(),
+        Statement::UnmoldForward(unmold) => expr_count_placeholders(&unmold.source),
+        Statement::UnmoldBackward(unmold) => expr_count_placeholders(&unmold.source),
+        Statement::ClassLikeDef(def) => def
+            .fields
+            .iter()
+            .map(|field| {
+                field
+                    .default_value
+                    .as_ref()
+                    .map(expr_count_placeholders)
+                    .unwrap_or(0)
+                    + field
+                        .method_def
+                        .as_ref()
+                        .map(|func| func.body.iter().map(statement_count_placeholders).sum())
+                        .unwrap_or(0)
+            })
+            .sum(),
+        Statement::EnumDef(_) | Statement::Import(_) | Statement::Export(_) => 0,
+    }
+}
+
 /// Statement-level companion of [`expr_contains_placeholder`].
 pub fn statement_contains_placeholder(stmt: &Statement) -> bool {
     match stmt {

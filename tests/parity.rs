@@ -36978,11 +36978,13 @@ stdout(r2)
 /// B11-5e: If with pipeline clamp pattern — mixed top-level and nested _
 #[test]
 fn test_b11_if_mold_pipeline_clamp_parity() {
+    // One `_` per pipeline stage: re-using the piped value in several
+    // positions goes through a `=> v` bind-and-forward.
     let source = r#"
-150 => If[_ > 100, 100, _]() => r1
+150 => v => If[v > 100, 100, v]() => r1
 stdout(r1)
 
-50 => If[_ > 100, 100, _]() => r2
+50 => w => If[w > 100, 100, w]() => r2
 stdout(r2)
 "#;
     assert_backend_parity_for_source(source, "b11_if_pipeline_clamp");

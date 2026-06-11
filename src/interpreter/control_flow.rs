@@ -186,153 +186,121 @@ fn rewrite_statement_placeholder(
 impl Interpreter {
     /// Evaluate a single pipeline step, applying the current value.
     ///
-    /// Pipeline semantics:
-    /// - FuncCall with placeholders: substitute placeholders with current value
-    /// - FuncCall without placeholders: pass current as first argument
-    /// - MethodCall: evaluate with current as _ in scope
-    /// - Any other expression: evaluate with _ bound to current in scope
+    /// F62B-025: pipeline application closes over exactly two rules.
+    ///
+    /// Rule 1 — the stage contains `_` (one at most, E1543): the piped
+    /// value is injected syntactically at the placeholder and the
+    /// rewritten stage is evaluated as written. The `_` may sit anywhere
+    /// in the stage expression (call argument, method argument, mold
+    /// argument, nested comparison like `_ > 3`, ...).
+    ///
+    /// Rule 2 — the stage contains no `_`: the stage expression is
+    /// evaluated exactly as written; when the result is a function value
+    /// the piped value is applied to it, anything else is a pipe into a
+    /// non-function value (E1544). This is what makes
+    /// `5 => add(, 3)` ≡ `f <= add(, 3)` + `5 => f` (compositionality).
+    ///
+    /// The legacy implicit first-argument injection (`5 => f(3)` running
+    /// as `f(5, 3)`) and the zero-arg special form (`5 => f()` running
+    /// as `f(5)`) are gone: both now evaluate the stage as written and
+    /// fall under rule 2. Empty slots stay an independent partial-
+    /// application mechanism — `5 => add(, 3)` evaluates the closure and
+    /// applies 5 (rule 2), `5 => add(, _, 3)` injects 5 and keeps the
+    /// hole (rule 1).
     pub(crate) fn eval_pipeline_step(
         &mut self,
         step: &Expr,
         current: Value,
     ) -> Result<Signal, RuntimeError> {
-        match step {
-            Expr::Placeholder(_) => Ok(Signal::Value(current)),
-            Expr::FuncCall(callee, args, span) => {
-                let has_placeholder = args.iter().any(expr_contains_placeholder);
+        let placeholder_count = expr_count_placeholders(step);
+        if placeholder_count > 1 {
+            return Err(RuntimeError {
+                message: format!(
+                    "[E1543] A pipeline stage can contain at most one `_` (found {}). \
+                     The pipe carries exactly one value. Hint: bind the value first \
+                     (`x => v => f(v, v)`) to use it more than once, and use empty \
+                     slots (`f(, _)`) for partial-application holes.",
+                    placeholder_count
+                ),
+            });
+        }
 
-                if has_placeholder {
-                    // Replace placeholders with current value in the args,
-                    // then evaluate the call directly with the substituted args.
-                    // We bind current to a temporary variable to avoid value_to_expr issues.
-                    self.env.push_scope();
-                    let pipe_val_name = "__pipe_current__";
-                    self.env.define_force(pipe_val_name, current);
+        if placeholder_count == 1 {
+            // Rule 1: syntactic injection at the placeholder.
+            self.env.push_scope();
+            let pipe_val_name = "__pipe_current__";
+            self.env.define_force(pipe_val_name, current);
+            let dummy_span = crate::lexer::Span::new(0, 0, 0, 0);
+            let rewritten = rewrite_nested_placeholder(step, pipe_val_name, &dummy_span);
+            let result = self.eval_expr(&rewritten);
+            self.env.pop_scope();
+            return result;
+        }
 
-                    let dummy_span = crate::lexer::Span::new(0, 0, 0, 0);
-                    let new_args: Vec<Expr> = args
-                        .iter()
-                        .map(|arg| rewrite_nested_placeholder(arg, pipe_val_name, &dummy_span))
-                        .collect();
-
-                    let new_call = Expr::FuncCall(callee.clone(), new_args, span.clone());
-                    let result = self.eval_expr(&new_call);
-                    self.env.pop_scope();
-                    result
-                } else {
-                    // No placeholder — pass current as first argument
-                    self.env.push_scope();
-                    let pipe_val_name = "__pipe_current__";
-                    self.env.define_force(pipe_val_name, current);
-
-                    let dummy_span = crate::lexer::Span::new(0, 0, 0, 0);
-                    let mut new_args = vec![Expr::Ident(pipe_val_name.to_string(), dummy_span)];
-                    new_args.extend(args.iter().cloned());
-                    let new_call = Expr::FuncCall(callee.clone(), new_args, span.clone());
-                    let result = self.eval_expr(&new_call);
-                    self.env.pop_scope();
-                    result
+        // Rule 2: evaluate the stage as written, then apply the piped value
+        // when the stage evaluated to a function.
+        if let Expr::Ident(name, span) = step {
+            // `5 => f`: prelude / user functions and closures resolve to
+            // Value::Function; builtin dispatch sentinels (net / crypto /
+            // addon) resolve to a `__`-prefixed Str and are called through
+            // the normal builtin call machinery.
+            let step_val = match self.eval_expr(step)? {
+                Signal::Value(v) => v,
+                other => return Ok(other),
+            };
+            return match step_val {
+                Value::Function(ref func) => {
+                    let args = vec![current];
+                    self.call_function_with_values(func, &args)
+                        .map(Signal::Value)
                 }
-            }
-            Expr::MethodCall(obj, method, args, span) => {
-                // For method calls in pipeline, check for placeholder in obj
-                if matches!(obj.as_ref(), Expr::Placeholder(_)) {
-                    // Replace obj placeholder with current
+                Value::Str(ref s) if s.starts_with("__") => {
                     self.env.push_scope();
                     let pipe_val_name = "__pipe_current__";
                     self.env.define_force(pipe_val_name, current);
                     let dummy_span = crate::lexer::Span::new(0, 0, 0, 0);
-                    let new_call = Expr::MethodCall(
-                        Box::new(Expr::Ident(pipe_val_name.to_string(), dummy_span)),
-                        method.clone(),
-                        args.clone(),
+                    let call = Expr::FuncCall(
+                        Box::new(Expr::Ident(name.clone(), span.clone())),
+                        vec![Expr::Ident(pipe_val_name.to_string(), dummy_span)],
                         span.clone(),
                     );
-                    let result = self.eval_expr(&new_call);
-                    self.env.pop_scope();
-                    result
-                } else {
-                    // Fallback: evaluate with _ bound to current
-                    self.env.push_scope();
-                    self.env.define_force("_", current);
-                    let result = self.eval_expr(step);
+                    let result = self.eval_expr(&call);
                     self.env.pop_scope();
                     result
                 }
+                _ => Err(RuntimeError {
+                    message: format!(
+                        "[E1544] Pipeline stage '{}' resolved to a non-function value: {}. \
+                         A `_`-free stage is evaluated as written and must produce a \
+                         function for the piped value. Hint: use `_` to mark the \
+                         injection position (`x => f(_, a)`).",
+                        name,
+                        step_val.to_error_display(200)
+                    ),
+                }),
+            };
+        }
+
+        let step_val = match self.eval_expr(step)? {
+            Signal::Value(v) => v,
+            other => return Ok(other),
+        };
+        match step_val {
+            Value::Function(ref func) => {
+                let args = vec![current];
+                self.call_function_with_values(func, &args)
+                    .map(Signal::Value)
             }
-            Expr::MoldInst(name, type_args, fields, span) => {
-                // MoldInst in pipeline: replace _ placeholders in type_args with current value
-                // B11-5a: Use deep rewriting to handle both top-level `_` and nested `_ > 3`.
-                let has_any_placeholder = type_args.iter().any(expr_contains_placeholder);
-
-                if has_any_placeholder {
-                    // Rewrite ALL Placeholder nodes (top-level and nested) to
-                    // Ident("__pipe_current__"). This handles cases like:
-                    // - `If[_, "a", "b"]()` — top-level _
-                    // - `If[_ > 3, "big", "small"]()` — nested _
-                    // - `If[_ > 100, 100, _]()` — mixed
-                    self.env.push_scope();
-                    let pipe_val_name = "__pipe_current__";
-                    self.env.define_force(pipe_val_name, current);
-
-                    let dummy_span = crate::lexer::Span::new(0, 0, 0, 0);
-                    let new_type_args: Vec<Expr> = type_args
-                        .iter()
-                        .map(|arg| rewrite_nested_placeholder(arg, pipe_val_name, &dummy_span))
-                        .collect();
-
-                    let new_expr =
-                        Expr::MoldInst(name.clone(), new_type_args, fields.clone(), span.clone());
-                    let result = self.eval_expr(&new_expr);
-                    self.env.pop_scope();
-                    result
-                } else {
-                    // No placeholder — insert current as first type arg
-                    self.env.push_scope();
-                    let pipe_val_name = "__pipe_current__";
-                    self.env.define_force(pipe_val_name, current);
-
-                    let dummy_span = crate::lexer::Span::new(0, 0, 0, 0);
-                    let mut new_type_args =
-                        vec![Expr::Ident(pipe_val_name.to_string(), dummy_span)];
-                    new_type_args.extend(type_args.iter().cloned());
-
-                    let new_expr =
-                        Expr::MoldInst(name.clone(), new_type_args, fields.clone(), span.clone());
-                    let result = self.eval_expr(&new_expr);
-                    self.env.pop_scope();
-                    result
-                }
-            }
-            Expr::Ident(name, _) => {
-                // Identifier in pipeline: evaluate it, and if it's a function, call it with current
-                let step_val = match self.eval_expr(step)? {
-                    Signal::Value(v) => v,
-                    other => return Ok(other),
-                };
-                match step_val {
-                    Value::Function(ref func) => {
-                        // Call the function with current as the only argument
-                        let args = vec![current];
-                        self.call_function_with_values(func, &args)
-                            .map(Signal::Value)
-                    }
-                    _ => Err(RuntimeError {
-                        message: format!(
-                            "Pipeline step '{}' resolved to a non-function value",
-                            name
-                        ),
-                    }),
-                }
-            }
-            _ => {
-                // General case: bind _ to current and evaluate
-                self.env.push_scope();
-                self.env.define_force("_", current);
-                let result = self.eval_expr(step);
-                self.env.pop_scope();
-                result
-            }
+            _ => Err(RuntimeError {
+                message: format!(
+                    "[E1544] Pipeline stage evaluated to a non-function value: {}. \
+                     A `_`-free stage is evaluated as written and must produce a \
+                     function for the piped value. Hint: use `_` to mark the \
+                     injection position (`x => f(_, a)`), or an empty slot for \
+                     partial application (`x => f(, a)`).",
+                    step_val.to_error_display(200)
+                ),
+            }),
         }
     }
 

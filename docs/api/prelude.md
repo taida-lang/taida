@@ -351,15 +351,19 @@ exit code: Int => :Int
 
 ```taida fragment
 | configValid |> startServer()
-| _           |> stderr("config 不正") => exit(2)
+| _ |> exit(2)
 ```
 
+(`stderr(...) => exit(2)` のようなパイプ連結は使えません — `exit(2)` は
+`Int` に評価される即時呼び出しなので、関数でない値へのパイプとして
+`[E1544]` になります。メッセージを出してから終了したい場合は、関数本体
+など文を並べられる位置で `stderr(...)` と `exit(2)` を別文に分けます。)
+
 「致命的エラーで終了したい」だけのケースは `exit(1)` ではなく `><` を
-使う方が Taida 流です:
+使う方が Taida 流です。`><` はパイプ末尾にも置けます:
 
 ```taida fragment
-| has_error |> stderr("致命的エラー") => ><
-| _         |> stdout("正常終了")
+"致命的エラー" => stderr(_) => ><
 ```
 
 ---
@@ -656,8 +660,9 @@ Div[10, 0]().has_value   // false
 ```taida fragment
 result <= If[x > 0, "positive", "negative"]()
 
-// パイプラインで _ を複数回参照 (clamp パターン)
-150 => If[_ > 100, 100, _]() => clamped   // 100
+// パイプラインで前段値を複数回使う (clamp パターン):
+// `_` は 1 ステージ 1 個までなので、束縛転送で名前を付ける
+150 => v => If[v > 100, 100, v]() => clamped   // 100
 ```
 
 `If` は **2 分岐向き** です。3 分岐以上は `| cond |> value` 構文を使用
