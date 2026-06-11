@@ -2218,3 +2218,165 @@ fn test_c12b_023_wasm_edge_rejects_concat_tag() {
         &["reserved for compiler-internal use"],
     );
 }
+
+/// Test: the well-known `fetch` capability (kind cloudflare/fetch) is
+/// available without any wrangler manifest, emits the fetch/send step
+/// chain over the wire, and decodes the resumed WebResponse-shaped value.
+#[test]
+fn wasm_edge_handler_host_call_fetch_capability_node() {
+    if Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("node not found, skipping wasm-edge fetch HostCall runtime test");
+        return;
+    }
+
+    let dir = unique_temp_dir("taida_wasm_edge_host_call_fetch");
+    let td_path = dir.join("handler.td");
+    let wasm_path = dir.join("handler.wasm");
+    let js_path = dir.join("host_call_fetch.js");
+    // No wrangler.jsonc on purpose: the fetch capability is injected by the
+    // manifest reader unconditionally (Workers always expose global fetch).
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text, HostCall, HostStep, HostCapability)
+
+CFFETCH <= "cloudflare/fetch"
+
+handle req: WebRequest =
+  fetcher <= HostCapability["fetch", CFFETCH]()
+  out: WebRequest <= @(
+    method <= "POST",
+    path <= "/exchange",
+    rawQuery <= "",
+    query <= req.query,
+    headers <= req.headers,
+    body <= req.body
+  )
+  resp <=< Cage[fetcher, HostCall[@[HostStep["fetch", @["https://api.example.com/token"]](), HostStep["send", @[out]]()], WebResponse]()]()
+  text("upstream=" + resp.status.toString())
+=> :WebResponse
+"#;
+    std::fs::write(&td_path, source).expect("write fetch HostCall handler fixture");
+
+    let err = compile_wasm_edge_handler(&td_path, &wasm_path, "handle");
+    assert!(
+        err.is_none(),
+        "fetch HostCall handler should compile without a wrangler manifest: {:?}",
+        err
+    );
+
+    // The generated glue must carry the well-known fetch bridge.
+    let glue_path = wasm_path.with_extension("edge.js");
+    let glue = std::fs::read_to_string(&glue_path).expect("read generated glue");
+    assert!(
+        glue.contains("taidaFetchCapability"),
+        "generated glue must define the well-known fetch capability bridge"
+    );
+    assert!(
+        glue.contains("envelope.capability === \"fetch\""),
+        "dispatchTaidaHostCall must resolve the fetch capability before env lookup"
+    );
+
+    let wasm_for_js = wasm_path.to_string_lossy();
+    let script = format!(
+        r#"
+const fs = require("fs");
+
+(async () => {{
+  let memory = new WebAssembly.Memory({{ initial: 2 }});
+  const wasm = fs.readFileSync("{wasm_for_js}");
+  const imports = {{
+    env: {{ memory }},
+    wasi_snapshot_preview1: {{
+      fd_write(fd, iovsPtr, iovsLen, nwrittenPtr) {{
+        new DataView(memory.buffer).setUint32(nwrittenPtr, 0, true);
+        return 0;
+      }},
+    }},
+    taida_host: {{
+      env_get() {{ return 0; }},
+      env_get_all() {{ return 0; }},
+    }},
+  }};
+  const {{ instance }} = await WebAssembly.instantiate(wasm, imports);
+  if (instance.exports.memory) {{
+    memory = instance.exports.memory;
+  }}
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const request = encoder.encode(JSON.stringify({{
+    method: "POST",
+    path: "/auth/callback",
+    rawQuery: "",
+    query: [],
+    headers: [{{ name: "accept", value: "application/json" }}],
+    bodyBase64: "Y29kZT14",
+  }}));
+  const reqPtr = instance.exports.taida_abi_web_alloc(request.length);
+  new Uint8Array(memory.buffer, reqPtr, request.length).set(request);
+  const handle = instance.exports.taida_abi_web_start(reqPtr, request.length);
+  if (instance.exports.taida_abi_web_poll(handle) !== 1) throw new Error("expected host_call_pending");
+  const pending = JSON.parse(decoder.decode(new Uint8Array(
+    memory.buffer,
+    instance.exports.taida_abi_web_out_ptr(handle),
+    instance.exports.taida_abi_web_out_len(handle)
+  )));
+  if (pending.capability !== "fetch") throw new Error("bad capability " + pending.capability);
+  if (pending.steps.length !== 2) throw new Error("bad step count " + pending.steps.length);
+  if (pending.steps[0].method !== "fetch") throw new Error("missing fetch step");
+  if (pending.steps[0].args[0] !== "https://api.example.com/token") throw new Error("bad url arg");
+  if (pending.steps[1].method !== "send") throw new Error("missing send step");
+  const sent = pending.steps[1].args[0];
+  if (sent.method !== "POST") throw new Error("outbound method lost");
+  if (sent.bodyBase64 !== "Y29kZT14") throw new Error("outbound body lost");
+  if (!sent.headers.some((h) => h.name === "accept")) throw new Error("outbound headers lost");
+
+  const resume = encoder.encode(JSON.stringify({{
+    id: pending.id,
+    ok: true,
+    value: {{
+      status: 203,
+      headers: [{{ name: "content-type", value: "application/json" }}],
+      bodyBase64: "e30=",
+    }},
+  }}));
+  const resumePtr = instance.exports.taida_abi_web_alloc(resume.length);
+  new Uint8Array(memory.buffer, resumePtr, resume.length).set(resume);
+  instance.exports.taida_abi_web_resume(handle, resumePtr, resume.length);
+  if (instance.exports.taida_abi_web_poll(handle) !== 0) throw new Error("expected response_ready");
+  const raw = decoder.decode(new Uint8Array(
+    memory.buffer,
+    instance.exports.taida_abi_web_out_ptr(handle),
+    instance.exports.taida_abi_web_out_len(handle)
+  ));
+  instance.exports.taida_abi_web_free(handle);
+  console.log(raw);
+}})().catch((err) => {{
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+}});
+"#
+    );
+    std::fs::write(&js_path, script).expect("write fetch node harness");
+
+    let run = Command::new("node")
+        .arg(&js_path)
+        .output()
+        .expect("node fetch HostCall harness should run");
+    assert!(
+        run.status.success(),
+        "node fetch HostCall harness failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    // "upstream=203" base64 is dXBzdHJlYW09MjAz
+    assert!(
+        stdout.contains(r#""status":200"#) && stdout.contains("dXBzdHJlYW09MjAz"),
+        "fetch HostCall resume should decode the upstream status, got: {}",
+        stdout
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}

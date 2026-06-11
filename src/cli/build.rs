@@ -2736,13 +2736,29 @@ pub(crate) fn load_wrangler_host_capability_manifest(
     })
 }
 
+/// Well-known capability name for the ambient outbound `fetch` of the edge
+/// runtime. Unlike every other capability it is not a wrangler binding —
+/// Cloudflare Workers always expose global `fetch` — so the manifest reader
+/// injects it unconditionally and the generated glue resolves it to a
+/// `globalThis.fetch` bridge instead of `env[name]`.
+pub(crate) const WASM_EDGE_FETCH_CAPABILITY_NAME: &str = "fetch";
+pub(crate) const WASM_EDGE_FETCH_CAPABILITY_KIND: &str = "cloudflare/fetch";
+
 pub(crate) fn wasm_edge_host_capability_manifest_for_source(
     source_path: &Path,
 ) -> Result<Vec<(String, String)>, String> {
-    match find_wrangler_manifest_for_source(source_path) {
-        Some(path) => load_wrangler_host_capability_manifest(&path),
-        None => Ok(Vec::new()),
+    let mut capabilities = match find_wrangler_manifest_for_source(source_path) {
+        Some(path) => load_wrangler_host_capability_manifest(&path)?,
+        None => Vec::new(),
+    };
+    let fetch_pair = (
+        WASM_EDGE_FETCH_CAPABILITY_NAME.to_string(),
+        WASM_EDGE_FETCH_CAPABILITY_KIND.to_string(),
+    );
+    if !capabilities.contains(&fetch_pair) {
+        capabilities.push(fetch_pair);
     }
+    Ok(capabilities)
 }
 
 pub(crate) fn severity_to_kind(severity: &str) -> &'static str {
@@ -2844,4 +2860,63 @@ pub(crate) struct StagedJsCommit {
     pub(crate) final_path: PathBuf,
     pub(crate) temp_path: PathBuf,
     pub(crate) backup_path: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod wasm_edge_manifest_tests {
+    use super::*;
+
+    /// The fetch capability is ambient on the edge runtime (global fetch),
+    /// so the wasm-edge manifest reader injects it whether or not a wrangler
+    /// manifest exists or declares bindings.
+    #[test]
+    fn wasm_edge_manifest_injects_well_known_fetch_capability() {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_fetch_manifest_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        // Stop the upward wrangler search at this directory.
+        fs::write(dir.join("taida.toml"), "").expect("write search stop marker");
+        let entry = dir.join("entry.td");
+        fs::write(&entry, "stdout(\"x\")\n").expect("write entry");
+
+        let manifest = wasm_edge_host_capability_manifest_for_source(&entry)
+            .expect("manifest without wrangler");
+        assert_eq!(
+            manifest,
+            vec![(
+                WASM_EDGE_FETCH_CAPABILITY_NAME.to_string(),
+                WASM_EDGE_FETCH_CAPABILITY_KIND.to_string()
+            )],
+            "fetch must be injected even with no wrangler manifest"
+        );
+
+        fs::write(
+            dir.join("wrangler.jsonc"),
+            r#"{ "d1_databases": [ { "binding": "TAIDA_DB", "database_id": "x" } ] }"#,
+        )
+        .expect("write wrangler manifest");
+        let manifest = wasm_edge_host_capability_manifest_for_source(&entry)
+            .expect("manifest with wrangler");
+        assert!(
+            manifest.contains(&("TAIDA_DB".to_string(), "cloudflare/d1".to_string())),
+            "declared D1 binding must survive: {:?}",
+            manifest
+        );
+        assert!(
+            manifest.contains(&(
+                WASM_EDGE_FETCH_CAPABILITY_NAME.to_string(),
+                WASM_EDGE_FETCH_CAPABILITY_KIND.to_string()
+            )),
+            "fetch must be appended alongside declared bindings: {:?}",
+            manifest
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }

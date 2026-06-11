@@ -103,7 +103,9 @@ envelope や host adapter の allow-list には載りません。
 `taida-lang/net` は現行公開 API が listener / HTTP codec runtime に寄って
 いるため、`wasm-edge` では引き続き解禁しません。エッジ環境の outbound fetch
 や KV / D1 / Durable Object のような binding を持つ機能は
-`taida-lang/abi` の Host capability ABI で扱います。
+`taida-lang/abi` の Host capability ABI で扱います。outbound fetch は
+well-known capability `("fetch", "cloudflare/fetch")` として `wasm-edge` の
+manifest reader が常時注入します ([`docs/api/abi.md`](../api/abi.md) §3.1)。
 
 ---
 

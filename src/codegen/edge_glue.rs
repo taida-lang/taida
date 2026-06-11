@@ -401,10 +401,51 @@ async function readTaidaWebSession(exports, memory, decoder, encoder, session, e
     throw new Error("handler ABI poll limit exceeded");
 }}
 
+// Well-known `fetch` capability (kind cloudflare/fetch): outbound HTTP
+// through the ambient Workers fetch. The step chain mirrors the D1
+// prepare/bind shape so every step keeps a homogeneous argument list:
+//   HostStep["fetch", @[url]] -> HostStep["send", @[webRequest]]
+// `send` resolves to a WebResponse-shaped JSON value
+// ({{status, headers, bodyBase64}}). Bodies are buffered; redirects follow
+// the platform default.
+const taidaFetchCapability = {{
+  fetch(url) {{
+    return {{
+      async send(req) {{
+        req = req && typeof req === "object" ? req : {{}};
+        const headers = new Headers();
+        for (const header of req.headers || []) {{
+          if (header && typeof header.name === "string" && typeof header.value === "string") {{
+            headers.append(header.name, header.value);
+          }}
+        }}
+        const method = typeof req.method === "string" && req.method ? req.method : "GET";
+        const init = {{ method, headers }};
+        const bodyBytes = base64ToUint8Array(req.bodyBase64 || "");
+        if (bodyBytes.length > 0 && method !== "GET" && method !== "HEAD") {{
+          init.body = bodyBytes;
+        }}
+        const resp = await fetch(String(url), init);
+        const respHeaders = [];
+        resp.headers.forEach((value, key) => {{
+          respHeaders.push({{ name: key, value }});
+        }});
+        return {{
+          status: resp.status,
+          headers: respHeaders,
+          bodyBase64: arrayBufferToBase64(await resp.arrayBuffer()),
+        }};
+      }},
+    }};
+  }},
+}};
+
 async function dispatchTaidaHostCall(envelope, env) {{
     const id = envelope.id;
     try {{
-      let target = env[envelope.capability];
+      let target = envelope.capability === "fetch"
+        ? taidaFetchCapability
+        : env[envelope.capability];
       for (const step of envelope.steps) {{
         target = await target[step.method](...step.args);
       }}
