@@ -65,6 +65,19 @@ fn extract_source_tarball_safely(archive_path: &Path, pkg_dir: &Path) -> Result<
     {
         let mut entry = entry_result.map_err(|e| format!("failed to read tar entry: {}", e))?;
         let entry_type = entry.header().entry_type();
+        // GitHub tag archives (`archive/refs/tags/<v>.tar.gz`) always
+        // lead with a pax global header (`pax_global_header`) carrying
+        // the commit id, and pax extended headers may annotate
+        // individual entries. They are metadata records — the reader
+        // applies them internally and they never materialise on disk —
+        // so skip them instead of failing closed. Without this, every
+        // real GitHub source archive is rejected at the first entry.
+        if matches!(
+            entry_type,
+            tar::EntryType::XGlobalHeader | tar::EntryType::XHeader
+        ) {
+            continue;
+        }
         if entry_type.is_symlink()
             || entry_type.is_hard_link()
             || entry_type.is_character_special()
@@ -2551,6 +2564,49 @@ mod tests {
             std::fs::read_to_string(pkg_dir.join("main.td")).unwrap(),
             "stdout(\"ok\")\n"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_extract_source_tarball_skips_pax_headers() {
+        // Mirrors a real GitHub `archive/refs/tags/<v>.tar.gz`, which
+        // always leads with a pax global header (`pax_global_header`)
+        // carrying the commit id; pax extended headers may also
+        // annotate individual entries. Both are metadata records that
+        // never materialise on disk — they must be skipped, not fatal.
+        let pax_global = b"52 comment=0123456789abcdef0123456789abcdef01234567\n";
+        let pax_local = b"30 mtime=1718000000.000000000\n";
+        let (root, archive_path) = write_tar_gz("pax_headers", |builder| {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::XGlobalHeader);
+            header.set_size(pax_global.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "pax_global_header", &pax_global[..])
+                .unwrap();
+
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::XHeader);
+            header.set_size(pax_local.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "pkg/PaxHeaders.0/main.td", &pax_local[..])
+                .unwrap();
+
+            append_tar_file(builder, "pkg/main.td", b"stdout(\"ok\")\n");
+        });
+        let pkg_dir = root.join("out");
+        extract_source_tarball_safely(&archive_path, &pkg_dir)
+            .expect("pax headers must be skipped, not fatal");
+        assert_eq!(
+            std::fs::read_to_string(pkg_dir.join("main.td")).unwrap(),
+            "stdout(\"ok\")\n"
+        );
+        // The pax records themselves must not appear in the output.
+        assert!(!pkg_dir.join("pax_global_header").exists());
+        assert!(!pkg_dir.join("PaxHeaders.0").exists());
         let _ = std::fs::remove_dir_all(root);
     }
 
