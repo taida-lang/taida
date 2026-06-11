@@ -701,6 +701,7 @@ impl Interpreter {
                     return_type: fd.return_type.clone(),
                     module_type_defs: None,
                     module_enum_defs: None,
+                    module_symbols: None,
                 });
                 // Use define() to prevent overwriting existing variables/functions.
                 // define_force is reserved for internal use only (pipeline, closures, params, prelude).
@@ -1532,6 +1533,7 @@ impl Interpreter {
                         return_type: func_def.return_type.clone(),
                         module_type_defs: None,
                         module_enum_defs: None,
+                        module_symbols: None,
                     });
                     result_fields.push(("__unmold".to_string(), unmold_func));
                 }
@@ -1555,6 +1557,7 @@ impl Interpreter {
                         return_type: func_def.return_type.clone(),
                         module_type_defs: None,
                         module_enum_defs: None,
+                        module_symbols: None,
                     };
                     return self.call_function_preserving_signals(&solidify_func, &[]);
                 }
@@ -1581,6 +1584,7 @@ impl Interpreter {
                     return_type: None,
                     module_type_defs: None,
                     module_enum_defs: None,
+                    module_symbols: None,
                 })))
             }
 
@@ -1805,6 +1809,7 @@ impl Interpreter {
                     return_type: Some((**ret).clone()),
                     module_type_defs: None,
                     module_enum_defs: None,
+                    module_symbols: None,
                 }))
             }
         }
@@ -1895,6 +1900,7 @@ impl Interpreter {
             return_type: None,
             module_type_defs: None,
             module_enum_defs: None,
+            module_symbols: None,
         })))
     }
 
@@ -2246,6 +2252,45 @@ impl Interpreter {
 
     // ── Function Calls ──────────────────────────────────────
 
+    /// F62B-001: propagate a module context onto a function value that has
+    /// none of its own.
+    ///
+    /// Function values stored inside closure snapshots and inside the module
+    /// symbol table are definition-time originals: their closures are
+    /// truncated to the symbols defined before them, and they carry no
+    /// module typedef / enum / symbol attachments. Calling such an original
+    /// directly loses the defining module's late-defined siblings (and JSON
+    /// schemas) at chain depth 3+. Whenever a function is resolved *through*
+    /// a module context (the closure scope of a module function, the module
+    /// symbol table, a trampoline retarget), re-attach that context so the
+    /// resolution is self-sustaining at any depth. Values that already carry
+    /// their own module context (e.g. functions imported from a different
+    /// module) are returned unchanged.
+    fn attach_module_context(val: &Value, ctx: &FuncValue) -> Value {
+        if ctx.module_symbols.is_none()
+            && ctx.module_type_defs.is_none()
+            && ctx.module_enum_defs.is_none()
+        {
+            return val.clone();
+        }
+        if let Value::Function(fv) = val
+            && fv.module_symbols.is_none()
+            && fv.name != "<lambda>"
+            && fv.name != "<partial>"
+        {
+            let mut attached = fv.clone();
+            attached.module_symbols = ctx.module_symbols.clone();
+            if attached.module_type_defs.is_none() {
+                attached.module_type_defs = ctx.module_type_defs.clone();
+            }
+            if attached.module_enum_defs.is_none() {
+                attached.module_enum_defs = ctx.module_enum_defs.clone();
+            }
+            return Value::Function(attached);
+        }
+        val.clone()
+    }
+
     /// Call a function with arguments, with tail call optimization.
     ///
     /// When a function makes a tail call (self-recursive or mutual-recursive),
@@ -2349,7 +2394,26 @@ impl Interpreter {
             // can shadow captured names without "already defined" errors)
             self.env.push_scope();
             for (name, val) in current_func.closure.iter() {
-                self.env.define_force(name, val.clone());
+                // F62B-001: function values inside a closure snapshot are the
+                // definition-time originals — without a module context of
+                // their own, a nested call into them loses the module's
+                // late-defined siblings (and JSON schemas) from depth 3 on.
+                // Re-attach the current function's module context so the
+                // chain never degrades.
+                self.env
+                    .define_force(name, Self::attach_module_context(val, &current_func));
+            }
+            if let Some(mod_syms) = current_func.module_symbols.clone() {
+                // F62B-001: complete the scope with module-level siblings the
+                // definition-time closure missed (functions defined after this
+                // one). Closure entries win — they are the same module values,
+                // just captured earlier — so only fill the gaps.
+                for (name, val) in mod_syms.iter() {
+                    if !current_func.closure.contains_key(name) {
+                        self.env
+                            .define_force(name, Self::attach_module_context(val, &current_func));
+                    }
+                }
             }
 
             // Create local scope for parameters and function body
@@ -2435,12 +2499,25 @@ impl Interpreter {
                         // Mutual tail call: switch to the target function.
                         // First check the current env scope (handles global/module-level functions).
                         // If not found, check the closure of the current function (handles
-                        // imported functions captured in the closure scope, which was already popped).
+                        // imported functions captured in the closure scope, which was already
+                        // popped), then the defining module's symbol table (F62B-001:
+                        // siblings defined after the current function are not in its
+                        // definition-time closure).
                         let target_val = self
                             .env
                             .get(&target_name)
                             .cloned()
-                            .or_else(|| current_func.closure.get(&target_name).cloned());
+                            .or_else(|| current_func.closure.get(&target_name).cloned())
+                            .or_else(|| {
+                                current_func
+                                    .module_symbols
+                                    .as_ref()
+                                    .and_then(|syms| syms.get(&target_name).cloned())
+                            })
+                            // F62B-001: a target fetched through the module context is a
+                            // definition-time original — inherit the chain's module
+                            // context so the next hop keeps resolving siblings.
+                            .map(|v| Self::attach_module_context(&v, &current_func));
                         let target_func_opt = target_val.and_then(|v| match v {
                             Value::Function(f) => Some(f),
                             _ => None,

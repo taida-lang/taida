@@ -5551,6 +5551,7 @@ fn make_streaming_handler(stmts: Vec<Statement>) -> Value {
         return_type: None,
         module_type_defs: None,
         module_enum_defs: None,
+        module_symbols: None,
     })
 }
 
@@ -7321,6 +7322,7 @@ fn test_http_serve_tls_arg_non_pack_rejected() {
             return_type: None,
             module_type_defs: None,
             module_enum_defs: None,
+            module_symbols: None,
         }),
     );
 
@@ -7366,6 +7368,7 @@ fn test_http_serve_tls_cert_key_returns_phase2_error() {
             return_type: None,
             module_type_defs: None,
             module_enum_defs: None,
+            module_symbols: None,
         }),
     );
 
