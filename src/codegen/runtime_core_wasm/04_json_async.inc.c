@@ -1166,6 +1166,21 @@ static void _wc_jb_append_indent(_wc_json_buf *jb, int indent, int depth) {
 /* Forward declare */
 static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, int depth, int type_hint);
 
+/* F62B-019: map a container element's recorded kind (WASM_TAG_* | aux) to
+   the serializer's type_hint (0 none / 1 Int / 2 Float / 3 Str / 4 Bool) so
+   list elements are rendered by their recorded kind instead of the pointer
+   heuristics (a Split[] result's Str elements rendered as "{}" / raw ints
+   without this). Pack/list/unknown kinds keep the structural walk. */
+static int _wc_elem_hint_from_ekind(uint32_t ekind) {
+    switch (ekind & 0xFFu) {
+        case 0: return 1;  /* WASM_TAG_INT */
+        case 1: return 2;  /* WASM_TAG_FLOAT */
+        case 2: return 4;  /* WASM_TAG_BOOL */
+        case 3: return 3;  /* WASM_TAG_STR */
+        default: return 0;
+    }
+}
+
 /* Helper: check whether a wasm value is a Gorillax / RelaxedGorillax
    (fc=4, hash0=HASH_HAS_VALUE, hash2=HASH___ERROR). Mirrors
    `_wasm_is_gorillax` in 01_core.inc.c but staying local to 04 to avoid
@@ -1256,19 +1271,26 @@ static void _wc_json_serialize_pack_fields(_wc_json_buf *jb, int64_t *pack, int6
            them so jsonEncode matches the interpreter. */
         if (!is_monadic && fname[0] == '_' && fname[1] == '_') continue;
 
-        int64_t ftype = taida_lookup_field_type(field_hash, 0);
-        /* `_wasm_lookup_field_type` returns -1 (not 0) for unregistered
-           hashes; normalise to 0 so downstream "unset" checks work. */
-        if (ftype < 0) ftype = 0;
-        /* Pull per-slot tag when the global registry has no type — not
-           monadic-specific: every pack literal stamps per-field tags,
-           and a FLOAT payload is unrecoverable from the value alone
-           (native twin). */
-        if (ftype == 0) {
-            int64_t slot_tag = pack[1 + i * 3 + 1];
-            if (slot_tag == WASM_TAG_STR) ftype = 3;
-            else if (slot_tag == WASM_TAG_BOOL) ftype = 4;
-            else if (slot_tag == WASM_TAG_FLOAT) ftype = 2;
+        /* F62B-019: the per-slot tag wins over the global field-name
+           registry. The registry keys on the FIELD NAME hash alone, so two
+           pack types sharing a name with different types (`tags: Str` on a
+           D1 row vs `tags: @[Str]` on the response shape) corrupted each
+           other — a registry hit of Str stringified the list pointer. The
+           registry survives only for slots whose tag is INT(0), which is
+           indistinguishable from "untagged". */
+        int64_t slot_tag = pack[1 + i * 3 + 1];
+        int64_t ftype;
+        if (slot_tag == WASM_TAG_STR) ftype = 3;
+        else if (slot_tag == WASM_TAG_BOOL) ftype = 4;
+        else if (slot_tag == WASM_TAG_FLOAT) ftype = 2;
+        else if (slot_tag == WASM_TAG_PACK || slot_tag == 5 /* LIST */
+                 || slot_tag == 6 /* CLOSURE */) {
+            ftype = 0; /* structural walk */
+        } else {
+            ftype = taida_lookup_field_type(field_hash, 0);
+            /* `_wasm_lookup_field_type` returns -1 (not 0) for unregistered
+               hashes; normalise to 0 so downstream "unset" checks work. */
+            if (ftype < 0) ftype = 0;
         }
         /* Lax payload force (see sibling comment above). Applies to
            `__value` and `__default` in Lax packs so both render with
@@ -1414,7 +1436,7 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
         for (int64_t i = 0; i < list_len; i++) {
             if (i > 0) _wc_jb_append_char(jb, ',');
             if (indent > 0) _wc_jb_append_indent(jb, indent, depth + 1);
-            _wc_json_serialize_typed(jb, list[4 + i], indent, depth + 1, 0);
+            _wc_json_serialize_typed(jb, list[4 + i], indent, depth + 1, _wc_elem_hint_from_ekind(_wasm_elem_kind_at(list, i)));
         }
         if (indent > 0 && list_len > 0) _wc_jb_append_indent(jb, indent, depth);
         _wc_jb_append_char(jb, ']');
@@ -1439,7 +1461,7 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
         for (int64_t i = 0; i < list_len; i++) {
             if (i > 0) _wc_jb_append_char(jb, ',');
             if (indent > 0) _wc_jb_append_indent(jb, indent, depth + 1);
-            _wc_json_serialize_typed(jb, list[4 + i], indent, depth + 1, 0);
+            _wc_json_serialize_typed(jb, list[4 + i], indent, depth + 1, _wc_elem_hint_from_ekind(_wasm_elem_kind_at(list, i)));
         }
         if (indent > 0 && list_len > 0) _wc_jb_append_indent(jb, indent, depth);
         _wc_jb_append_char(jb, ']');

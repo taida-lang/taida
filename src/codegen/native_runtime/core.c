@@ -12718,22 +12718,24 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
         if (!is_monadic && fname[0] == '_' && fname[1] == '_') {
             continue;
         }
-        int ftype = taida_lookup_field_type(field_hash);
-        // C25B-028: pull per-slot tag from the pack layout so the
-        // payload uses the correct formatter (Int/Float/Str vs pointer
-        // heuristic). Slot tag of 0 means TAIDA_TAG_INT / untagged —
-        // the caller-level force_int_default_for_lax compensates for
-        // Lax `__default`/`__value` ambiguity. Reading the slot is not
-        // monadic-specific: every pack literal stamps per-field tags,
-        // and a FLOAT payload is unrecoverable from the value alone
-        // (it serialised as its raw bit pattern before this read).
-        if (ftype == 0) {
-            taida_val slot_tag = pack[2 + i * 3 + 1];
-            if (slot_tag == TAIDA_TAG_STR) ftype = 3;
-            else if (slot_tag == TAIDA_TAG_BOOL) ftype = 4;
-            else if (slot_tag == TAIDA_TAG_FLOAT) ftype = 2;
-            // TAIDA_TAG_INT (0) / other: leave as 0 and fall back to
-            // heuristic inside json_serialize_typed.
+        // F62B-019 (wasm twin): the per-slot tag wins over the global
+        // field-name registry — the registry keys on the field NAME hash
+        // alone, so two pack types sharing a name with different types
+        // (`tags: Str` on a D1 row vs `tags: @[Str]` on the response
+        // shape) corrupted each other. Slot tag of 0 means
+        // TAIDA_TAG_INT / untagged (indistinguishable), so only that
+        // case still consults the registry; a known non-scalar slot
+        // (PACK/LIST/CLOSURE) forces the structural walk.
+        taida_val slot_tag = pack[2 + i * 3 + 1];
+        int ftype;
+        if (slot_tag == TAIDA_TAG_STR) ftype = 3;
+        else if (slot_tag == TAIDA_TAG_BOOL) ftype = 4;
+        else if (slot_tag == TAIDA_TAG_FLOAT) ftype = 2;
+        else if (slot_tag == TAIDA_TAG_PACK || slot_tag == 5 /* LIST */
+                 || slot_tag == 6 /* CLOSURE */) {
+            ftype = 0; /* structural walk */
+        } else {
+            ftype = taida_lookup_field_type(field_hash);
         }
         // Lax payload: force formatting on `__value` and `__default`
         // based on the sibling slot's tag so `Value::Int(0)` doesn't

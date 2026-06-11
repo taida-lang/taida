@@ -2299,8 +2299,15 @@ static int _wc_utf8_decode_one(const unsigned char *buf, int len, int *consumed,
 int64_t taida_str_split(int64_t s_raw, int64_t sep_raw) {
     const char *s = (const char *)s_raw;
     const char *sep = (const char *)sep_raw;
-    if (!s) return taida_list_new();
+    /* F62B-019: fragments are Str — record the elem kind so display /
+       jsonEncode render them as strings instead of probing pointers. */
+    if (!s) {
+        int64_t empty = taida_list_new();
+        taida_list_set_elem_tag(empty, 3 /* STR */);
+        return empty;
+    }
     int64_t list = taida_list_new();
+    taida_list_set_elem_tag(list, 3 /* STR */);
     if (!sep || _wf_strlen(sep) == 0) {
         /* Locked split("") semantics (B11 method lock, matches the
            interpreter / native / JS): chars split with no empty
