@@ -1503,15 +1503,9 @@ static int _wi_utf8_decode_one(const unsigned char *buf, int len, int *consumed,
     return 0;
 }
 
-int64_t taida_utf8_encode_mold(int64_t value) {
-    const char *s = (const char *)(intptr_t)value;
-    if (!s || !_wi_looks_like_string(value)) {
-        return taida_lax_empty(taida_bytes_default_value());
-    }
-    int slen = _wi_strlen(s);
-    int64_t out = taida_bytes_from_raw((int64_t)(intptr_t)s, (int64_t)slen);
-    return taida_lax_new(out, taida_bytes_default_value());
-}
+/* taida_utf8_encode_mold moved to runtime_core_wasm/02_containers.inc.c:
+   Bytes use the shared TAIDBYT layout, so the constructor is core-safe and
+   the mold is available on every WASM profile. */
 
 /* taida_utf8_decode_mold moved to runtime_core_wasm/02_containers.inc.c:
    it only READS Bytes (shared TAIDBYT layout) and returns Lax[Str], so it

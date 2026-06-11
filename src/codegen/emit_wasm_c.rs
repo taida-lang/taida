@@ -1586,11 +1586,12 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         {
             format!("int64_t {}(int64_t v);", name)
         }
-        // Utf8Decode only READS Bytes (shared TAIDBYT layout) and returns
-        // Lax[Str]; it lives in the core runtime and links on every profile.
-        "taida_utf8_decode_mold" => "int64_t taida_utf8_decode_mold(int64_t v);".to_string(),
-        "taida_utf8_encode_mold"
-        | "taida_utf8_encode_scalar" | "taida_utf8_decode_one"
+        // Utf8Decode / Utf8Encode live in the core runtime (the shared
+        // TAIDBYT Bytes layout made both core-safe) and link everywhere.
+        "taida_utf8_decode_mold" | "taida_utf8_encode_mold" => {
+            format!("int64_t {}(int64_t v);", name)
+        }
+        "taida_utf8_encode_scalar" | "taida_utf8_decode_one"
         | "taida_utf8_single_scalar"
             if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
         {

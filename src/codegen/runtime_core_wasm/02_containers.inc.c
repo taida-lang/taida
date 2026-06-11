@@ -2566,6 +2566,33 @@ int64_t taida_utf8_decode_mold(int64_t value) {
     return taida_lax_new((int64_t)(intptr_t)out, taida_str_alloc(0));
 }
 
+/* Empty Bytes for Lax defaults (core-local; the public
+   taida_bytes_default_value lives in the profile runtimes). */
+static int64_t _core_bytes_empty(void) {
+    int64_t *bytes = (int64_t *)wasm_alloc(2 * 8);
+    if (!bytes) return 0;
+    bytes[0] = TAIDA_WASM_BYTES_MAGIC;
+    bytes[1] = 0;
+    return (int64_t)(intptr_t)bytes;
+}
+
+/// Utf8Encode[str]() -> Lax[Bytes]. Core twin of the rt_wasi original:
+/// Bytes use the shared TAIDBYT layout, so the constructor is core-safe.
+int64_t taida_utf8_encode_mold(int64_t value) {
+    const char *s = (const char *)(intptr_t)value;
+    if (!s || !_looks_like_string(value)) {
+        return taida_lax_empty(_core_bytes_empty());
+    }
+    int slen = _wf_strlen(s);
+    int64_t len = (int64_t)slen;
+    int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)((2 + len) * 8));
+    if (!bytes) return taida_lax_empty(_core_bytes_empty());
+    bytes[0] = TAIDA_WASM_BYTES_MAGIC;
+    bytes[1] = len;
+    for (int64_t i = 0; i < len; i++) bytes[2 + i] = (int64_t)(unsigned char)s[i];
+    return taida_lax_new((int64_t)(intptr_t)bytes, _core_bytes_empty());
+}
+
 /// Chars[str]() -- split into code-point strings (native mirror).
 int64_t taida_str_chars(int64_t s_raw) {
     const char *s = (const char *)s_raw;

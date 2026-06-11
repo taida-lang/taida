@@ -907,7 +907,9 @@ mod tests {
         //   equality widens to, so past-2^53 Int/Float crossings stop
         //   splitting hash buckets the equality merges. -516.
         //   1,325,919 -> 1,325,403.
-        const EXPECTED_TOTAL_LEN: usize = 1_325_403;
+        // 2026-06-12 F62B-017 (core.c): taida_str_lt/gt/gte lexicographic
+        //   ordering trio + prototypes for the < / > / >= string arms.
+        const EXPECTED_TOTAL_LEN: usize = 1326116;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1661,7 +1663,9 @@ mod tests {
         //   +317. F1 420,126 -> 420,443.
         // 2026-06-11 numeric fingerprint = f64 image (before the
         //   marker): -516. F1 420,443 -> 419,927.
-        const F1_LEN: usize = 419_927;
+        // 2026-06-12 F62B-017: the taida_str_lt/gt/gte trio + prototypes
+        // land before the marker (F1 419,927 -> 420,640); F2 unchanged.
+        const F1_LEN: usize = 420_640;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

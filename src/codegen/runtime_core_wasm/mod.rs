@@ -258,7 +258,9 @@ mod tests {
         //   (02_containers): taida_str_lt/gt/gte, taida_str_chars, and
         //   taida_utf8_decode_mold (+ _core_utf8_decode_one) move string
         //   ordering and Bytes decoding into the all-profile core.
-        const EXPECTED_TOTAL_LEN: usize = 492216;
+        // 2026-06-12 Utf8Encode joins the core (02_containers) alongside
+        //   Utf8Decode — the TAIDBYT constructor is core-safe.
+        const EXPECTED_TOTAL_LEN: usize = 493316;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),
