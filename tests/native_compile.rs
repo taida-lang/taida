@@ -158,8 +158,7 @@ stdout(result.toString())
 fn expected_native_reject_examples() -> Vec<&'static str> {
     vec![
         "compile_stream", // Native backend does not provide Stream[T]
-        "compile_mutual_recursion",
-        "compile_c12_3_mutual_tail",
+                          // F62B-002: tail-only mutual cycles compile via the dispatcher merge.
     ]
 }
 
@@ -233,12 +232,14 @@ fn test_native_compile_parity_allowlist_guard() {
 }
 
 #[test]
-fn test_native_mutual_recursion_reject_allowlist_pins_examples() {
+fn test_native_mutual_recursion_runs_via_dispatcher_merge() {
+    // F62B-002: tail-only mutual cycles are merged into a self-tail
+    // dispatcher at lowering — the fixtures must NOT be in the reject list.
     let expected_rejects = expected_native_reject_examples();
     for stem in ["compile_mutual_recursion", "compile_c12_3_mutual_tail"] {
         assert!(
-            expected_rejects.contains(&stem),
-            "native mutual-recursion policy must keep `{stem}` in the documented reject allowlist"
+            !expected_rejects.contains(&stem),
+            "tail-only mutual recursion must compile natively; `{stem}` should not be in the reject allowlist"
         );
     }
 }

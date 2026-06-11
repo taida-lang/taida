@@ -793,6 +793,15 @@ fn check_mutual_recursion_native_impl(program: &Program, file: &str) -> Vec<Veri
         return Vec::new();
     }
 
+    // F62B-002: tail-only cycles in the mergeable subset are lowered to a
+    // single self-tail-recursive dispatcher by `graph::mutual_tco` — those
+    // run fine on the C-lowering backends and are exempt from the reject.
+    let mergeable: std::collections::HashSet<String> =
+        crate::graph::mutual_tco::mergeable_tail_cycles(program)
+            .into_iter()
+            .map(|members| members.join("|"))
+            .collect();
+
     let mut findings = Vec::new();
     let mut seen_cycles: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -813,6 +822,10 @@ fn check_mutual_recursion_native_impl(program: &Program, file: &str) -> Vec<Veri
         let mut sorted: Vec<String> = distinct.iter().map(|s| s.to_string()).collect();
         sorted.sort();
         let key = sorted.join("|");
+        if mergeable.contains(&key) {
+            // Tail-only mergeable cycle — handled by the dispatcher merge.
+            continue;
+        }
         if !seen_cycles.insert(key) {
             continue;
         }
@@ -832,11 +845,13 @@ fn check_mutual_recursion_native_impl(program: &Program, file: &str) -> Vec<Veri
 
         let msg = format!(
             "[E0700] Mutual recursion is rejected on Native and wasm targets: {}. \
-             These backends lower mutual cycles to plain call instructions and will \
-             overflow the OS stack at runtime. \
-             Hint: collapse the cycle into a single recursive function and use a \
-             tag / accumulator to switch behaviour, or run the program through the \
-             Interpreter / JS backend (which use a trampoline). See docs/reference/tail_recursion.md.",
+             Only tail-position-only cycles (every cycle call the last operation of a \
+             function body or cond arm, written with full arity) are lowered through \
+             the mutual tail-call dispatcher; this cycle contains a call outside that \
+             subset and would overflow the OS stack at runtime. \
+             Hint: move every mutual call into tail position, or collapse the cycle \
+             into a single recursive function and use a tag / accumulator to switch \
+             behaviour. See docs/reference/tail_recursion.md.",
             path_display.join(" -> ")
         );
 

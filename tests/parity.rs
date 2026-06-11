@@ -1453,12 +1453,10 @@ fn interpreter_skip_list() -> Vec<&'static str> {
 fn native_expected_reject_list() -> Vec<&'static str> {
     vec![
         "compile_stream", // Stream[T] is outside the native backend capability set
-        // E32B-023 (Lock-N): Native and wasm-* lower mutual cycles to
-        // plain calls and SIGSEGV at depth, so the checker now rejects
-        // **any** mutual recursion with `[E0700]`. Interpreter / JS
-        // continue to compile and run these via the trampoline.
-        "compile_mutual_recursion",
-        "compile_c12_3_mutual_tail",
+                          // F62B-002: tail-only mutual cycles are merged into a self-tail
+                          // dispatcher at lowering, so `compile_mutual_recursion` /
+                          // `compile_c12_3_mutual_tail` now compile and run natively.
+                          // Non-tail cycles stay rejected ([E1614] + [E0700]).
     ]
 }
 
@@ -1466,7 +1464,6 @@ fn native_expected_reject_list() -> Vec<&'static str> {
 /// historical Stream capability message for fixtures not listed here.
 fn native_reject_expected_substring(stem: &str) -> &'static str {
     match stem {
-        "compile_mutual_recursion" | "compile_c12_3_mutual_tail" => "[E0700]",
         _ => "unsupported mold type: Stream",
     }
 }

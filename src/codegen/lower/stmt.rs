@@ -12,6 +12,16 @@ use crate::parser::*;
 
 impl Lowering {
     pub fn lower_program(&mut self, program: &Program) -> Result<IrModule, LowerError> {
+        // F62B-002: merge tail-only mutual-recursion cycles into a single
+        // self-tail-recursive dispatcher (+ thin wrappers) so the existing
+        // self-TCO loop machinery applies. The checker exempts exactly the
+        // cycles this transform handles from the [E0700] native reject
+        // (both sides share `mergeable_tail_cycles`).
+        let merged;
+        let program = {
+            merged = crate::graph::mutual_tco::merge_program(program);
+            &merged
+        };
         if !self.typed_expr_table.is_empty()
             && !self.typed_expr_table.residual_unknown_types().is_empty()
         {

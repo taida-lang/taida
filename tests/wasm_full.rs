@@ -739,8 +739,8 @@ const FULL_EXPECTED_REJECTED: &[&str] = &[
 
 /// Examples where the native backend itself fails.
 const FULL_EXPECTED_NATIVE_FAIL: &[&str] = &[
-    "compile_mutual_recursion",
-    "compile_c12_3_mutual_tail",
+    // F62B-002: compile_mutual_recursion / compile_c12_3_mutual_tail now
+    // compile natively via the tail-only mutual-cycle dispatcher merge.
     "compile_stream",
     "helper_val",
     "module_math",
@@ -881,11 +881,13 @@ fn wasm_full_parity_allowlist_guard() {
     //   F56: +compile_f56_secret_carrier (parity-OK across all profiles) -> 69.
     //   F62: +compile_f62b025_pipe_semantics (pipe two-rule semantics,
     //   parity-OK across all profiles) -> 70.
+    //   F62B-002: compile_mutual_recursion + compile_c12_3_mutual_tail leave
+    //   the native-fail list (tail-only mutual cycle dispatcher merge) -> 72.
     assert_eq!(
         expected_parity_ok,
-        70,
+        72,
         "WF-5: parity-OK count drift — got {} = |fixtures {}| - |skip {}| - |rejected {}| - \
-         |native_fail {}| - |diff {}|. Expected 70. Update this constant deliberately.",
+         |native_fail {}| - |diff {}|. Expected 72. Update this constant deliberately.",
         expected_parity_ok,
         all.len(),
         FULL_SKIP_STEMS.len(),
@@ -896,11 +898,13 @@ fn wasm_full_parity_allowlist_guard() {
 }
 
 #[test]
-fn wasm_full_mutual_recursion_native_fail_allowlist_pins_examples() {
+fn wasm_full_mutual_recursion_runs_via_dispatcher_merge() {
+    // F62B-002: tail-only mutual cycles compile natively — the fixtures
+    // must NOT be in the native-fail allowlist.
     for stem in ["compile_mutual_recursion", "compile_c12_3_mutual_tail"] {
         assert!(
-            FULL_EXPECTED_NATIVE_FAIL.contains(&stem),
-            "wasm-full parity policy must keep `{stem}` in the native-fail allowlist"
+            !FULL_EXPECTED_NATIVE_FAIL.contains(&stem),
+            "tail-only mutual recursion must compile; `{stem}` should not be in the native-fail allowlist"
         );
     }
 }
