@@ -333,20 +333,46 @@ fn build_wasm_expect_reject(td: &Path, profile: &str) -> String {
 }
 
 #[test]
-fn random_bytes_rejected_on_wasm_min_and_edge() {
+fn random_bytes_rejected_on_wasm_min() {
+    // F62B-014 companion: wasm-edge gained randomBytes (the generated glue
+    // provides WASI random_get via crypto.getRandomValues), so only
+    // wasm-min still rejects the Bytes producer.
     let td = write_td(
         "rand_reject",
         ">>> taida-lang/crypto => @(randomBytes)\na <= randomBytes(8)\nstdout(a.length().toString())\n",
     );
-    for profile in ["wasm-min", "wasm-edge"] {
-        let stderr = build_wasm_expect_reject(&td, profile);
-        assert!(
-            stderr.contains("taida_crypto_random_bytes") && stderr.contains("does not support"),
-            "{} reject message must name the unsupported runtime function; got: {}",
-            profile,
-            stderr
-        );
-    }
+    let stderr = build_wasm_expect_reject(&td, "wasm-min");
+    assert!(
+        stderr.contains("taida_crypto_random_bytes") && stderr.contains("does not support"),
+        "wasm-min reject message must name the unsupported runtime function; got: {}",
+        stderr
+    );
+    let _ = std::fs::remove_file(&td);
+}
+
+#[test]
+fn random_bytes_compiles_on_wasm_edge() {
+    // F62B-014 companion: the edge profile links taida_crypto_random_bytes
+    // from runtime_edge_host.c. Compile-level gate only — execution is
+    // covered by the node-driven handler tests.
+    let td = write_td(
+        "rand_edge_ok",
+        ">>> taida-lang/crypto => @(randomBytes)\na <= randomBytes(8)\nstdout(a.length().toString())\n",
+    );
+    let wasm = unique("rand_edge_ok", ".wasm");
+    let out = Command::new(taida_bin())
+        .args(["build", "wasm-edge"])
+        .arg(&td)
+        .arg("-o")
+        .arg(&wasm)
+        .output()
+        .expect("spawn taida build");
+    assert!(
+        out.status.success(),
+        "wasm-edge must compile randomBytes; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_file(&wasm);
     let _ = std::fs::remove_file(&td);
 }
 
