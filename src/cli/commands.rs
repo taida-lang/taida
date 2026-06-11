@@ -82,6 +82,13 @@ pub(crate) fn run_source(source: &str, filename: &str, no_check: bool) {
                     println!("{}", line);
                 }
             }
+            // F62B-032: the gorilla literal is the documented fixed
+            // `exit(1)` immediate termination — the interpreter used to
+            // fall through here, display the gorilla value, and exit 0
+            // (native already exits 1).
+            if matches!(val, taida::interpreter::Value::Gorilla) {
+                std::process::exit(1);
+            }
             // If the last value is not Unit and nothing was ever printed
             // via `stdout(...)`, print the value so that `taida expr.td`
             // continues to show the result of a pure-expression script.

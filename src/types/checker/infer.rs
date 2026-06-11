@@ -2872,6 +2872,18 @@ impl TypeChecker {
             return Type::Unknown;
         };
         match last_stmt {
+            // F62B-006: a gorilla arm (`| cond |> ><`) terminates the
+            // program and never produces a value — it must not participate
+            // in arm type unification (guide 07 documents this as the
+            // canonical unreachable-pattern arm). The same goes for a
+            // pipeline that ends in the gorilla literal
+            // (`| cond |> log(...) => ><`).
+            Statement::Expr(Expr::Gorilla(_)) => Type::Unknown,
+            Statement::Expr(Expr::Pipeline(steps, _))
+                if matches!(steps.last(), Some(Expr::Gorilla(_))) =>
+            {
+                Type::Unknown
+            }
             Statement::Expr(e) => self.infer_expr_type(e),
             Statement::Assignment(a) => self.lookup_var(&a.target).unwrap_or(Type::Unknown),
             Statement::UnmoldForward(u) => self.lookup_var(&u.target).unwrap_or(Type::Unknown),
