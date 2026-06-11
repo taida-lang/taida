@@ -1320,11 +1320,12 @@ fn wasm_wasi_parity_allowlist_guard() {
     // F62: +compile_f62b025_pipe_semantics (parity-OK on wasm-wasi) -> 71.
     // F62B-002: compile_mutual_recursion + compile_c12_3_mutual_tail leave
     // the native-fail list (tail-only mutual cycle dispatcher merge) -> 73.
+    // F62B-003: +compile_f62b003_str_molds (search/replace/pad molds) -> 74.
     assert_eq!(
         expected_parity_ok,
-        73,
+        74,
         "WW-3: parity-OK count drift — got {} = |fixtures {}| - |skip {}| - |rejected {}| - \
-         |native_fail {}| - |diff {}|. Expected 73. Update this constant deliberately.",
+         |native_fail {}| - |diff {}|. Expected 74. Update this constant deliberately.",
         expected_parity_ok,
         all.len(),
         WASI_SKIP_STEMS.len(),
@@ -1478,9 +1479,10 @@ fn wasm_wasi_superset_of_wasm_min() {
     // nowMs links on wasm-wasi (69 → 72)
     // F62B-025: compile_f62b025_pipe_semantics added (72 → 73)
     // F62B-002: mutual recursion fixtures compile via dispatcher merge (73 → 75)
+    // F62B-003: compile_f62b003_str_molds added (75 → 76)
     assert_eq!(
-        superset_ok, 75,
-        "WW-3: Expected exactly 75 superset-verified examples, got {}. \
+        superset_ok, 76,
+        "WW-3: Expected exactly 76 superset-verified examples, got {}. \
          If superset coverage improved, update the expected count.",
         superset_ok
     );

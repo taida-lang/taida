@@ -827,7 +827,9 @@ impl Lowering {
             "Str" | "Upper" | "Lower" | "Trim" | "Replace" | "Slice" | "CharAt" | "Repeat"
             | "Pad" | "Join" | "ToFixed"
             // C26B-016 (@c.26, Option B+): `StrOf[span, raw]()` returns Str.
-            | "StrOf" => {
+            | "StrOf"
+            // F62B-003: positional pad / replace-all mold forms return Str.
+            | "ReplaceAll" | "PadLeft" | "PadRight" => {
                 self.string_vars.insert(target.to_string());
             }
             "Bool" => {

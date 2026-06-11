@@ -42,6 +42,41 @@ fn eval_unary_math(
     Ok(Some(Signal::Value(Value::Float(op(num)))))
 }
 
+/// Shared body of `Pad` / `PadLeft` / `PadRight` (F62B-003): pad `s` to
+/// `target_len` with repetitions of `pad_char`, appending when `pad_end`
+/// and prepending otherwise. Lengths follow the historical `Pad` semantics.
+fn pad_str_value(
+    s: std::sync::Arc<crate::interpreter::value::StrValue>,
+    target_len: i64,
+    pad_char: &str,
+    pad_end: bool,
+) -> Value {
+    if target_len <= 0 {
+        return Value::Str(s);
+    }
+    let target_len = target_len as usize;
+    if s.len() >= target_len {
+        return Value::Str(s);
+    }
+    let repeat_count = target_len - s.len();
+    let Some(padding_len) = pad_char.len().checked_mul(repeat_count) else {
+        return Value::Str(s);
+    };
+    let mut padding = String::new();
+    if padding.try_reserve_exact(padding_len).is_err() {
+        return Value::Str(s);
+    }
+    for _ in 0..repeat_count {
+        padding.push_str(pad_char);
+    }
+    let result = if pad_end {
+        format!("{}{}", s, padding)
+    } else {
+        format!("{}{}", padding, s)
+    };
+    Value::str(result)
+}
+
 fn make_lax_value(has_value: bool, value: Value, default: Value) -> Value {
     Value::pack(vec![
         ("has_value".into(), Value::Bool(has_value)),
@@ -963,31 +998,93 @@ impl Interpreter {
                         }
                     })
                     .unwrap_or_else(|| " ".to_string());
-                if target_len <= 0 {
-                    return Ok(Some(Signal::Value(Value::Str(s))));
+                Ok(Some(Signal::Value(pad_str_value(
+                    s,
+                    target_len,
+                    &pad_char,
+                    side == "end",
+                ))))
+            }
+
+            // F62B-003: positional-argument pad variants. Same semantics as
+            // `Pad[str, len](side, char)` with the side fixed; previously
+            // these fell through to the generic mold fallback and returned
+            // an unresolved `@(__value, __type)` pack.
+            "PadLeft" | "PadRight" => {
+                if type_args.len() < 3 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "{} requires 3 arguments: {}[str, len, char]()",
+                            name, name
+                        ),
+                    });
                 }
-                let target_len = target_len as usize;
-                if s.len() >= target_len {
-                    Ok(Some(Signal::Value(Value::Str(s))))
-                } else {
-                    let repeat_count = target_len - s.len();
-                    let Some(padding_len) = pad_char.len().checked_mul(repeat_count) else {
-                        return Ok(Some(Signal::Value(Value::Str(s))));
-                    };
-                    let mut padding = String::new();
-                    if padding.try_reserve_exact(padding_len).is_err() {
-                        return Ok(Some(Signal::Value(Value::Str(s))));
+                let s = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "{}: first argument must be a string, got {}",
+                                name, v
+                            ),
+                        });
                     }
-                    for _ in 0..repeat_count {
-                        padding.push_str(&pad_char);
+                    other => return Ok(Some(other)),
+                };
+                let target_len = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Int(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "{}: second argument must be an integer, got {}",
+                                name, v
+                            ),
+                        });
                     }
-                    let result = if side == "end" {
-                        format!("{}{}", s, padding)
-                    } else {
-                        format!("{}{}", padding, s)
-                    };
-                    Ok(Some(Signal::Value(Value::str(result))))
+                    other => return Ok(Some(other)),
+                };
+                let pad_char = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(Value::Str(c)) => c.as_string().clone(),
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "{}: third argument must be a string, got {}",
+                                name, v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Value(pad_str_value(
+                    s,
+                    target_len,
+                    &pad_char,
+                    name == "PadRight",
+                ))))
+            }
+
+            // F62B-003: search / replace molds delegate to the string-method
+            // implementations so the mold form and the method form can never
+            // disagree (`IndexOf[s, n]()` ≡ `s.indexOf(n)`). Previously these
+            // fell through to the generic mold fallback.
+            "IndexOf" | "LastIndexOf" | "Contains" | "ReplaceAll" => {
+                let (method, required, usage) = match name {
+                    "IndexOf" => ("indexOf", 2, "IndexOf[str, needle]()"),
+                    "LastIndexOf" => ("lastIndexOf", 2, "LastIndexOf[str, needle]()"),
+                    "Contains" => ("contains", 2, "Contains[str, needle]()"),
+                    _ => ("replaceAll", 3, "ReplaceAll[str, old, new]()"),
+                };
+                if type_args.len() < required {
+                    return Err(RuntimeError {
+                        message: format!("{} requires {} arguments: {}", name, required, usage),
+                    });
                 }
+                let subject = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                self.eval_method_call(&subject, method, &type_args[1..])
+                    .map(Some)
             }
 
             // ── Num molds ────────────────────────────────────

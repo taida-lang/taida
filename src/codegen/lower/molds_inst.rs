@@ -227,6 +227,76 @@ impl Lowering {
                 ));
                 Ok(result)
             }
+            // F62B-003: search / replace / pad molds, dispatching to the same
+            // runtime symbols as the string-method forms so the two surfaces
+            // can never disagree. Previously these were "unsupported mold
+            // type" on the C-lowering backends (and an unresolved pack on the
+            // interpreter).
+            "IndexOf" | "LastIndexOf" | "Contains" => {
+                if type_args.len() < 2 {
+                    return Err(LowerError {
+                        message: format!(
+                            "{} requires 2 arguments: {}[str, needle]()",
+                            type_name, type_name
+                        ),
+                    });
+                }
+                let subject = self.lower_expr(func, &type_args[0])?;
+                let needle = self.lower_expr(func, &type_args[1])?;
+                let runtime_fn = match type_name {
+                    "IndexOf" => "taida_polymorphic_index_of",
+                    "LastIndexOf" => "taida_polymorphic_last_index_of",
+                    _ => "taida_polymorphic_contains",
+                };
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    runtime_fn.to_string(),
+                    vec![subject, needle],
+                ));
+                Ok(result)
+            }
+            "ReplaceAll" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message: "ReplaceAll requires 3 arguments: ReplaceAll[str, old, new]()"
+                            .into(),
+                    });
+                }
+                let s = self.lower_expr(func, &type_args[0])?;
+                let old = self.lower_expr(func, &type_args[1])?;
+                let new_str = self.lower_expr(func, &type_args[2])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_str_replace".to_string(),
+                    vec![s, old, new_str],
+                ));
+                Ok(result)
+            }
+            "PadLeft" | "PadRight" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message: format!(
+                            "{} requires 3 arguments: {}[str, len, char]()",
+                            type_name, type_name
+                        ),
+                    });
+                }
+                let s = self.lower_expr(func, &type_args[0])?;
+                let target_len = self.lower_expr(func, &type_args[1])?;
+                let pad_char = self.lower_expr(func, &type_args[2])?;
+                let pad_end_flag = func.alloc_var();
+                let is_end = if type_name == "PadRight" { 1i64 } else { 0i64 };
+                func.push(IrInst::ConstInt(pad_end_flag, is_end));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_str_pad".to_string(),
+                    vec![s, target_len, pad_char, pad_end_flag],
+                ));
+                Ok(result)
+            }
             // ── C26B-016 (@c.26, Option B+): span-aware comparison molds ──
             // Dispatches to the C runtime helpers in native_runtime/core.c.
             // SpanEquals / SpanStartsWith / SpanContains → Bool (taida_val 0/1).

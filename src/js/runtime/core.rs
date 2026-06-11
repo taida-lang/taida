@@ -2278,6 +2278,17 @@ function Pad(str, len, opts) {
   return str;
 }
 
+// F62B-003: positional mold forms of the string search / replace / pad
+// surface. Delegate to the (Taida-patched) prototype methods so the mold
+// form and the method form can never disagree — arrays get structural
+// equality, strings get the native search, exactly like `s.indexOf(n)`.
+function PadLeft(str, len, ch) { return Pad(str, len, { side: 'start', char: ch }); }
+function PadRight(str, len, ch) { return Pad(str, len, { side: 'end', char: ch }); }
+function IndexOf(subject, needle) { return subject.indexOf(needle); }
+function LastIndexOf(subject, needle) { return subject.lastIndexOf(needle); }
+function Contains(subject, needle) { return subject.contains(needle); }
+function ReplaceAll(str, old, rep) { return Replace(str, old, rep, { all: true }); }
+
 // ── Number Mold types ───────────────────────────────────
 function ToFixed(num, digits) {
   if (typeof num !== 'number') return '0';
