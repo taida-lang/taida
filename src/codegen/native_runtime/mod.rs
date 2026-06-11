@@ -910,7 +910,9 @@ mod tests {
         // 2026-06-12 F62B-017 (core.c): taida_str_lt/gt/gte lexicographic
         //   ordering trio + prototypes for the < / > / >= string arms.
         // 2026-06-12 F62B-019 (core.c): jsonEncode slot-tag precedence.
-        const EXPECTED_TOTAL_LEN: usize = 1_326_140;
+        // 2026-06-12 native HostCall descriptor stubs + session-less cage
+        //   rejection (core.c, before the marker).
+        const EXPECTED_TOTAL_LEN: usize = 1_329_146;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1666,7 +1668,9 @@ mod tests {
         //   marker): -516. F1 420,443 -> 419,927.
         // 2026-06-12 F62B-017: the taida_str_lt/gt/gte trio + prototypes
         // land before the marker (F1 419,927 -> 420,640); F2 unchanged.
-        const F1_LEN: usize = 420_640;
+        // 2026-06-12 host descriptor stubs land before the marker
+        // (F1 420,640 -> 423,646); F2 unchanged.
+        const F1_LEN: usize = 423_646;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
