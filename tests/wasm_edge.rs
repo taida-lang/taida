@@ -2422,7 +2422,11 @@ handle req: WebRequest =
     std::fs::write(&td_path, source).expect("write sequential HostCall fixture");
 
     let err = compile_wasm_edge_handler(&td_path, &wasm_path, "handle");
-    assert!(err.is_none(), "sequential handler should compile: {:?}", err);
+    assert!(
+        err.is_none(),
+        "sequential handler should compile: {:?}",
+        err
+    );
 
     let wasm_for_js = wasm_path.to_string_lossy();
     let script = format!(

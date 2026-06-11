@@ -2922,8 +2922,8 @@ mod wasm_edge_manifest_tests {
             r#"{ "d1_databases": [ { "binding": "TAIDA_DB", "database_id": "x" } ] }"#,
         )
         .expect("write wrangler manifest");
-        let manifest = wasm_edge_host_capability_manifest_for_source(&entry)
-            .expect("manifest with wrangler");
+        let manifest =
+            wasm_edge_host_capability_manifest_for_source(&entry).expect("manifest with wrangler");
         assert!(
             manifest.contains(&("TAIDA_DB".to_string(), "cloudflare/d1".to_string())),
             "declared D1 binding must survive: {:?}",

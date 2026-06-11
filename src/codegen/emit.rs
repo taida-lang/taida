@@ -202,13 +202,14 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         // Note: taida_str_eq/neq は Ptr 比較だが、boxed I64 として渡すため Val として扱う。
         // taida_poly_eq/neq は動的ディスパッチで型不明なため Val として扱う。
         "taida_int_eq" | "taida_int_neq" | "taida_str_eq" | "taida_str_neq" | "taida_poly_eq"
-        | "taida_poly_neq" | "taida_int_lt" | "taida_int_gt" | "taida_int_gte"
-        | "taida_str_lt" | "taida_str_gt" | "taida_str_gte"
-        | "taida_float_eq" | "taida_float_neq" | "taida_float_lt" | "taida_float_gt"
-        | "taida_float_lte" | "taida_float_gte" => RuntimeAbi {
-            params: &[Val, Val],
-            returns: &[Val],
-        },
+        | "taida_poly_neq" | "taida_int_lt" | "taida_int_gt" | "taida_int_gte" | "taida_str_lt"
+        | "taida_str_gt" | "taida_str_gte" | "taida_float_eq" | "taida_float_neq"
+        | "taida_float_lt" | "taida_float_gt" | "taida_float_lte" | "taida_float_gte" => {
+            RuntimeAbi {
+                params: &[Val, Val],
+                returns: &[Val],
+            }
+        }
 
         // ── ブール演算 ──
         "taida_bool_and" | "taida_bool_or" => RuntimeAbi {
@@ -1946,12 +1947,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         // ── taida-lang/abi host capability descriptors ──
         // Constructors build descriptor packs; cage resolves to a
         // deterministic rejected Async (no host adapter on native yet).
-        "taida_abi_host_capability" | "taida_abi_host_call" | "taida_abi_host_cage" => {
-            RuntimeAbi {
-                params: &[Val, Val],
-                returns: &[Val],
-            }
-        }
+        "taida_abi_host_capability" | "taida_abi_host_call" | "taida_abi_host_cage" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
         "taida_abi_host_step" => RuntimeAbi {
             params: &[Val, Val, Val],
             returns: &[Val],
