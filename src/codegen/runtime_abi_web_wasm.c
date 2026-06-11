@@ -1263,6 +1263,16 @@ int64_t taida_abi_host_cage(int64_t capability, int64_t call) {
         return taida_async_err(error);
     }
 
+    /* Outside a handler session (plain `_start` execution — parity drivers,
+       CLI runs) there is no adapter loop to resume a pending call: resolve
+       to the same deterministic rejection the native runtime uses instead
+       of a forever-uncatchable pending marker. The session arena mark is
+       non-zero exactly while a handler request is being processed. */
+    if (abi_web_current_arena_mark == 0) {
+        return taida_async_err(abi_host_error(
+            "host capabilities are not available outside a handler session"));
+    }
+
     abi_host_set_pending_json(capability, call);
     return taida_async_pending_with_error(abi_host_pending_error_value());
 }

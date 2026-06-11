@@ -1943,6 +1943,20 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             returns: &[Ptr],
         },
 
+        // ── taida-lang/abi host capability descriptors ──
+        // Constructors build descriptor packs; cage resolves to a
+        // deterministic rejected Async (no host adapter on native yet).
+        "taida_abi_host_capability" | "taida_abi_host_call" | "taida_abi_host_cage" => {
+            RuntimeAbi {
+                params: &[Val, Val],
+                returns: &[Val],
+            }
+        }
+        "taida_abi_host_step" => RuntimeAbi {
+            params: &[Val, Val, Val],
+            returns: &[Val],
+        },
+
         // ── taida-lang/abi response helpers ──
         "taida_abi_response_text" => RuntimeAbi {
             params: &[Ptr],

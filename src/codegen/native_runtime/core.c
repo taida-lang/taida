@@ -5956,6 +5956,66 @@ static taida_val taida_abi_response_error(taida_val status, const char *message)
     return taida_abi_response_new(status, headers, bytes, TAIDA_TAG_PACK);
 }
 
+// ── Host capability descriptors (native) ────────────────────────────
+// The descriptor constructors mirror the wasm runtime so HostCapability /
+// HostStep / HostCall values are real packs on native too. The native
+// handler binary has no host adapter loop, so Cage resolves to a
+// deterministic rejected Async — the error ceiling surfaces it like any
+// host failure. (A native host-call protocol over the stdin/stdout
+// bridge is future work; see docs/api/abi.md §6.)
+taida_val taida_abi_host_capability(taida_val name, taida_val kind) {
+    taida_val pack = taida_pack_new(3);
+    taida_pack_set_hash(pack, 0, taida_str_hash((taida_val)(intptr_t)"__type"));
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_STR);
+    taida_pack_set(pack, 0, (taida_val)(intptr_t)taida_str_new_copy("HostCapability"));
+    taida_pack_set_hash(pack, 1, taida_str_hash((taida_val)(intptr_t)"name"));
+    taida_pack_set_tag(pack, 1, TAIDA_TAG_STR);
+    taida_pack_set(pack, 1, name);
+    taida_pack_set_hash(pack, 2, taida_str_hash((taida_val)(intptr_t)"kind"));
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
+    taida_pack_set(pack, 2, kind);
+    return pack;
+}
+
+taida_val taida_abi_host_step(taida_val method, taida_val args, taida_val args_schema) {
+    taida_val pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, taida_str_hash((taida_val)(intptr_t)"__type"));
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_STR);
+    taida_pack_set(pack, 0, (taida_val)(intptr_t)taida_str_new_copy("HostStep"));
+    taida_pack_set_hash(pack, 1, taida_str_hash((taida_val)(intptr_t)"method"));
+    taida_pack_set_tag(pack, 1, TAIDA_TAG_STR);
+    taida_pack_set(pack, 1, method);
+    taida_pack_set_hash(pack, 2, taida_str_hash((taida_val)(intptr_t)"args"));
+    taida_pack_set_tag(pack, 2, 5 /* LIST */);
+    taida_pack_set(pack, 2, args);
+    taida_pack_set_hash(pack, 3, taida_str_hash((taida_val)(intptr_t)"args_schema"));
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);
+    taida_pack_set(pack, 3, args_schema);
+    return pack;
+}
+
+taida_val taida_abi_host_call(taida_val steps, taida_val schema) {
+    taida_val pack = taida_pack_new(3);
+    taida_pack_set_hash(pack, 0, taida_str_hash((taida_val)(intptr_t)"__type"));
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_STR);
+    taida_pack_set(pack, 0, (taida_val)(intptr_t)taida_str_new_copy("HostCall"));
+    taida_pack_set_hash(pack, 1, taida_str_hash((taida_val)(intptr_t)"steps"));
+    taida_pack_set_tag(pack, 1, 5 /* LIST */);
+    taida_pack_set(pack, 1, steps);
+    taida_pack_set_hash(pack, 2, taida_str_hash((taida_val)(intptr_t)"schema"));
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
+    taida_pack_set(pack, 2, schema);
+    return pack;
+}
+
+taida_val taida_abi_host_cage(taida_val capability, taida_val call) {
+    (void)capability;
+    (void)call;
+    return taida_async_err(taida_make_error(
+        "HostCapabilityError",
+        "host capabilities are not available on the native handler runtime"));
+}
+
 taida_val taida_abi_response_text(taida_val body_ptr) {
     const char *body = (const char *)body_ptr;
     taida_val bytes = taida_bytes_contig_new((const unsigned char *)(body ? body : ""), body ? (taida_val)strlen(body) : 0);
