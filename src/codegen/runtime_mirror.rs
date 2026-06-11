@@ -397,6 +397,9 @@ const DIVERGENT_ASYNC: &[&str] = &[
 /// Deliberately divergent: native writes through libc stdio; WASM goes
 /// through `fd_write`-style imports with its own buffering.
 const DIVERGENT_IO_DEBUG: &[&str] = &[
+    // F62B-030: process termination — native calls exit(), the wasm
+    // profiles go through WASI proc_exit (edge traps).
+    "taida_exit",
     "taida_debug_bool",
     "taida_debug_float",
     "taida_debug_int",
