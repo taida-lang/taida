@@ -477,6 +477,82 @@ impl TypeChecker {
                     self.declared_header_arities
                         .insert(local_name.to_string(), 0);
                 }
+            } else if let S::ClassLikeDef(cl) = stmt
+                && let Some(&local_name) = requested.get(cl.name.as_str())
+            {
+                // F62B-008: imported pack / inheritance types must be
+                // registered like local declarations — `JSON[raw, Schema]()`
+                // (E1541), field-access typing, and call-site return-type
+                // resolution all read the registry. Previously only enums
+                // and function signatures crossed the module boundary, so
+                // an imported `Point = @(...)` was rejected as undefined
+                // even though the E1541 message says "import it".
+                if self.registry.type_defs.contains_key(local_name) {
+                    // A local redefinition is already registered — keep it
+                    // (same precedence as the enum path above).
+                } else if cl.name_args.is_none() && cl.type_params.is_empty() {
+                    let map_fields = |this: &Self, fields: &[crate::parser::FieldDef]| {
+                        fields
+                            .iter()
+                            .filter(|f| !f.is_method)
+                            .map(|f| {
+                                (
+                                    f.name.clone(),
+                                    f.type_annotation
+                                        .as_ref()
+                                        .map(|t| this.resolve_imported_type_expr(t, &type_aliases))
+                                        .unwrap_or(Type::Unknown),
+                                )
+                            })
+                            .collect::<Vec<(String, Type)>>()
+                    };
+                    match &cl.kind {
+                        crate::parser::ClassLikeKind::BuchiPack => {
+                            let fields = map_fields(self, &cl.fields);
+                            self.registry.register_type(local_name, fields);
+                            self.declared_concrete_type_names
+                                .insert(local_name.to_string());
+                            self.declared_header_arities
+                                .insert(local_name.to_string(), 0);
+                        }
+                        crate::parser::ClassLikeKind::Inheritance { parent, .. } => {
+                            // Resolve the parent through the alias map; it
+                            // must already be registered (builtin `Error`,
+                            // an earlier import, or a local definition) —
+                            // otherwise skip rather than half-register.
+                            let parent_local = type_aliases
+                                .get(parent.as_str())
+                                .copied()
+                                .unwrap_or(parent.as_str());
+                            if self.registry.get_type_fields(parent_local).is_some() {
+                                let extra = map_fields(self, &cl.fields);
+                                let is_error_rooted = parent_local == "Error"
+                                    || self.registry.error_types.contains_key(parent_local);
+                                if is_error_rooted {
+                                    self.registry.register_error_type(
+                                        parent_local,
+                                        local_name,
+                                        extra,
+                                    );
+                                } else {
+                                    self.registry.register_inheritance(
+                                        parent_local,
+                                        local_name,
+                                        extra,
+                                    );
+                                }
+                                self.declared_concrete_type_names
+                                    .insert(local_name.to_string());
+                                self.declared_header_arities
+                                    .insert(local_name.to_string(), 0);
+                            }
+                        }
+                        // Operation molds need their own registration path
+                        // (mold_defs + specs); they are not JSON schemas and
+                        // stay out of this fix's scope.
+                        crate::parser::ClassLikeKind::Mold { .. } => {}
+                    }
+                }
             } else if let S::FuncDef(fd) = stmt
                 && let Some(&local_name) = requested.get(fd.name.as_str())
             {

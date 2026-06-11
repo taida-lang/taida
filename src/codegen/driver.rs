@@ -587,6 +587,11 @@ fn compile_to_object_inner(
     // ignored — the main / build path already surfaced them via
     // `run_type_checks_and_warnings` before reaching codegen.
     let mut checker = crate::types::TypeChecker::new();
+    // F62B-016: the source path is what lets the checker resolve and
+    // register imported types / function signatures (register_imported_types
+    // early-returns without it) — omitting it left imported-call results
+    // typed `?` in the Typed HIR and tripped the residual-unknown gate.
+    checker.set_source_file(input_path);
     checker.check_program(&program);
     lowering.set_typed_expr_table(checker.typed_expr_table.clone());
     let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
@@ -1387,6 +1392,8 @@ fn inline_wasm_module_imports_with_backend(
         // pipeline so cross-module Bool detection benefits from the
         // typed table rather than the local name-driven pre-pass.
         let mut dep_checker = crate::types::TypeChecker::new();
+        // F62B-016: same source-path wiring as the main module checker.
+        dep_checker.set_source_file(&dep_path);
         dep_checker.check_program(&dep_program);
         dep_lowering.set_typed_expr_table(dep_checker.typed_expr_table.clone());
         let dep_ir = dep_lowering
@@ -1570,6 +1577,8 @@ fn wasm_frontend(
     // the same Bool decision source. Errors here are intentionally
     // ignored — the build path already surfaced them.
     let mut checker = crate::types::TypeChecker::new();
+    // F62B-016: same source-path wiring as the native object path.
+    checker.set_source_file(input_path);
     checker.check_program(&program);
     lowering.set_typed_expr_table(checker.typed_expr_table.clone());
     let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
