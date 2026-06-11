@@ -1490,22 +1490,31 @@ impl Lowering {
                     "taida_poly_neq"
                 }
             }
+            // F62B-017: Str operands order lexicographically (interpreter
+            // semantics). Without the string arm these fell through to the
+            // i64 comparison and ordered by pointer value.
             BinOp::Lt => {
-                if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                if lhs_is_str || rhs_is_str {
+                    "taida_str_lt"
+                } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
                     "taida_float_lt"
                 } else {
                     "taida_int_lt"
                 }
             }
             BinOp::Gt => {
-                if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                if lhs_is_str || rhs_is_str {
+                    "taida_str_gt"
+                } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
                     "taida_float_gt"
                 } else {
                     "taida_int_gt"
                 }
             }
             BinOp::GtEq => {
-                if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                if lhs_is_str || rhs_is_str {
+                    "taida_str_gte"
+                } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
                     "taida_float_gte"
                 } else {
                     "taida_int_gte"

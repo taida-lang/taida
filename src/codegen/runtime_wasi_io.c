@@ -1513,26 +1513,9 @@ int64_t taida_utf8_encode_mold(int64_t value) {
     return taida_lax_new(out, taida_bytes_default_value());
 }
 
-int64_t taida_utf8_decode_mold(int64_t value) {
-    if (!_wi_is_bytes(value)) return taida_lax_empty(taida_str_alloc(0));
-    int64_t *bytes = (int64_t *)(intptr_t)value;
-    int64_t len = bytes[1];
-    unsigned char *raw = (unsigned char *)_wasm_str_alloc((unsigned int)len);
-    for (int64_t i = 0; i < len; i++) raw[i] = (unsigned char)bytes[2 + i];
-    int pos = 0;
-    while (pos < (int)len) {
-        int consumed = 0;
-        uint32_t cp = 0;
-        if (!_wi_utf8_decode_one(raw + pos, (int)len - pos, &consumed, &cp)) {
-            return taida_lax_empty(taida_str_alloc(0));
-        }
-        pos += consumed;
-    }
-    char *out = (char *)_wasm_str_alloc((unsigned int)(len + 1));
-    for (int64_t i = 0; i < len; i++) out[i] = (char)raw[i];
-    out[len] = '\0';
-    return taida_lax_new((int64_t)(intptr_t)out, taida_str_alloc(0));
-}
+/* taida_utf8_decode_mold moved to runtime_core_wasm/02_containers.inc.c:
+   it only READS Bytes (shared TAIDBYT layout) and returns Lax[Str], so it
+   is available on every WASM profile. */
 
 int64_t taida_utf8_encode_scalar(int64_t v) {
     /* Encode a single Unicode scalar (codepoint) into a Bytes value. */

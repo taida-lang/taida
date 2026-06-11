@@ -1029,6 +1029,7 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_str_char_at" | "taida_str_get" => {
             format!("int64_t {}(int64_t s, int64_t idx);", name)
         }
+        "taida_str_chars" => "int64_t taida_str_chars(int64_t s);".to_string(),
         "taida_str_repeat" => "int64_t taida_str_repeat(int64_t s, int64_t n);".to_string(),
         "taida_str_index_of" | "taida_str_last_index_of" => {
             format!("int64_t {}(int64_t s, int64_t sub);", name)
@@ -1037,6 +1038,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             format!("int64_t {}(int64_t s, int64_t sub);", name)
         }
         "taida_cmp_strings" => "int64_t taida_cmp_strings(int64_t a, int64_t b);".to_string(),
+        "taida_str_lt" | "taida_str_gt" | "taida_str_gte" => {
+            format!("int64_t {}(int64_t a, int64_t b);", name)
+        }
         "taida_str_release" => "void taida_str_release(int64_t s);".to_string(),
         "taida_slice_mold" => "int64_t taida_slice_mold(int64_t target, int64_t start, int64_t end);".to_string(),
         // WC-1: Char/Codepoint molds (all profiles — implemented in runtime_core_wasm.c)
@@ -1582,7 +1586,10 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         {
             format!("int64_t {}(int64_t v);", name)
         }
-        "taida_utf8_encode_mold" | "taida_utf8_decode_mold"
+        // Utf8Decode only READS Bytes (shared TAIDBYT layout) and returns
+        // Lax[Str]; it lives in the core runtime and links on every profile.
+        "taida_utf8_decode_mold" => "int64_t taida_utf8_decode_mold(int64_t v);".to_string(),
+        "taida_utf8_encode_mold"
         | "taida_utf8_encode_scalar" | "taida_utf8_decode_one"
         | "taida_utf8_single_scalar"
             if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>

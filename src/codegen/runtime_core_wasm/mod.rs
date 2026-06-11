@@ -254,7 +254,11 @@ mod tests {
         //   like the interpreter's json_to_typed_value_checked (missing /
         //   null fields keep defaults), and default construction goes
         //   through the missing-value path. 486,300 -> 487881.
-        const EXPECTED_TOTAL_LEN: usize = 487881;
+        // 2026-06-12 F62B-017 string ordering + Chars + Utf8Decode relocation
+        //   (02_containers): taida_str_lt/gt/gte, taida_str_chars, and
+        //   taida_utf8_decode_mold (+ _core_utf8_decode_one) move string
+        //   ordering and Bytes decoding into the all-profile core.
+        const EXPECTED_TOTAL_LEN: usize = 492216;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

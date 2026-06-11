@@ -2501,6 +2501,91 @@ int64_t taida_str_char_at(int64_t s_raw, int64_t idx_raw) {
     return (int64_t)r;
 }
 
+/* Strict UTF-8 validator (one scalar): rejects overlongs, surrogates and
+   out-of-range scalars — mirrors the native taida_utf8_decode_one and the
+   rt_wasi twin. Lives in core so Bytes readers (Utf8Decode) work on every
+   profile now that Bytes share the TAIDBYT layout. */
+static int _core_utf8_decode_one(const unsigned char *buf, int len, int *consumed, uint32_t *out_cp) {
+    if (len <= 0) return 0;
+    unsigned char b0 = buf[0];
+    if (b0 < 0x80) { *consumed = 1; *out_cp = b0; return 1; }
+    if (b0 >= 0xC2 && b0 <= 0xDF) {
+        if (len < 2) return 0;
+        unsigned char b1 = buf[1];
+        if ((b1 & 0xC0) != 0x80) return 0;
+        *consumed = 2;
+        *out_cp = ((uint32_t)(b0 & 0x1F) << 6) | (uint32_t)(b1 & 0x3F);
+        return 1;
+    }
+    if (b0 >= 0xE0 && b0 <= 0xEF) {
+        if (len < 3) return 0;
+        unsigned char b1 = buf[1], b2 = buf[2];
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) return 0;
+        if (b0 == 0xE0 && b1 < 0xA0) return 0;
+        if (b0 == 0xED && b1 >= 0xA0) return 0;
+        uint32_t cp = ((uint32_t)(b0 & 0x0F) << 12) | ((uint32_t)(b1 & 0x3F) << 6) | (uint32_t)(b2 & 0x3F);
+        if (cp >= 0xD800 && cp <= 0xDFFF) return 0;
+        *consumed = 3; *out_cp = cp;
+        return 1;
+    }
+    if (b0 >= 0xF0 && b0 <= 0xF4) {
+        if (len < 4) return 0;
+        unsigned char b1 = buf[1], b2 = buf[2], b3 = buf[3];
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) return 0;
+        if (b0 == 0xF0 && b1 < 0x90) return 0;
+        if (b0 == 0xF4 && b1 > 0x8F) return 0;
+        uint32_t cp = ((uint32_t)(b0 & 0x07) << 18) | ((uint32_t)(b1 & 0x3F) << 12) | ((uint32_t)(b2 & 0x3F) << 6) | (uint32_t)(b3 & 0x3F);
+        if (cp > 0x10FFFF) return 0;
+        *consumed = 4; *out_cp = cp;
+        return 1;
+    }
+    return 0;
+}
+
+/// Utf8Decode[bytes]() -> Lax[Str]. Invalid UTF-8 -> empty Lax.
+/// Reads the shared [TAIDBYT, len, byte...] layout; available on every
+/// WASM profile (moved from rt_wasi after the Bytes layout unification).
+int64_t taida_utf8_decode_mold(int64_t value) {
+    if (!_looks_like_bytes(value)) return taida_lax_empty(taida_str_alloc(0));
+    int64_t *bytes = (int64_t *)(intptr_t)value;
+    int64_t len = bytes[1];
+    unsigned char *raw = (unsigned char *)_wasm_str_alloc((unsigned int)(len > 0 ? len : 1));
+    for (int64_t i = 0; i < len; i++) raw[i] = (unsigned char)bytes[2 + i];
+    int pos = 0;
+    while (pos < (int)len) {
+        int consumed = 0;
+        uint32_t cp = 0;
+        if (!_core_utf8_decode_one(raw + pos, (int)len - pos, &consumed, &cp)) {
+            return taida_lax_empty(taida_str_alloc(0));
+        }
+        pos += consumed;
+    }
+    char *out = (char *)_wasm_str_alloc((unsigned int)(len + 1));
+    for (int64_t i = 0; i < len; i++) out[i] = (char)raw[i];
+    out[len] = '\0';
+    return taida_lax_new((int64_t)(intptr_t)out, taida_str_alloc(0));
+}
+
+/// Chars[str]() -- split into code-point strings (native mirror).
+int64_t taida_str_chars(int64_t s_raw) {
+    const char *s = (const char *)s_raw;
+    int64_t list = taida_list_new();
+    taida_list_set_elem_tag(list, 3 /* STR */);
+    if (!s) return list;
+    int byte_len = _wf_strlen(s);
+    int off = 0;
+    while (off < byte_len) {
+        int cl = _wasm_utf8_cp_len_at(s, byte_len, off);
+        if (cl <= 0) cl = 1;
+        char *piece = _wasm_str_alloc((unsigned int)(cl + 1));
+        _wf_memcpy(piece, s + off, cl);
+        piece[cl] = '\0';
+        list = taida_list_push(list, (int64_t)(intptr_t)piece);
+        off += cl;
+    }
+    return list;
+}
+
 /// Repeat[str, n]() -- repeat string n times
 int64_t taida_str_repeat(int64_t s_raw, int64_t n_raw) {
     const char *s = (const char *)s_raw;
@@ -2673,6 +2758,21 @@ int64_t taida_cmp_strings(int64_t a_raw, int64_t b_raw) {
     if (!a) return -1;
     if (!b) return 1;
     return (int64_t)_wf_strcmp(a, b);
+}
+
+/* F62B-017: lexicographic ordering for Str operands of < / > / >= (native
+   mirror). UTF-8 byte order equals code-point order. */
+int64_t taida_str_lt(int64_t a_raw, int64_t b_raw) {
+    return _wf_strcmp((const char *)a_raw ? (const char *)a_raw : "",
+                      (const char *)b_raw ? (const char *)b_raw : "") < 0 ? 1 : 0;
+}
+int64_t taida_str_gt(int64_t a_raw, int64_t b_raw) {
+    return _wf_strcmp((const char *)a_raw ? (const char *)a_raw : "",
+                      (const char *)b_raw ? (const char *)b_raw : "") > 0 ? 1 : 0;
+}
+int64_t taida_str_gte(int64_t a_raw, int64_t b_raw) {
+    return _wf_strcmp((const char *)a_raw ? (const char *)a_raw : "",
+                      (const char *)b_raw ? (const char *)b_raw : "") >= 0 ? 1 : 0;
 }
 
 /// Slice mold -- polymorphic slice for Str, List, Bytes

@@ -1058,6 +1058,9 @@ taida_val taida_str_ends_with(const char* s, const char* suffix);
 taida_val taida_str_last_index_of(const char* s, const char* sub);
 taida_ptr taida_str_get(const char* s, taida_val idx);
 taida_ptr taida_str_chars(const char* s);
+taida_val taida_str_lt(taida_val a, taida_val b);
+taida_val taida_str_gt(taida_val a, taida_val b);
+taida_val taida_str_gte(taida_val a, taida_val b);
 // List state check methods
 taida_val taida_list_last_index_of(taida_ptr list_ptr, taida_val item);
 taida_val taida_list_any(taida_ptr list_ptr, taida_fn_ptr fn_ptr);
@@ -2980,6 +2983,12 @@ taida_val taida_int_eq(taida_val a, taida_val b)  { return a == b ? 1 : 0; }
 taida_val taida_int_neq(taida_val a, taida_val b) { return a != b ? 1 : 0; }
 taida_val taida_str_eq(taida_val a, taida_val b)  { return (a && b) ? (strcmp((char*)a, (char*)b) == 0 ? 1 : 0) : (a == b ? 1 : 0); }
 taida_val taida_str_neq(taida_val a, taida_val b) { return (a && b) ? (strcmp((char*)a, (char*)b) != 0 ? 1 : 0) : (a != b ? 1 : 0); }
+// F62B-017: lexicographic ordering for Str operands of < / > / >=. UTF-8
+// byte order equals code-point order, so plain strcmp is the reference
+// semantics (mirrors the interpreter's String ordering).
+taida_val taida_str_lt(taida_val a, taida_val b)  { return strcmp(a ? (char*)a : "", b ? (char*)b : "") < 0 ? 1 : 0; }
+taida_val taida_str_gt(taida_val a, taida_val b)  { return strcmp(a ? (char*)a : "", b ? (char*)b : "") > 0 ? 1 : 0; }
+taida_val taida_str_gte(taida_val a, taida_val b) { return strcmp(a ? (char*)a : "", b ? (char*)b : "") >= 0 ? 1 : 0; }
 static int taida_is_string_value(taida_val v) {
     // Positive identification via the hidden 16-byte header. A Taida Str
     // value always points just past its header ([magic|rc][byte_len] |

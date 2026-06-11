@@ -203,6 +203,7 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         // taida_poly_eq/neq は動的ディスパッチで型不明なため Val として扱う。
         "taida_int_eq" | "taida_int_neq" | "taida_str_eq" | "taida_str_neq" | "taida_poly_eq"
         | "taida_poly_neq" | "taida_int_lt" | "taida_int_gt" | "taida_int_gte"
+        | "taida_str_lt" | "taida_str_gt" | "taida_str_gte"
         | "taida_float_eq" | "taida_float_neq" | "taida_float_lt" | "taida_float_gt"
         | "taida_float_lte" | "taida_float_gte" => RuntimeAbi {
             params: &[Val, Val],
