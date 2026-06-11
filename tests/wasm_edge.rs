@@ -2385,3 +2385,135 @@ const fs = require("fs");
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Test: a handler that performs TWO sequential host calls re-executes with
+/// the recorded resume payloads replaying in order. Guards the replay-table
+/// regression where the latest resume value fed the first Cage of every
+/// re-execution (corrupting and live-locking multi-call handlers).
+#[test]
+fn wasm_edge_handler_host_call_two_sequential_calls_node() {
+    if Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("node not found, skipping sequential HostCall runtime test");
+        return;
+    }
+
+    let dir = unique_temp_dir("taida_wasm_edge_host_call_seq");
+    let td_path = dir.join("handler.td");
+    let wasm_path = dir.join("handler.wasm");
+    let js_path = dir.join("host_call_seq.js");
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text, HostCall, HostStep, HostCapability)
+
+KV <= "cloudflare/kv"
+
+handle req: WebRequest =
+  store <= HostCapability["STORE", KV]()
+  first <=< Cage[store, HostCall[@[HostStep["get", @["alpha"]]()], Str]()]()
+  second <=< Cage[store, HostCall[@[HostStep["get", @[first]]()], Str]()]()
+  text(first + "/" + second)
+=> :WebResponse
+"#;
+    let wrangler = r#"{ "kv_namespaces": [ { "binding": "STORE", "id": "x" } ] }"#;
+    std::fs::write(dir.join("wrangler.jsonc"), wrangler).expect("write wrangler manifest");
+    std::fs::write(&td_path, source).expect("write sequential HostCall fixture");
+
+    let err = compile_wasm_edge_handler(&td_path, &wasm_path, "handle");
+    assert!(err.is_none(), "sequential handler should compile: {:?}", err);
+
+    let wasm_for_js = wasm_path.to_string_lossy();
+    let script = format!(
+        r#"
+const fs = require("fs");
+
+(async () => {{
+  let memory = new WebAssembly.Memory({{ initial: 2 }});
+  const wasm = fs.readFileSync("{wasm_for_js}");
+  const imports = {{
+    env: {{ memory }},
+    wasi_snapshot_preview1: {{
+      fd_write(fd, iovsPtr, iovsLen, nwrittenPtr) {{
+        new DataView(memory.buffer).setUint32(nwrittenPtr, 0, true);
+        return 0;
+      }},
+    }},
+    taida_host: {{ env_get() {{ return 0; }}, env_get_all() {{ return 0; }} }},
+  }};
+  const {{ instance }} = await WebAssembly.instantiate(wasm, imports);
+  if (instance.exports.memory) memory = instance.exports.memory;
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const request = encoder.encode(JSON.stringify({{
+    method: "GET", path: "/seq", rawQuery: "", query: [], headers: [], bodyBase64: "",
+  }}));
+  const reqPtr = instance.exports.taida_abi_web_alloc(request.length);
+  new Uint8Array(memory.buffer, reqPtr, request.length).set(request);
+  const handle = instance.exports.taida_abi_web_start(reqPtr, request.length);
+
+  const seen = [];
+  for (let i = 0; i < 8; i++) {{
+    const state = instance.exports.taida_abi_web_poll(handle);
+    if (state === 0) {{
+      const raw = decoder.decode(new Uint8Array(
+        memory.buffer,
+        instance.exports.taida_abi_web_out_ptr(handle),
+        instance.exports.taida_abi_web_out_len(handle)
+      ));
+      instance.exports.taida_abi_web_free(handle);
+      console.log(JSON.stringify({{ seen, response: JSON.parse(raw) }}));
+      return;
+    }}
+    if (state !== 1) throw new Error("unexpected state " + state);
+    const pending = JSON.parse(decoder.decode(new Uint8Array(
+      memory.buffer,
+      instance.exports.taida_abi_web_out_ptr(handle),
+      instance.exports.taida_abi_web_out_len(handle)
+    )));
+    const arg = pending.steps[0].args[0];
+    seen.push(arg);
+    const value = arg === "alpha" ? "beta" : "gamma(" + arg + ")";
+    const resume = encoder.encode(JSON.stringify({{ id: pending.id, ok: true, value }}));
+    const resumePtr = instance.exports.taida_abi_web_alloc(resume.length);
+    new Uint8Array(memory.buffer, resumePtr, resume.length).set(resume);
+    instance.exports.taida_abi_web_resume(handle, resumePtr, resume.length);
+  }}
+  throw new Error("poll limit exceeded (live-lock)");
+}})().catch((err) => {{
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+}});
+"#
+    );
+    std::fs::write(&js_path, script).expect("write sequential node harness");
+
+    let run = Command::new("node")
+        .arg(&js_path)
+        .output()
+        .expect("node sequential harness should run");
+    assert!(
+        run.status.success(),
+        "sequential HostCall harness failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("harness output should be JSON");
+    // Call 1 asks for "alpha"; the replayed first result ("beta") must feed
+    // call 2's argument. Response = "beta/gamma(beta)".
+    assert_eq!(
+        parsed["seen"],
+        serde_json::json!(["alpha", "beta"]),
+        "second call must receive the FIRST call's replayed result"
+    );
+    let body = parsed["response"]["bodyBase64"].as_str().unwrap_or("");
+    // "beta/gamma(beta)" base64
+    assert_eq!(
+        body, "YmV0YS9nYW1tYShiZXRhKQ==",
+        "response must combine both replayed results in order"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
