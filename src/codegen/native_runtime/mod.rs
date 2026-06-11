@@ -912,7 +912,7 @@ mod tests {
         // 2026-06-12 F62B-019 (core.c): jsonEncode slot-tag precedence.
         // 2026-06-12 native HostCall descriptor stubs + session-less cage
         //   rejection (core.c, before the marker).
-        const EXPECTED_TOTAL_LEN: usize = 1_329_416;
+        const EXPECTED_TOTAL_LEN: usize = 1_329_327;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),

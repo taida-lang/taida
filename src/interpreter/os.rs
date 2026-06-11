@@ -286,7 +286,7 @@ fn make_list_dir_lax_failure(kind: &str) -> Value {
 fn default_stat_pack() -> Value {
     Value::pack(vec![
         ("size".into(), Value::Int(0)),
-        ("modified".into(), Value::str(String::new())),
+        ("modified".into(), Value::Int(0)),
         ("isDir".into(), Value::Bool(false)),
     ])
 }
@@ -780,7 +780,7 @@ impl Interpreter {
                 }
             }
 
-            // ── Stat[path]() → Lax[@(size: Int, modified: Str, isDir: Bool)] ──
+            // ── Stat[path]() → Lax[@(size: Int, modified: Int, isDir: Bool)] ──
             "Stat" => {
                 if type_args.is_empty() {
                     return Err(RuntimeError {
@@ -800,11 +800,21 @@ impl Interpreter {
                 match std::fs::metadata(&path) {
                     Ok(meta) => {
                         let size = meta.len() as i64;
-                        let modified = meta.modified().map(format_rfc3339_utc).unwrap_or_default();
+                        // F62B-009: docs (os.md §1.5) and the declared field
+                        // type promise epoch milliseconds (Int); the ISO 8601
+                        // string the implementations returned put a Str in an
+                        // Int-typed field and made mtime arithmetic
+                        // (`nowMs() - st.modified`) impossible.
+                        let modified = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0);
                         let is_dir = meta.is_dir();
                         let stat_pack = Value::pack(vec![
                             ("size".into(), Value::Int(size)),
-                            ("modified".into(), Value::str(modified)),
+                            ("modified".into(), Value::Int(modified)),
                             ("isDir".into(), Value::Bool(is_dir)),
                         ]);
                         Ok(Some(Signal::Value(make_lax_success(stat_pack))))
@@ -3677,7 +3687,10 @@ stdout(typeof(args))"#,
     // ── Stat modified field format ──
 
     #[test]
-    fn test_stat_modified_rfc3339() {
+    fn test_stat_modified_epoch_ms() {
+        // F62B-009: docs (os.md §1.5) and the declared field type promise
+        // epoch milliseconds (Int) so mtime arithmetic works; the previous
+        // implementation returned an RFC3339 string in the Int-typed field.
         let dir = std::path::PathBuf::from("/tmp/taida_test_os_stat_modified");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -3687,20 +3700,16 @@ stdout(typeof(args))"#,
         let code = format!(
             r#"result <= Stat["{}"]()
 result >=> info
-stdout(info.modified)"#,
+m: Int <= info.modified
+stdout((m > 1000000000000).toString())
+stdout((nowMs() - m >= 0).toString())"#,
             path
         );
         let output = run_code(&code);
-        // Should be RFC3339/UTC: YYYY-MM-DDTHH:MM:SSZ
-        assert!(
-            output[0].ends_with('Z'),
-            "modified should end with Z: {}",
-            output[0]
-        );
-        assert!(
-            output[0].contains('T'),
-            "modified should contain T: {}",
-            output[0]
+        assert_eq!(
+            output,
+            vec!["true", "true"],
+            "modified must be epoch ms and usable in arithmetic"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
