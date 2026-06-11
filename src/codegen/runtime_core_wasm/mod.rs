@@ -260,7 +260,9 @@ mod tests {
         //   ordering and Bytes decoding into the all-profile core.
         // 2026-06-12 Utf8Encode joins the core (02_containers) alongside
         //   Utf8Decode — the TAIDBYT constructor is core-safe.
-        const EXPECTED_TOTAL_LEN: usize = 493316;
+        // 2026-06-12 F62B-019: slot-tag precedence in jsonEncode pack fields,
+        //   kind-aware list element hints, Split elem tag (02/04).
+        const EXPECTED_TOTAL_LEN: usize = 494_820;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

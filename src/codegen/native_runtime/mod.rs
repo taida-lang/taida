@@ -909,7 +909,8 @@ mod tests {
         //   1,325,919 -> 1,325,403.
         // 2026-06-12 F62B-017 (core.c): taida_str_lt/gt/gte lexicographic
         //   ordering trio + prototypes for the < / > / >= string arms.
-        const EXPECTED_TOTAL_LEN: usize = 1326116;
+        // 2026-06-12 F62B-019 (core.c): jsonEncode slot-tag precedence.
+        const EXPECTED_TOTAL_LEN: usize = 1_326_140;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1730,7 +1731,9 @@ mod tests {
             // and the public-shape container display removes the
             // synthetic full-form renderers (-5,273).
             // F2 228,943 -> 225,077.
-            F1_LEN + 225_077,
+            // F62B-019 jsonEncode slot-tag precedence (after the marker):
+            // F2 225,077 -> 225,101.
+            F1_LEN + 225_101,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
