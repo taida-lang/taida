@@ -94,9 +94,25 @@ static char *abi_host_pending_json = (char *)0;
 static int32_t abi_host_pending_len = 0;
 static int64_t abi_host_next_id = 1;
 static char abi_host_pending_marker;
-static char *abi_host_resume_json = (char *)0;
-static int32_t abi_host_resume_len = 0;
-static int32_t abi_host_resume_active = 0;
+/* Host-call replay table. The handler re-executes from the top after every
+   resume; each Cage call consumes the resume payloads IN ORDER so a session
+   can issue any number of sequential host calls (the previous single-slot
+   `resume_active` design fed the LATEST resume value to the FIRST Cage of
+   every re-execution, which corrupted and live-locked any handler with more
+   than one host call). Payload pointers stay valid for the whole session:
+   they live in the caller's `taida_abi_web_alloc` region inside the session
+   arena, and the bump allocator only moves forward until `free(handle)`
+   rolls the arena back. One session is in flight at a time per instance
+   (the Workers glue model), matching the rest of this file's session state. */
+#define TAIDA_ABI_HOST_REPLAY_MAX 64
+static const char *abi_host_replay_json[TAIDA_ABI_HOST_REPLAY_MAX];
+static int32_t abi_host_replay_lens[TAIDA_ABI_HOST_REPLAY_MAX];
+static int32_t abi_host_replay_count = 0;
+static int32_t abi_host_replay_cursor = 0;
+/* Set between resume_begin and the re-execution's begin_request so the
+   request-arena lookup can distinguish "replaying after a resume" (keep the
+   recorded payloads) from "fresh request" (drop them). */
+static int32_t abi_host_replay_resuming = 0;
 
 static int abi_wasm_is_readable(int64_t value, uint64_t min_bytes) {
     if (value <= 0) return 0;
@@ -399,6 +415,16 @@ int32_t taida_abi_web_alloc(int32_t len) {
 }
 
 int32_t taida_abi_web_begin_request(int32_t ptr, int32_t len) {
+    /* Host-call replay bookkeeping: a resume re-execution rewinds the
+       consume cursor over the recorded payloads; a fresh request drops
+       them. */
+    if (abi_host_replay_resuming) {
+        abi_host_replay_resuming = 0;
+        abi_host_replay_cursor = 0;
+    } else {
+        abi_host_replay_count = 0;
+        abi_host_replay_cursor = 0;
+    }
     for (int32_t i = 0; i < TAIDA_ABI_WEB_ALLOC_TABLE_SIZE; i++) {
         TaidaAbiWebAlloc *entry = &abi_web_allocs[i];
         if (!entry->active) continue;
@@ -1209,17 +1235,17 @@ static int64_t abi_host_resume_error_async(const char *message) {
 }
 
 int64_t taida_abi_host_cage(int64_t capability, int64_t call) {
-    if (abi_host_resume_active) {
-        const char *json = abi_host_resume_json ? abi_host_resume_json : "";
-        int32_t len = abi_host_resume_len;
+    if (abi_host_replay_cursor < abi_host_replay_count) {
+        const char *json = abi_host_replay_json[abi_host_replay_cursor];
+        int32_t len = abi_host_replay_lens[abi_host_replay_cursor];
+        abi_host_replay_cursor++;
+        if (!json) json = "";
         int ok = 0;
         if (!abi_json_field_bool(json, len, "ok", &ok)) {
-            abi_host_resume_active = 0;
             return abi_host_resume_error_async("host call resume missing ok");
         }
         if (!ok) {
             char *message = abi_json_field_string(json, len, "error");
-            abi_host_resume_active = 0;
             return abi_host_resume_error_async(message ? message : "host call failed");
         }
 
@@ -1230,12 +1256,10 @@ int64_t taida_abi_host_cage(int64_t capability, int64_t call) {
         int64_t has_value = taida_pack_get(lax, abi_hash_cstr("has_value"));
         if (has_value) {
             int64_t value = taida_pack_get(lax, abi_hash_cstr("__value"));
-            abi_host_resume_active = 0;
             return taida_async_ok(value);
         }
         int64_t error = taida_pack_get(lax, abi_hash_cstr("__error"));
         if (!error) error = abi_host_error("host call result decode failed");
-        abi_host_resume_active = 0;
         return taida_async_err(error);
     }
 
@@ -1352,9 +1376,11 @@ int32_t taida_abi_web_resume_begin(int64_t handle, int32_t ptr, int32_t len) {
     TaidaAbiWebOut *out = abi_web_out_get(handle);
     if (!out || out->state != 1) return 0;
     if (!taida_abi_web_validate_request(ptr, len)) return 0;
-    abi_host_resume_json = (char *)(intptr_t)ptr;
-    abi_host_resume_len = len;
-    abi_host_resume_active = 1;
+    if (abi_host_replay_count >= TAIDA_ABI_HOST_REPLAY_MAX) return 0;
+    abi_host_replay_json[abi_host_replay_count] = (const char *)(intptr_t)ptr;
+    abi_host_replay_lens[abi_host_replay_count] = len;
+    abi_host_replay_count++;
+    abi_host_replay_resuming = 1;
     return 1;
 }
 
@@ -1373,7 +1399,6 @@ void taida_abi_web_replace_handle(int64_t dst_handle, int64_t src_handle) {
     TaidaAbiWebOut *src = abi_web_out_get(src_handle);
     if (!dst || !src) {
         if (dst) dst->state = 2;
-        abi_host_resume_active = 0;
         return;
     }
     dst->state = src->state;
@@ -1390,7 +1415,6 @@ void taida_abi_web_replace_handle(int64_t dst_handle, int64_t src_handle) {
     src->request_len = 0;
     src->generation++;
     if (src->generation == 0) src->generation = 1;
-    abi_host_resume_active = 0;
 }
 
 int32_t taida_abi_web_out_ptr(int64_t handle) {

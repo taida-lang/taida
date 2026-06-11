@@ -2039,8 +2039,10 @@ impl Lowering {
         subsequent_stmts: &[&Statement],
     ) -> Result<(), LowerError> {
         // 後続文を別関数に抽出（setjmp は呼び出し元の C 関数内で行う）
-        let try_func_name = format!("_taida_try_{}", self.lambda_counter);
-        self.lambda_counter += 1;
+        // F62B-018: module-keyed like every synthetic symbol — per-module
+        // counters made two modules' error-ceiling bodies collide in the
+        // wasm merge, silently swapping one handler's body for another's.
+        let try_func_name = self.next_lambda_symbol("try");
 
         // Collect variables from parent scope that _taida_try_N needs access to.
         // This includes function parameters and any DefVar'd variables before the ErrorCeiling.
