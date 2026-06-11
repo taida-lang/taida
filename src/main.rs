@@ -109,13 +109,22 @@ fn main() {
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
 
+    // F62B-005: everything after the first standalone `--` belongs to the
+    // user program (argv()), never to taida — so `--no-check` is only
+    // recognized as taida's own flag before that separator.
+    let dashdash_pos = args.iter().position(|a| a == "--");
+    let in_taida_zone = |i: usize| dashdash_pos.is_none_or(|p| i < p);
     // Check for --no-check flag
-    let no_check = args.iter().any(|a| a == "--no-check");
+    let no_check = args
+        .iter()
+        .enumerate()
+        .any(|(i, a)| a == "--no-check" && in_taida_zone(i));
     // Filter out --no-check from args for subcommand processing
     let filtered_args: Vec<String> = args
         .iter()
-        .filter(|a| a.as_str() != "--no-check")
-        .cloned()
+        .enumerate()
+        .filter(|(i, a)| !(a.as_str() == "--no-check" && in_taida_zone(*i)))
+        .map(|(_, a)| a.clone())
         .collect();
 
     if filtered_args.len() > 1 {
@@ -164,6 +173,15 @@ fn main() {
             _ => {
                 // File execution mode
                 let filename = &filtered_args[1];
+                // F62B-005: expose only the user's arguments through argv():
+                // everything after the first standalone `--`, or — when no
+                // separator is given — everything after the script path.
+                // taida's own options were filtered above and never leak.
+                let user_args: Vec<String> = match filtered_args.iter().position(|a| a == "--") {
+                    Some(pos) => filtered_args[pos + 1..].to_vec(),
+                    None => filtered_args.get(2..).unwrap_or(&[]).to_vec(),
+                };
+                taida::interpreter::set_user_argv(user_args);
                 match fs::read_to_string(filename) {
                     Ok(source) => run_source(&source, filename, no_check),
                     Err(e) => {

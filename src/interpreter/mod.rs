@@ -31,3 +31,5 @@ pub(crate) mod value_key;
 pub use env::*;
 pub use eval::*;
 pub use value::*;
+// F62B-005: CLI hands the user-argument slice to `argv()` through this.
+pub use os::set_user_argv;

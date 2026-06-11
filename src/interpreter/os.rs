@@ -48,6 +48,21 @@ fn signal_name(sig: &Signal) -> &'static str {
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
 use std::sync::{Arc, Mutex};
 
+/// F62B-005: the user-argument slice for `argv()`, computed by the CLI
+/// entry point (which alone knows which tokens it consumed as its own
+/// options). Empty when never set (REPL / embedded interpreters).
+static USER_ARGV: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Record the user arguments exposed through `argv()`. First call wins;
+/// the CLI calls this exactly once before running a script.
+pub fn set_user_argv(args: Vec<String>) {
+    let _ = USER_ARGV.set(args);
+}
+
+fn user_argv() -> &'static [String] {
+    USER_ARGV.get().map(|v| v.as_slice()).unwrap_or(&[])
+}
+
 /// Maximum file size for Read / ReadAsync (64 MB).
 const MAX_READ_SIZE: u64 = 64 * 1024 * 1024;
 /// Default timeout for network operations (connect/send/recv/listen).
@@ -1551,9 +1566,14 @@ impl Interpreter {
 
             // ── argv() → @[Str] (CLI user args) ──────────────
             "argv" => {
-                // Interpreter mode is typically: taida <script.td> [args...]
-                // Expose only user args to match JS/native runtime behavior.
-                let argv: Vec<Value> = std::env::args().skip(2).map(Value::str).collect();
+                // F62B-005: the CLI computes the user-argument slice
+                // (everything after the first standalone `--`, or after the
+                // script path when no separator is given) and stores it via
+                // `set_user_argv` — naive positional skipping leaked `--`,
+                // taida's own options, and even the script name depending on
+                // option order. When unset (REPL / embedded use) argv is
+                // empty: there are no user args in those modes.
+                let argv: Vec<Value> = user_argv().iter().cloned().map(Value::str).collect();
                 Ok(Some(Signal::Value(Value::list(argv))))
             }
 
