@@ -1922,6 +1922,12 @@ int64_t taida_polymorphic_length(int64_t ptr) {
     if (_looks_like_list(ptr)) {
         return taida_list_length(ptr);
     }
+    /* Bytes.length() -> byte count (native mirror). Without this branch
+       a Bytes value falls through to the string path and counts the
+       magic header bytes as UTF-8. */
+    if (_looks_like_bytes(ptr)) {
+        return _wasm_bytes_len(ptr);
+    }
     /* Otherwise treat as string: code points, not bytes (mirrors
        native taida_polymorphic_length). */
     const char *s = (const char *)(intptr_t)ptr;
@@ -2519,6 +2525,24 @@ static int64_t _wasm_stdout_display_string(int64_t obj) {
        needs `cap >= 8` — but keeping the ordering tight mirrors the other
        early-return checks and makes the intent explicit). */
     if (_looks_like_empty_pack(obj)) return WSTR("@()");
+    /* Bytes render as `Bytes[@[...]]` (interpreter shape). Checked before
+       the list branch: the Bytes layout would otherwise fall through to
+       the string fallback and print garbage (it no longer matches the
+       list magic since the handler ABI moved to the shared TAIDBYT
+       layout). */
+    if (_looks_like_bytes(obj)) {
+        int64_t len = _wasm_bytes_len(obj);
+        _wasm_strbuf sb;
+        _sb_init(&sb);
+        _sb_append(&sb, "Bytes[@[");
+        for (int64_t i = 0; i < len; i++) {
+            if (i > 0) _sb_append(&sb, ", ");
+            int64_t item_str = taida_int_to_str((int64_t)_wasm_bytes_at(obj, i));
+            _sb_append(&sb, (const char *)(intptr_t)item_str);
+        }
+        _sb_append(&sb, "]]");
+        return _sb_finish(&sb);
+    }
     /* C23B-003 reopen 2: Lists must render items through the full-form
        debug helper so nested HashMap/Set/Pack keep their interpreter
        shape. `_wasm_list_to_string` alone would dispatch those items
@@ -4643,6 +4667,14 @@ int64_t taida_collection_get(int64_t ptr, int64_t item) {
     if (_is_wasm_hashmap(ptr)) {
         int64_t key_hash = taida_value_hash(item);
         return taida_hashmap_get_lax(ptr, key_hash, item);
+    }
+    /* Bytes.get(idx) -> Lax[Int] (native mirror). Bytes use the
+       [magic, len, byte...] layout, not the list layout, so the list
+       path below would read past the two header slots. */
+    if (_looks_like_bytes(ptr)) {
+        int64_t len = _wasm_bytes_len(ptr);
+        if (item < 0 || item >= len) return taida_lax_empty(0);
+        return taida_lax_new((int64_t)_wasm_bytes_at(ptr, item), 0);
     }
     /* List/Set: index-based access */
     return taida_list_get(ptr, item);

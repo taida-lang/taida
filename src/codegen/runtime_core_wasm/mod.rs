@@ -241,7 +241,15 @@ mod tests {
         //   484,166 -> 484,517.
         // 2026-06-11 numeric fingerprint = f64 image
         //   (01_core.inc.c) — see the native twin. 484,517 -> 483,936.
-        const EXPECTED_TOTAL_LEN: usize = 483_936;
+        // 2026-06-12 F62B-012 Bytes layout unification (01_core /
+        //   04_json_async): taida_collection_get / taida_polymorphic_length
+        //   / _wasm_stdout_display_string gain the native-mirror Bytes
+        //   branches, and the JSON wire encode/decode helpers
+        //   (_wc_wire_bytes_len / _wc_wire_bytes_at /
+        //   _wc_json_bytes_from_raw) speak the shared
+        //   [TAIDBYT, len, byte...] layout instead of the list shape the
+        //   ABI helpers used to emit. 483,936 -> 486,300.
+        const EXPECTED_TOTAL_LEN: usize = 486_300;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

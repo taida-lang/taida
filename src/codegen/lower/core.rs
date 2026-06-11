@@ -264,6 +264,22 @@ impl Lowering {
         format!("m{:016x}", simple_hash(path))
     }
 
+    /// F62B-011: lambda / partial-application symbols are namespaced per
+    /// module. Each imported module is lowered by a fresh `Lowering` whose
+    /// `lambda_counter` restarts at 0, and the wasm module merge drops
+    /// same-named functions — without the module key a module's lambda
+    /// silently resolves to another module's lambda body.
+    pub(crate) fn peek_lambda_symbol(&self, kind: &str) -> String {
+        let key = self.module_key.as_deref().unwrap_or("main");
+        format!("_taida_{}_{}_{}", kind, key, self.lambda_counter)
+    }
+
+    pub(crate) fn next_lambda_symbol(&mut self, kind: &str) -> String {
+        let name = self.peek_lambda_symbol(kind);
+        self.lambda_counter += 1;
+        name
+    }
+
     /// Register the IR var holding the return-tag
     /// captured immediately after a callback / closure invocation, so
     /// downstream tag-aware ops (`taida_to_string_dispatch` /

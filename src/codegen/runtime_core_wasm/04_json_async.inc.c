@@ -477,13 +477,20 @@ static void _wc_json_schema_fail(const char *message) {
 }
 
 static int64_t _wc_json_bytes_from_raw(const unsigned char *src, int len) {
-    int64_t list = taida_list_new();
-    taida_list_set_elem_tag(list, 0);
+    /* Bytes use the shared [TAIDBYT, len, byte...] layout (one int64_t per
+       byte) so decoded values are real Bytes for every consumer
+       (Utf8Decode / get / length / sha256 / display) — the list-shaped
+       value this used to build was only readable by code that confused
+       Bytes with @[Int]. */
     if (len < 0) len = 0;
+    int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)((2 + (int64_t)len) * 8));
+    if (!bytes) return 0;
+    bytes[0] = TAIDA_WASM_BYTES_MAGIC;
+    bytes[1] = len;
     for (int i = 0; i < len; i++) {
-        list = taida_list_push(list, src ? (int64_t)src[i] : 0);
+        bytes[2 + i] = src ? (int64_t)src[i] : 0;
     }
-    return list;
+    return (int64_t)(intptr_t)bytes;
 }
 
 static int _wc_b64_value(char c) {
@@ -1464,6 +1471,15 @@ static char *_wc_wire_schema_copy(const char *d, int len) {
 }
 
 static int _wc_wire_bytes_len(int64_t value) {
+    /* Real Bytes ([TAIDBYT, len, byte...]) take priority; the string and
+       list arms survive as wire-compat fallbacks for Str bodies and
+       legacy @[Int] payloads. */
+    if (_looks_like_bytes(value)) {
+        int64_t len = ((int64_t *)(intptr_t)value)[1];
+        if (len < 0) return 0;
+        if (len > 0x1000000) return 0x1000000;
+        return (int)len;
+    }
     if (_wc_looks_like_string(value)) return _wf_strlen((const char *)(intptr_t)value);
     if (!_wc_looks_like_list(value)) return 0;
     int64_t *list = (int64_t *)(intptr_t)value;
@@ -1474,6 +1490,9 @@ static int _wc_wire_bytes_len(int64_t value) {
 }
 
 static unsigned char _wc_wire_bytes_at(int64_t value, int idx) {
+    if (_looks_like_bytes(value)) {
+        return (unsigned char)(((int64_t *)(intptr_t)value)[2 + idx] & 0xff);
+    }
     if (_wc_looks_like_string(value)) {
         const unsigned char *s = (const unsigned char *)(intptr_t)value;
         return s ? s[idx] : 0;

@@ -237,31 +237,28 @@ static int64_t abi_pair_list_copy(int64_t list_ptr) {
 }
 
 static int64_t abi_bytes_default(void) {
-    int64_t cap = 8;
-    int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)((ABI_WASM_LIST_ELEMS + cap + 1) * 8));
+    int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)(2 * 8));
     if (!bytes) return 0;
-    bytes[0] = cap;
+    bytes[0] = ABI_BYTES_MAGIC;
     bytes[1] = 0;
-    bytes[2] = ABI_TAG_INT;
-    bytes[3] = ABI_WASM_LIST_MAGIC;
-    bytes[ABI_WASM_LIST_ELEMS + cap] = ABI_WASM_LIST_MAGIC;
     return (int64_t)(intptr_t)bytes;
 }
 
+/* Bytes values use the shared wasm runtime layout [magic, len, byte0, ...]
+   (one int64_t per byte, TAIDBYT magic) so the core Bytes runtime
+   (Utf8Decode, ByteAt, sha256, display kind probes, ...) recognises handler
+   bodies. The list-shaped layout this helper used to emit was readable by
+   the ABI's own accessors but invisible to every Bytes consumer outside
+   this file. */
 static int64_t abi_bytes_from_raw(const unsigned char *src, int32_t len) {
     if (len < 0) len = 0;
-    int64_t cap = len < 8 ? 8 : len;
-    int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)((ABI_WASM_LIST_ELEMS + cap + 1) * 8));
+    int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)((2 + (int64_t)len) * 8));
     if (!bytes) return abi_bytes_default();
-    bytes[0] = cap;
+    bytes[0] = ABI_BYTES_MAGIC;
     bytes[1] = len;
-    bytes[2] = ABI_TAG_INT;
-    bytes[3] = ABI_WASM_LIST_MAGIC;
     for (int32_t i = 0; i < len; i++) {
-        bytes[ABI_WASM_LIST_ELEMS + i] = src ? (int64_t)src[i] : 0;
+        bytes[2 + i] = src ? (int64_t)src[i] : 0;
     }
-    for (int64_t i = len; i < cap; i++) bytes[ABI_WASM_LIST_ELEMS + i] = 0;
-    bytes[ABI_WASM_LIST_ELEMS + cap] = ABI_WASM_LIST_MAGIC;
     return (int64_t)(intptr_t)bytes;
 }
 

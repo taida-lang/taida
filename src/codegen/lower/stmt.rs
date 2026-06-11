@@ -1000,8 +1000,7 @@ impl Lowering {
                     self.lambda_funcs.push(inner_ir);
                 } else {
                     // キャプチャあり: クロージャとして生成
-                    let lambda_name = format!("_taida_lambda_{}", self.lambda_counter);
-                    self.lambda_counter += 1;
+                    let lambda_name = self.next_lambda_symbol("lambda");
 
                     // lambda_vars と closure_vars に登録
                     self.lambda_vars
@@ -2257,7 +2256,9 @@ impl Lowering {
             Statement::Assignment(assign) => {
                 // ラムダが変数に代入される場合、マッピングを記録
                 if let Expr::Lambda(params, body, _) = &assign.value {
-                    let next_lambda_name = format!("_taida_lambda_{}", self.lambda_counter);
+                    // Must mirror the name `lower_lambda` will allocate for
+                    // this counter value (peek, no increment).
+                    let next_lambda_name = self.peek_lambda_symbol("lambda");
                     let param_names: std::collections::HashSet<&str> =
                         params.iter().map(|p| p.name.as_str()).collect();
                     let free_vars = self.collect_free_vars(body, &param_names);
@@ -2718,8 +2719,7 @@ impl Lowering {
                     self.lambda_funcs.push(ir);
                 } else {
                     // キャプチャあり: クロージャとして生成
-                    let lambda_name = format!("_taida_lambda_{}", self.lambda_counter);
-                    self.lambda_counter += 1;
+                    let lambda_name = self.next_lambda_symbol("lambda");
 
                     self.lambda_vars
                         .insert(fd.name.clone(), lambda_name.clone());

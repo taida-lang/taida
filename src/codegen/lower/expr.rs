@@ -2185,9 +2185,7 @@ impl Lowering {
         callee: &Expr,
         args: &[Expr],
     ) -> Result<IrVar, LowerError> {
-        let lambda_id = self.lambda_counter;
-        self.lambda_counter += 1;
-        let lambda_name = format!("_taida_partial_{}", lambda_id);
+        let lambda_name = self.next_lambda_symbol("partial");
 
         // Evaluate non-hole arguments and track hole positions
         let mut captured_vars: Vec<(usize, IrVar)> = Vec::new(); // (arg_index, ir_var)
@@ -2299,9 +2297,7 @@ impl Lowering {
         params: &[Param],
         body: &Expr,
     ) -> Result<IrVar, LowerError> {
-        let lambda_id = self.lambda_counter;
-        self.lambda_counter += 1;
-        let lambda_name = format!("_taida_lambda_{}", lambda_id);
+        let lambda_name = self.next_lambda_symbol("lambda");
 
         // キャプチャ変数の検出: ラムダ本体で使われる変数のうち、
         // パラメータでもなく、ユーザー定義関数でもないもの
