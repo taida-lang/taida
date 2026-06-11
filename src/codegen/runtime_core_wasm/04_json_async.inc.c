@@ -654,27 +654,18 @@ static int64_t _wc_json_default_value_for_desc(const char *desc) {
         }
         case 'b': return 0;
         case 'y': return _wc_json_bytes_from_raw((const unsigned char *)"", 0);
+        /* F62B-015: defaults are built through the MISSING-value path
+           (NULL jval) — a synthesized WC_JSON_NULL would now trip the
+           present-but-wrong-kind validation and fail every cast whose
+           default is computed after schema application. */
         case 'Q': {
-            wc_json_val null_val;
-            null_val.type = WC_JSON_NULL;
-            null_val.str_val = (char *)0; null_val.arr = (wc_json_array *)0; null_val.obj = (wc_json_obj *)0;
-            null_val.int_val = 0; null_val.float_val = 0.0;
-            return _wc_json_apply_web_request(&null_val);
+            return _wc_json_apply_web_request((wc_json_val *)0);
         }
         case 'R': {
-            wc_json_val null_val;
-            null_val.type = WC_JSON_NULL;
-            null_val.str_val = (char *)0; null_val.arr = (wc_json_array *)0; null_val.obj = (wc_json_obj *)0;
-            null_val.int_val = 0; null_val.float_val = 0.0;
-            return _wc_json_apply_web_response(&null_val);
+            return _wc_json_apply_web_response((wc_json_val *)0);
         }
         case 'T': {
-            wc_json_val null_val;
-            null_val.type = WC_JSON_NULL;
-            null_val.str_val = (char *)0; null_val.arr = (wc_json_array *)0;
-            null_val.obj = (wc_json_obj *)0;
-            null_val.int_val = 0; null_val.float_val = 0.0;
-            return _wc_json_apply_schema(&null_val, &desc);
+            return _wc_json_apply_schema((wc_json_val *)0, &desc);
         }
         case 'L': {
             return taida_list_new();
@@ -757,6 +748,12 @@ static int64_t _wc_json_to_bool(wc_json_val *jv) {
 }
 
 /* ── Apply schema descriptor to JSON value ── */
+/* F62B-015: schema casting validates JSON kinds like the interpreter
+   (json_to_typed_value_checked). A missing field (NULL jval — object-field
+   misses are normalised to NULL in the 'T' arm, including explicit JSON
+   null) takes the type default and stays a successful cast; a PRESENT
+   value of the wrong JSON kind marks the whole cast failed so the mold
+   returns Lax.has_value=false instead of silently coercing. */
 static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
     if (!desc || !*desc || !**desc) return 0;
     const char *d = *desc;
@@ -764,25 +761,37 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
     switch (d[0]) {
         case 'i': {
             *desc = d + 1;
-            if (!jval || jval->type == WC_JSON_NULL) return 0;
-            return _wc_json_to_int(jval);
+            if (!jval) return 0;
+            if (jval->type == WC_JSON_INT) return jval->int_val;
+            if (jval->type == WC_JSON_FLOAT
+                && jval->float_val == (double)(int64_t)jval->float_val) {
+                return (int64_t)jval->float_val;
+            }
+            _wc_json_schema_fail("JSON schema decode failed: expected an integer");
+            return 0;
         }
         case 'f': {
             *desc = d + 1;
-            if (!jval || jval->type == WC_JSON_NULL) return _d2l(0.0);
-            return _wc_json_to_float(jval);
+            if (!jval) return _d2l(0.0);
+            if (jval->type == WC_JSON_INT || jval->type == WC_JSON_FLOAT) {
+                return _wc_json_to_float(jval);
+            }
+            _wc_json_schema_fail("JSON schema decode failed: expected a number");
+            return _d2l(0.0);
         }
         case 's': {
             *desc = d + 1;
-            if (!jval || jval->type == WC_JSON_NULL) {
-                return taida_str_alloc(0);
-            }
-            return _wc_json_to_str(jval);
+            if (!jval) return taida_str_alloc(0);
+            if (jval->type == WC_JSON_STRING) return _wc_json_to_str(jval);
+            _wc_json_schema_fail("JSON schema decode failed: expected a string");
+            return taida_str_alloc(0);
         }
         case 'b': {
             *desc = d + 1;
-            if (!jval || jval->type == WC_JSON_NULL) return 0;
-            return _wc_json_to_bool(jval);
+            if (!jval) return 0;
+            if (jval->type == WC_JSON_BOOL) return jval->int_val ? 1 : 0;
+            _wc_json_schema_fail("JSON schema decode failed: expected a boolean");
+            return 0;
         }
         case 'y': {
             *desc = d + 1;
@@ -827,6 +836,13 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
 
             int64_t pack = taida_pack_new(field_count + 1);
 
+            /* A present non-object (including explicit null) cannot cast to
+               a record schema; a NULL jval (missing nested field) builds
+               the all-defaults pack and stays successful. */
+            if (jval && jval->type != WC_JSON_OBJECT) {
+                _wc_json_schema_fail("JSON schema decode failed: expected an object");
+            }
+
             int idx = 0;
             while (*d && *d != '}') {
                 char fname[256];
@@ -841,6 +857,11 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
                 wc_json_val *field_jval = (wc_json_val *)0;
                 if (jval && jval->type == WC_JSON_OBJECT) {
                     field_jval = _wc_json_obj_get(jval->obj, fname);
+                }
+                /* Explicit JSON null is field absence (null-exclusion
+                   philosophy): take the field default without failing. */
+                if (field_jval && field_jval->type == WC_JSON_NULL) {
+                    field_jval = (wc_json_val *)0;
                 }
 
                 int64_t field_val = _wc_json_apply_schema(field_jval, &d);
@@ -870,6 +891,11 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
 
             int64_t list = taida_list_new();
 
+            /* Present non-array (including explicit null) is a failed cast;
+               a missing field stays the empty-list default. */
+            if (jval && jval->type != WC_JSON_ARRAY) {
+                _wc_json_schema_fail("JSON schema decode failed: expected an array");
+            }
             if (jval && jval->type == WC_JSON_ARRAY && jval->arr) {
                 for (int i = 0; i < jval->arr->count; i++) {
                     const char *elem_desc = inner_desc;

@@ -249,7 +249,12 @@ mod tests {
         //   _wc_json_bytes_from_raw) speak the shared
         //   [TAIDBYT, len, byte...] layout instead of the list shape the
         //   ABI helpers used to emit. 483,936 -> 486,300.
-        const EXPECTED_TOTAL_LEN: usize = 486_300;
+        // 2026-06-12 F62B-015 wasm JSON schema validation (04_json_async):
+        //   _wc_json_apply_schema rejects present-but-wrong-kind values
+        //   like the interpreter's json_to_typed_value_checked (missing /
+        //   null fields keep defaults), and default construction goes
+        //   through the missing-value path. 486,300 -> 487881.
+        const EXPECTED_TOTAL_LEN: usize = 487881;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),
