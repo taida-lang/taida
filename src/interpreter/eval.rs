@@ -21,7 +21,7 @@ use crate::parser::*;
 /// Set conservatively to account for multiple Rust stack frames per call
 /// (eval_statements + eval_expr + call_function = ~5 frames per recursion,
 /// plus debug builds have larger frames).
-const MAX_CALL_DEPTH: usize = 256;
+const MAX_CALL_DEPTH: usize = 8192;
 
 /// Runtime error (distinct from thrown Taida errors).
 #[derive(Debug, Clone)]

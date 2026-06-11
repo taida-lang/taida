@@ -65,6 +65,26 @@ pub(crate) fn run_source(source: &str, filename: &str, no_check: bool) {
     // C22-2 / C22B-002: CLI execution uses stream mode so that `stdout(...)`
     // / `debug(...)` flush to the terminal immediately. REPL (`run_repl`)
     // and in-process tests continue to use `Interpreter::new()` (buffered).
+    //
+    // F62B-027: evaluation runs on a dedicated thread with a large stack.
+    // Each Taida call costs multiple Rust frames, so the raised
+    // MAX_CALL_DEPTH (8192, matching the failure depth class of the
+    // compiled backends) does not fit in the default 8 MiB main stack.
+    // The reservation is virtual address space — pages are committed only
+    // as actually used.
+    let filename_owned = filename.to_string();
+    let eval_thread = std::thread::Builder::new()
+        .name("taida-eval".to_string())
+        .stack_size(512 * 1024 * 1024)
+        .spawn(move || run_program_on_eval_thread(program, &filename_owned))
+        .expect("spawn taida eval thread");
+    match eval_thread.join() {
+        Ok(()) => {}
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+fn run_program_on_eval_thread(program: taida::parser::Program, filename: &str) {
     let mut interpreter = Interpreter::new_streaming();
     // Set current file for module resolution
     if let Ok(canonical) = fs::canonicalize(filename) {

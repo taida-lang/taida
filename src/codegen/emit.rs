@@ -155,6 +155,11 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val],
             returns: &[Val],
         },
+        // F62B-027: per-call stack guard (entry-block injection).
+        "taida_stack_guard" => RuntimeAbi {
+            params: &[],
+            returns: &[],
+        },
         // C18B-005 fix: runtime abort with message. Used by the
         // Ordinal[] lowering to reject non-Enum arguments at run time
         // with the same shape as the interpreter's RuntimeError.
@@ -2344,6 +2349,10 @@ impl Emitter {
 
     /// 全 IR 関数からランタイム関数呼び出しを収集して宣言
     fn predeclare_all_runtime_funcs(&mut self, ir_module: &IrModule) -> Result<(), EmitError> {
+        // F62B-027: the stack guard is injected into every function's entry
+        // block by the emitter itself (it never appears in the IR), so it
+        // must be declared unconditionally.
+        self.declare_runtime_func("taida_stack_guard", &[], &[])?;
         for ir_func in &ir_module.functions {
             self.predeclare_runtime_funcs_recursive(&ir_func.body)?;
         }
@@ -2690,6 +2699,13 @@ impl Emitter {
                 value_ty: self.abi.value_ty(),
                 abi: self.abi,
             };
+
+            // F62B-027: stack guard at function entry — outside the TCO
+            // loop, so tail-recursive iterations pay nothing. Deep non-tail
+            // recursion exits with a diagnostic instead of a SIGSEGV.
+            if let Some(&guard_ref) = ectx.func_refs.get("taida_stack_guard") {
+                builder.ins().call(guard_ref, &[]);
+            }
 
             if has_tail_call {
                 // TCO: パラメータを Variable に格納し、ループブロックを作成

@@ -4740,6 +4740,8 @@ int main(int argc, char **argv) {
      * other two backends. */
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IOLBF, 0);
+    /* F62B-027: record the stack base + budget for taida_stack_guard. */
+    taida_stack_guard_init();
     /* C12-5 (FB-18): `_taida_main` now returns whatever the final expression
      * evaluates to — in particular `stdout(...)` returns the byte count (Int)
      * instead of Unit. Leaking that value into the process exit code would

@@ -18,6 +18,7 @@
 // F55 S4: getentropy(2) for crypto.randomBytes (glibc / macOS / *BSD).
 #if defined(__linux__) || defined(__APPLE__) || defined(__unix__)
 #include <sys/random.h>
+#include <sys/resource.h>  /* F62B-027: RLIMIT_STACK for the stack guard */
 #endif
 
 // Allocation-path counters for the perf measurement build. Compiled in only
@@ -1361,6 +1362,44 @@ void taida_gorilla(void) { exit(1); }
    given code. exit() flushes stdio buffers per the C standard; the
    declared Taida return type is :Int but control never returns. */
 taida_val taida_exit(taida_val code) { exit((int)code); }
+
+/* F62B-027: stack guard for non-tail recursion. The interpreter rejects
+   depth overruns with a diagnostic; native used to ride the OS stack
+   into a silent SIGSEGV. main() records the stack base and a budget
+   derived from RLIMIT_STACK (minus a safety margin for runtime/libc
+   frames); the compiler injects a `taida_stack_guard()` call into every
+   user-function entry (outside the TCO loop, so tail recursion is
+   unaffected), which compares the current stack position against the
+   budget and exits diagnostically instead of crashing. */
+static char *taida_stack_guard_base = 0;
+static int64_t taida_stack_guard_budget = 0;
+
+void taida_stack_guard_init(void) {
+    char probe;
+    taida_stack_guard_base = &probe;
+    int64_t limit = 8 * 1024 * 1024; /* conservative default */
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY
+        && (int64_t)rl.rlim_cur > 0) {
+        limit = (int64_t)rl.rlim_cur;
+    }
+    /* Leave 1 MiB of headroom for runtime / libc frames below the
+       guarded user frames. */
+    taida_stack_guard_budget = limit - (1024 * 1024);
+    if (taida_stack_guard_budget < 1024 * 1024) {
+        taida_stack_guard_budget = 1024 * 1024;
+    }
+}
+
+void taida_stack_guard(void) {
+    char probe;
+    if (taida_stack_guard_base
+        && (int64_t)(taida_stack_guard_base - &probe) > taida_stack_guard_budget) {
+        fprintf(stderr,
+                "Maximum call stack depth exceeded. Use tail recursion or restructure the code.\n");
+        exit(1);
+    }
+}
 
 // C18B-005 fix: print a `RuntimeError: <msg>` line to stderr and exit
 // with status 1. Used by the native Ordinal[] lowering to reject
