@@ -2736,13 +2736,20 @@ pub(crate) fn load_wrangler_host_capability_manifest(
     })
 }
 
-/// Well-known capability name for the ambient outbound `fetch` of the edge
-/// runtime. Unlike every other capability it is not a wrangler binding —
-/// Cloudflare Workers always expose global `fetch` — so the manifest reader
-/// injects it unconditionally and the generated glue resolves it to a
-/// `globalThis.fetch` bridge instead of `env[name]`.
+/// Well-known capabilities of the edge runtime. Unlike every other
+/// capability they are not wrangler bindings — Cloudflare Workers always
+/// expose global `fetch` and `crypto` — so the manifest reader injects them
+/// unconditionally and the generated glue resolves them to ambient bridges
+/// instead of `env[name]`.
+///
+/// `crypto` exists because the handler re-executes after every host-call
+/// resume: entropy taken from guest-side `randomBytes` before a suspend
+/// point regenerates on every re-execution, so randomness that must stay
+/// stable across host calls is itself fetched as a host call.
 pub(crate) const WASM_EDGE_FETCH_CAPABILITY_NAME: &str = "fetch";
 pub(crate) const WASM_EDGE_FETCH_CAPABILITY_KIND: &str = "cloudflare/fetch";
+pub(crate) const WASM_EDGE_CRYPTO_CAPABILITY_NAME: &str = "crypto";
+pub(crate) const WASM_EDGE_CRYPTO_CAPABILITY_KIND: &str = "cloudflare/crypto";
 
 pub(crate) fn wasm_edge_host_capability_manifest_for_source(
     source_path: &Path,
@@ -2751,12 +2758,20 @@ pub(crate) fn wasm_edge_host_capability_manifest_for_source(
         Some(path) => load_wrangler_host_capability_manifest(&path)?,
         None => Vec::new(),
     };
-    let fetch_pair = (
-        WASM_EDGE_FETCH_CAPABILITY_NAME.to_string(),
-        WASM_EDGE_FETCH_CAPABILITY_KIND.to_string(),
-    );
-    if !capabilities.contains(&fetch_pair) {
-        capabilities.push(fetch_pair);
+    for (name, kind) in [
+        (
+            WASM_EDGE_FETCH_CAPABILITY_NAME,
+            WASM_EDGE_FETCH_CAPABILITY_KIND,
+        ),
+        (
+            WASM_EDGE_CRYPTO_CAPABILITY_NAME,
+            WASM_EDGE_CRYPTO_CAPABILITY_KIND,
+        ),
+    ] {
+        let pair = (name.to_string(), kind.to_string());
+        if !capabilities.contains(&pair) {
+            capabilities.push(pair);
+        }
     }
     Ok(capabilities)
 }
@@ -2889,11 +2904,17 @@ mod wasm_edge_manifest_tests {
             .expect("manifest without wrangler");
         assert_eq!(
             manifest,
-            vec![(
-                WASM_EDGE_FETCH_CAPABILITY_NAME.to_string(),
-                WASM_EDGE_FETCH_CAPABILITY_KIND.to_string()
-            )],
-            "fetch must be injected even with no wrangler manifest"
+            vec![
+                (
+                    WASM_EDGE_FETCH_CAPABILITY_NAME.to_string(),
+                    WASM_EDGE_FETCH_CAPABILITY_KIND.to_string()
+                ),
+                (
+                    WASM_EDGE_CRYPTO_CAPABILITY_NAME.to_string(),
+                    WASM_EDGE_CRYPTO_CAPABILITY_KIND.to_string()
+                )
+            ],
+            "fetch + crypto must be injected even with no wrangler manifest"
         );
 
         fs::write(

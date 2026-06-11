@@ -198,6 +198,28 @@ handle req: WebRequest =
 プラットフォーム既定 (follow) です。host 例外・ネットワーク失敗は通常の
 host call 失敗として rejected `Async[Out]` になります。
 
+### 3.2 Well-known capability: `crypto`
+
+`("crypto", "cloudflare/crypto")` も `wasm-edge` の manifest reader が常時
+注入する well-known capability です。生成 glue はホストの CSPRNG
+(`crypto.getRandomValues`) に解決します。
+
+| step | 引数 | 意味 |
+|------|------|------|
+| `randomHex` | `@[n: Int]` | n バイトの乱数を小文字 hex `Str` (2n 文字) で解決する。上限 65536 バイト。 |
+
+```taida
+cryptoCap <= HostCapability["crypto", "cloudflare/crypto"]()
+token <=< Cage[cryptoCap, HostCall[@[HostStep["randomHex", @[16]]()], Str]()]()
+```
+
+guest 側 `randomBytes` との使い分け: handler は host call の resume の
+たびに先頭から再実行されるため、**suspend をまたいで安定していなければ
+ならない乱数** (例: 発行 token — D1 へ書く hash とクライアントへ返す値が
+一致する必要がある) は `crypto` capability で取得します。host call の
+結果は記録され再実行時にそのまま再生されるためです。suspend をまたがない
+乱数は guest 側 `randomBytes` で十分です。
+
 ---
 
 ## 4. Handler Mode

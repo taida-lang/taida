@@ -440,12 +440,30 @@ const taidaFetchCapability = {{
   }},
 }};
 
+// Well-known `crypto` capability (kind cloudflare/crypto): stable
+// entropy across host-call resumes. The handler re-executes after every
+// resume, so guest-side randomBytes taken before a suspend point would
+// regenerate per re-execution; randomHex(n) fetches the bytes as a host
+// call and replays deterministically.
+const taidaCryptoCapability = {{
+  randomHex(n) {{
+    const count = Math.max(0, Math.min(65536, Number(n) || 0));
+    const bytes = new Uint8Array(count);
+    crypto.getRandomValues(bytes);
+    let out = "";
+    for (const b of bytes) out += b.toString(16).padStart(2, "0");
+    return out;
+  }},
+}};
+
 async function dispatchTaidaHostCall(envelope, env) {{
     const id = envelope.id;
     try {{
       let target = envelope.capability === "fetch"
         ? taidaFetchCapability
-        : env[envelope.capability];
+        : envelope.capability === "crypto"
+          ? taidaCryptoCapability
+          : env[envelope.capability];
       for (const step of envelope.steps) {{
         target = await target[step.method](...step.args);
       }}

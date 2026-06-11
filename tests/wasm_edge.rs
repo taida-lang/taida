@@ -651,13 +651,14 @@ fn wasm_edge_handler_glue_keeps_host_dispatch_policy_free() {
         .expect("dispatcher should end before response helpers");
     let dispatch = &glue[dispatch_start..dispatch_end];
 
-    // Resolution is a fixed two-entry table: the well-known ambient fetch
-    // capability, then env binding lookup. Anything beyond name-based
+    // Resolution is a fixed table: the well-known ambient capabilities
+    // (fetch, crypto), then env binding lookup. Anything beyond name-based
     // resolution (kind switches, schema checks, allow-lists) stays out.
     assert!(
         dispatch.contains("envelope.capability === \"fetch\"")
+            && dispatch.contains("envelope.capability === \"crypto\"")
             && dispatch.contains("env[envelope.capability]"),
-        "dispatcher should resolve the well-known fetch capability and then the binding name"
+        "dispatcher should resolve the well-known capabilities and then the binding name"
     );
     assert!(
         dispatch.contains("target = await target[step.method](...step.args);"),
