@@ -1495,6 +1495,13 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         {
             format!("int64_t {}(int64_t value);", name)
         }
+        // F62B-014 companion: wasm-edge gained randomBytes — the Bytes layout
+        // is core-shared since the F62B-012 unification and the generated
+        // Workers glue provides the WASI random_get import backed by
+        // crypto.getRandomValues (runtime_edge_host.c).
+        "taida_crypto_random_bytes" if profile == WasmProfile::Edge => {
+            format!("int64_t {}(int64_t value);", name)
+        }
         "taida_crypto_hex_decode" | "taida_crypto_base64_decode" | "taida_crypto_random_bytes"
             if matches!(profile, WasmProfile::Min | WasmProfile::Edge) =>
         {
@@ -1506,12 +1513,31 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             return Err(WasmCEmitError {
                 message: format!(
                     "{} does not support runtime function '{}' \
-                     (crypto Bytes producers require the wasm-wasi / wasm-full \
-                     Bytes runtime; randomBytes additionally needs the WASI \
-                     random_get import). Use wasm-wasi, wasm-full, or the \
-                     native backend instead.",
+                     (hexDecode / base64Decode live in the wasm-wasi runtime \
+                     layer; randomBytes additionally needs the WASI \
+                     random_get import, which wasm-min does not provide). \
+                     Use wasm-wasi, wasm-full, or the native backend instead.",
                     profile_name, name
                 ),
+            });
+        }
+        // F62B-014: nowMs is backend-uniform per prelude.md §11. wasm-min is
+        // the documented exception (no WASI imports by profile contract).
+        "taida_time_now_ms"
+            if matches!(
+                profile,
+                WasmProfile::Wasi | WasmProfile::Full | WasmProfile::Edge
+            ) =>
+        {
+            "int64_t taida_time_now_ms(void);".to_string()
+        }
+        "taida_time_now_ms" if profile == WasmProfile::Min => {
+            return Err(WasmCEmitError {
+                message: "wasm-min does not support runtime function 'taida_time_now_ms' \
+                     (nowMs needs the WASI clock_time_get import, which the wasm-min \
+                     profile contract excludes). Use wasm-wasi, wasm-edge, wasm-full, \
+                     or the native backend instead."
+                    .to_string(),
             });
         }
         "taida_bytes_new_filled"

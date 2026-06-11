@@ -542,13 +542,24 @@ pub fn default_wasm_cache_dir(project_dir: Option<&Path>) -> PathBuf {
 }
 
 /// 単一 `.td` ファイルを Native `.o` にコンパイル（リンクなし）
+/// 依存モジュール用 — entry_mode を立てない (export ありはライブラリ lower)。
 fn compile_to_object(input_path: &Path) -> Result<(PathBuf, ModuleImports), CompileError> {
-    compile_to_object_with_exports(input_path, &[])
+    compile_to_object_inner(input_path, &[], false)
 }
 
+/// ビルド entry 用 — F62B-013: entry は `<<<` export があっても
+/// `_taida_main` を持つ実行可能ファイルとして lower する。
 fn compile_to_object_with_exports(
     input_path: &Path,
     extra_exports: &[String],
+) -> Result<(PathBuf, ModuleImports), CompileError> {
+    compile_to_object_inner(input_path, extra_exports, true)
+}
+
+fn compile_to_object_inner(
+    input_path: &Path,
+    extra_exports: &[String],
+    entry_mode: bool,
 ) -> Result<(PathBuf, ModuleImports), CompileError> {
     let source = fs::read_to_string(input_path).map_err(|e| CompileError {
         message: format!("failed to read '{}': {}", input_path.display(), e),
@@ -568,6 +579,7 @@ fn compile_to_object_with_exports(
         lowering.set_source_dir(parent.to_path_buf());
     }
     lowering.set_module_key(Lowering::module_key_for_path(input_path));
+    lowering.set_entry_mode(entry_mode);
     // E34 Phase 2 (Lock-B=C): run the type-checker before lowering and
     // hand the resulting Typed HIR side table over so `expr_is_bool`
     // and friends can consume `Type::Bool` decisions instead of the
@@ -1540,6 +1552,8 @@ fn wasm_frontend(
         lowering.set_source_dir(parent.to_path_buf());
     }
     lowering.set_module_key(Lowering::module_key_for_path(input_path));
+    // F62B-013: the build entry keeps _taida_main even when it exports.
+    lowering.set_entry_mode(true);
     // RC2.5: tell the lowering layer which addon backend to enforce so
     // addon-backed package imports get the correct policy-template
     // error for wasm targets (instead of silently treating them like

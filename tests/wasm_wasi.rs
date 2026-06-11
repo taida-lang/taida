@@ -1469,9 +1469,11 @@ fn wasm_wasi_superset_of_wasm_min() {
     // C12B-034: compile_c12b_034_wasm_nonbool_param added (68 → 69)
     // C13-1: compile_c13_1_tail_bind added (69 → 70)
     // F56: compile_f56_secret_carrier added (68 → 69)
+    // F62B-013/014: entry files with exports now keep _taida_main, and
+    // nowMs links on wasm-wasi (69 → 72)
     assert_eq!(
-        superset_ok, 69,
-        "WW-3: Expected exactly 69 superset-verified examples, got {}. \
+        superset_ok, 72,
+        "WW-3: Expected exactly 72 superset-verified examples, got {}. \
          If superset coverage improved, update the expected count.",
         superset_ok
     );

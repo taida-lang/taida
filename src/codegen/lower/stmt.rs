@@ -637,7 +637,13 @@ impl Lowering {
         }
 
         // ライブラリモジュール判定（2nd pass の前に実施 — is_library_module フラグが必要）
-        module.is_library = !module.exports.is_empty();
+        // F62B-013: entry として lower する場合は `<<<` export があっても
+        // 実行可能ファイル扱い (_taida_main を生成し top-level 文を実行)。
+        // interpreter のリファレンス挙動 (guide 10_modules「呼び出し方で
+        // 決まる」) と、ランタイムが _taida_main を無条件参照する事実の
+        // 両方に合わせる。dep として import される場合は従来どおり
+        // ライブラリ lower される (別 Lowering インスタンス)。
+        module.is_library = !module.exports.is_empty() && !self.entry_mode;
         self.is_library_module = module.is_library;
 
         // 2nd pass: ユーザー定義関数を IR に変換

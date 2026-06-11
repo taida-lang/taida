@@ -158,6 +158,11 @@ pub struct Lowering {
     module_key: Option<String>,
     /// ライブラリモジュールかどうか（is_library の早期判定用）
     is_library_module: bool,
+    /// F62B-013: entry として lower しているか。entry は `<<<` export が
+    /// あっても実行可能ファイル (`_taida_main` を持つ) として扱う —
+    /// guide 10_modules「ライブラリ vs 実行可能はファイルでなく呼び出し
+    /// 方で決まる」(interpreter のリファレンス挙動) に合わせる。
+    entry_mode: bool,
     /// QF-17: インポートされた TypeDef シンボル
     /// lower_type_inst で型メタデータが無い場合に constructor 呼び出しにフォールバック
     imported_type_symbols: std::collections::HashSet<String>,

@@ -173,6 +173,7 @@ impl Lowering {
             module_inits_needed: Vec::new(),
             module_key: None,
             is_library_module: false,
+            entry_mode: false,
             imported_type_symbols: std::collections::HashSet::new(),
             source_dir: None,
             imported_func_links: std::collections::HashMap::new(),
@@ -220,6 +221,15 @@ impl Lowering {
 
     pub fn set_module_key(&mut self, key: String) {
         self.module_key = Some(key);
+    }
+
+    /// F62B-013: mark this lowering as the build entry. An entry file keeps
+    /// its `_taida_main` (top-level statements run) even when it carries
+    /// `<<<` exports — the interpreter already behaves this way, and the
+    /// runtimes (`_start` / native main) reference `_taida_main`
+    /// unconditionally. Dependency lowering never sets this.
+    pub fn set_entry_mode(&mut self, entry: bool) {
+        self.entry_mode = entry;
     }
 
     pub fn module_key_for_path(path: &std::path::Path) -> String {

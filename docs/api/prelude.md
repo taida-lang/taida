@@ -1091,6 +1091,7 @@ str_b <= StrOf[req.path, req.bytes]()          // モールド形式
 | 関数 / メソッド | 例外バックエンド | 補足 |
 |----------------|------------------|------|
 | `stdinLine` | `wasm-min` / `wasm-edge` で利用不可 | WASI 入力の TTY 抽象が必要。 |
+| `nowMs` | `wasm-min` で利用不可 | WASI `clock_time_get` インポートが必要。`wasm-wasi` / `wasm-full` は WASI ホストの実時計、`wasm-edge` は生成 glue が `Date.now()` で提供する。 |
 | Regex `\b` / `\B` | Native POSIX ERE で非対応 | 単語境界が必要なら Interpreter に限定、または `(^|[^A-Za-z0-9_])` で代替。 |
 | Regex `s` フラグ (dotall) | Native POSIX ERE で非対応 | Interpreter のみ。 |
 

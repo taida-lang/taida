@@ -94,6 +94,20 @@ export async function handleTaidaRequest(request, env, ctx) {{
         view.setUint32(nwritten_ptr, total, true);
         return 0;
       }},
+      // randomBytes entropy. crypto.getRandomValues is a CSPRNG; never
+      // substitute Math.random here.
+      random_get(buf_ptr, buf_len) {{
+        const out = new Uint8Array(memory.buffer, buf_ptr, buf_len);
+        for (let off = 0; off < buf_len; off += 65536) {{
+          crypto.getRandomValues(out.subarray(off, Math.min(off + 65536, buf_len)));
+        }}
+        return 0;
+      }},
+      // nowMs wall clock (clock id is ignored; Date.now() is realtime).
+      clock_time_get(_clock_id, _precision, out_ptr) {{
+        new DataView(memory.buffer).setBigUint64(out_ptr, BigInt(Date.now()) * 1000000n, true);
+        return 0;
+      }},
     }};
 
     // -- taida_host --
@@ -280,6 +294,20 @@ async function getInstance(env) {{
           total += len;
         }}
         view.setUint32(nwritten_ptr, total, true);
+        return 0;
+      }},
+      // randomBytes entropy. crypto.getRandomValues is a CSPRNG; never
+      // substitute Math.random here.
+      random_get(buf_ptr, buf_len) {{
+        const out = new Uint8Array(memory.buffer, buf_ptr, buf_len);
+        for (let off = 0; off < buf_len; off += 65536) {{
+          crypto.getRandomValues(out.subarray(off, Math.min(off + 65536, buf_len)));
+        }}
+        return 0;
+      }},
+      // nowMs wall clock (clock id is ignored; Date.now() is realtime).
+      clock_time_get(_clock_id, _precision, out_ptr) {{
+        new DataView(memory.buffer).setBigUint64(out_ptr, BigInt(Date.now()) * 1000000n, true);
         return 0;
       }},
     }};
