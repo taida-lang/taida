@@ -1371,12 +1371,16 @@ taida_val taida_exit(taida_val code) { exit((int)code); }
    user-function entry (outside the TCO loop, so tail recursion is
    unaffected), which compares the current stack position against the
    budget and exits diagnostically instead of crashing. */
-static char *taida_stack_guard_base = 0;
+/* The base is per-thread: HTTP serving and the async OS APIs run user
+   code on pthreads whose stacks live at unrelated addresses — comparing
+   a worker probe against the main thread's base would misfire (observed
+   as native HTTP servers dying mid-request). Each thread records its
+   own base on its first guarded call (depth 1, so the recorded base is
+   effectively the true one). The budget is process-wide. */
+static __thread char *taida_stack_guard_base = 0;
 static int64_t taida_stack_guard_budget = 0;
 
 void taida_stack_guard_init(void) {
-    char probe;
-    taida_stack_guard_base = &probe;
     int64_t limit = 8 * 1024 * 1024; /* conservative default */
     struct rlimit rl;
     if (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY
@@ -1393,7 +1397,11 @@ void taida_stack_guard_init(void) {
 
 void taida_stack_guard(void) {
     char probe;
-    if (taida_stack_guard_base
+    if (!taida_stack_guard_base) {
+        taida_stack_guard_base = &probe;
+        return;
+    }
+    if (taida_stack_guard_budget
         && (int64_t)(taida_stack_guard_base - &probe) > taida_stack_guard_budget) {
         fprintf(stderr,
                 "Maximum call stack depth exceeded. Use tail recursion or restructure the code.\n");

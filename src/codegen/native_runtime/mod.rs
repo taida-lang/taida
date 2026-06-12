@@ -912,7 +912,7 @@ mod tests {
         // 2026-06-12 F62B-019 (core.c): jsonEncode slot-tag precedence.
         // 2026-06-12 native HostCall descriptor stubs + session-less cage
         //   rejection (core.c, before the marker).
-        const EXPECTED_TOTAL_LEN: usize = 1_331_048;
+        const EXPECTED_TOTAL_LEN: usize = 1_331_526;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1670,7 +1670,7 @@ mod tests {
         // land before the marker (F1 419,927 -> 420,640); F2 unchanged.
         // 2026-06-12 host descriptor stubs land before the marker
         // (F1 420,640 -> 423,646); F2 unchanged.
-        const F1_LEN: usize = 425_533;
+        const F1_LEN: usize = 426_011;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1742,6 +1742,8 @@ mod tests {
             // F62B-027 stack guard (init + watermark check) lands next to
             // taida_exit (before the marker): F1 423,916 -> 425,533; F2
             // unchanged. The sys/resource.h include adds +87 to F1 as well.
+            // F62B-027 follow-up: the guard base becomes thread-local with
+            // lazy per-thread init (before the marker): F1 425,533 -> 426,011.
             F1_LEN + 225_101,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
