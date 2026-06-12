@@ -158,7 +158,7 @@ fn float_kind_flows_through_read_paths() {
         r#"p <= @(x <= 1.5)
 stdout(p.x.toString())
 m <= hashMap().set("a", 0.5)
-m.get("a").getOrDefault(0.0) >=> g
+g <= m.get("a").getOrDefault(0.0)
 stdout(g)
 If[true, 1.5, 2.5]() >=> iv
 stdout(iv)
