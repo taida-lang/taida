@@ -9,6 +9,12 @@ pub struct AuthToken {
     pub github_token_read: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_token_publish: Option<String>,
+    /// taida.dev session token, obtained at login by exchanging the
+    /// GitHub token via `POST /auth/device`. The community API only
+    /// accepts this token; the GitHub tokens above stay reserved for
+    /// GitHub itself (ingot install / publish).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taida_token: Option<String>,
     pub username: String,
     pub created_at: String,
 }
@@ -24,6 +30,13 @@ impl AuthToken {
         self.github_token_publish
             .as_deref()
             .unwrap_or(self.github_token.as_str())
+    }
+
+    /// The taida.dev session token. None for auth.json files written
+    /// before the exchange step existed — those logins must be redone,
+    /// not silently downgraded to a GitHub token the server rejects.
+    pub fn community_token(&self) -> Option<&str> {
+        self.taida_token.as_deref()
     }
 }
 
@@ -48,7 +61,11 @@ pub fn load_token() -> Option<AuthToken> {
 
 /// 認証トークンを ~/.taida/auth.json に保存する。
 /// Unix 系ではファイルを作成時にパーミッション 0o600 (owner read/write only) で開く。
-pub fn save_token(github_token: &str, username: &str) -> Result<(), String> {
+pub fn save_token(
+    github_token: &str,
+    taida_token: Option<&str>,
+    username: &str,
+) -> Result<(), String> {
     let path = auth_json_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -69,6 +86,7 @@ pub fn save_token(github_token: &str, username: &str) -> Result<(), String> {
         github_token: github_token.to_string(),
         github_token_read: Some(github_token.to_string()),
         github_token_publish: Some(github_token.to_string()),
+        taida_token: taida_token.map(|t| t.to_string()),
         username: username.to_string(),
         created_at: now,
     };
@@ -253,6 +271,7 @@ mod tests {
             github_token: "gho_test123".to_string(),
             github_token_read: Some("gho_read".to_string()),
             github_token_publish: Some("gho_publish".to_string()),
+            taida_token: Some("a1b2c3d4".to_string()),
             username: "testuser".to_string(),
             created_at: "2026-03-06T12:00:00Z".to_string(),
         };
@@ -266,8 +285,24 @@ mod tests {
         assert_eq!(loaded.github_token, "gho_test123");
         assert_eq!(loaded.install_token(), "gho_read");
         assert_eq!(loaded.publish_token(), "gho_publish");
+        assert_eq!(loaded.community_token(), Some("a1b2c3d4"));
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// auth.json written before the taida.dev exchange step existed must
+    /// still load — with no community token, not a GitHub fallback.
+    #[test]
+    fn test_load_token_pre_exchange_format() {
+        let legacy = r#"{
+  "github_token": "gho_old",
+  "username": "olduser",
+  "created_at": "2026-03-06T12:00:00Z"
+}"#;
+        let loaded: AuthToken = serde_json::from_str(legacy).unwrap();
+        assert_eq!(loaded.username, "olduser");
+        assert_eq!(loaded.community_token(), None);
+        assert_eq!(loaded.install_token(), "gho_old");
     }
 
     #[test]
@@ -283,7 +318,7 @@ mod tests {
             env::set_var("HOME", tmp.to_string_lossy().as_ref());
         }
 
-        let result = save_token("gho_testperms", "permuser");
+        let result = save_token("gho_testperms", Some("taida_sess"), "permuser");
         assert!(result.is_ok(), "save_token failed: {:?}", result);
 
         let path = tmp.join(".taida").join("auth.json");
@@ -315,6 +350,7 @@ mod tests {
         assert_eq!(loaded.github_token, "gho_testperms");
         assert_eq!(loaded.install_token(), "gho_testperms");
         assert_eq!(loaded.publish_token(), "gho_testperms");
+        assert_eq!(loaded.community_token(), Some("taida_sess"));
 
         // 復元
         unsafe {

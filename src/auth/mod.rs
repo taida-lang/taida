@@ -135,8 +135,20 @@ fn run_login(args: &[String]) {
         }
     };
 
-    // ステップ5: トークンを保存
-    match save_token(&access_token, &username) {
+    // ステップ5: GitHub トークンを taida.dev セッショントークンに交換する。
+    // community API が受けるのはこのセッショントークンだけで、GitHub
+    // トークンは GitHub への呼び出し (ingot install / publish) 専用に残る。
+    println!("Exchanging the GitHub token for a taida.dev session...");
+    let taida_token = match exchange_device_token(&access_token) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // ステップ6: トークンを保存
+    match save_token(&access_token, Some(&taida_token), &username) {
         Ok(()) => {
             println!("Logged in as {}.", username);
         }
@@ -145,6 +157,27 @@ fn run_login(args: &[String]) {
             std::process::exit(1);
         }
     }
+}
+
+/// `POST /auth/device` で GitHub アクセストークンを taida.dev のセッション
+/// トークンに交換する。レスポンスは authCallback と同形の
+/// `{token, username, expires_at}`。
+fn exchange_device_token(github_token: &str) -> Result<String, String> {
+    let empty_body = serde_json::json!({});
+    let (status, body) =
+        crate::community::api::api_post("/auth/device", &empty_body, Some(github_token))?;
+    if status != 201 {
+        return Err(format!(
+            "taida.dev rejected the token exchange (HTTP {}): {}",
+            status, body
+        ));
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("Unexpected response from taida.dev: {}", e))?;
+    parsed["token"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Unexpected response from taida.dev: missing token field".to_string())
 }
 
 fn run_logout(args: &[String]) {
@@ -191,6 +224,11 @@ fn run_status(args: &[String]) {
         Some(token) => {
             println!("Logged in as {}.", token.username);
             println!("Token created: {}", token.created_at);
+            if token.community_token().is_none() {
+                println!(
+                    "taida.dev session: none (login predates the session exchange).\nRun `taida auth logout`, then `taida auth login` to refresh."
+                );
+            }
         }
         None => {
             println!("Not logged in. Run `taida auth login` to authenticate.");

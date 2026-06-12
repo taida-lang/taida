@@ -246,7 +246,7 @@ fn run_posts(args: &[String]) {
     }
 
     let token = load_token();
-    let token_str = token.as_ref().map(|t| t.github_token.as_str());
+    let token_str = token.as_ref().and_then(|t| t.community_token());
 
     let mut tag: Option<&str> = None;
     let mut author: Option<&str> = None;
@@ -321,7 +321,7 @@ fn run_post(args: &[String]) {
         serde_json::json!({ "content": request.content, "tags": request.tags })
     };
 
-    match api::api_post("/posts", &body, Some(&token.github_token)) {
+    match api::api_post("/posts", &body, Some(session_token(&token))) {
         Ok((status, resp_body)) => {
             if (200..300).contains(&status) {
                 display::display_post_created(&resp_body);
@@ -358,7 +358,7 @@ fn run_messages(args: &[String]) {
     }
     let path = format!("/{}/messages", percent_encode_component(&token.username));
 
-    match api::api_get(&path, Some(&token.github_token)) {
+    match api::api_get(&path, Some(session_token(&token))) {
         Ok((status, body)) => {
             if (200..300).contains(&status) {
                 display::display_messages(&body);
@@ -396,7 +396,7 @@ fn run_message(args: &[String]) {
     let path = format!("/{}/messages", percent_encode_component(&request.to_user));
     let body = serde_json::json!({ "content": request.content });
 
-    match api::api_post(&path, &body, Some(&token.github_token)) {
+    match api::api_post(&path, &body, Some(session_token(&token))) {
         Ok((status, resp_body)) => {
             if (200..300).contains(&status) {
                 display::display_message_sent(&resp_body);
@@ -428,7 +428,7 @@ fn run_author(args: &[String]) {
     };
 
     let token = load_token();
-    let token_str = token.as_ref().map(|t| t.github_token.as_str());
+    let token_str = token.as_ref().and_then(|t| t.community_token());
     if let Err(e) = validate_route_segment("author", &author_name) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
@@ -446,6 +446,21 @@ fn run_author(args: &[String]) {
         }
         Err(e) => {
             eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// 認証済みトークンから taida.dev セッショントークンを取り出す。
+/// 交換ステップ導入前の login で作られた auth.json にはセッションが無く、
+/// GitHub トークンを送ってもサーバは 401 を返すだけなので、再ログインを促す。
+fn session_token(token: &crate::auth::token::AuthToken) -> &str {
+    match token.community_token() {
+        Some(t) => t,
+        None => {
+            eprintln!(
+                "Your login predates the taida.dev session exchange.\nRun `taida auth logout`, then `taida auth login` to refresh."
+            );
             std::process::exit(1);
         }
     }
