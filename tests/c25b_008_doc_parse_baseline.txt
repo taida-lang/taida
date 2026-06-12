@@ -9,7 +9,7 @@ docs/guide/07_control_flow.md:286
 docs/guide/07_control_flow.md:303
 docs/guide/08_error_handling.md:519
 docs/guide/09_functions.md:195
-docs/guide/09_functions.md:310
+docs/guide/09_functions.md:320
 docs/guide/12_introspection.md:202
 docs/guide/12_introspection.md:213
 docs/reference/diagnostic_codes.md:50

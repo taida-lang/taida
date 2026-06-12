@@ -745,6 +745,11 @@ fn lint_expr(e: &Expr, diags: &mut Vec<LintDiagnostic>) {
                 }
             }
         }
+        Expr::Block(stmts, _) => {
+            for s in stmts {
+                lint_statement(s, diags);
+            }
+        }
         Expr::Pipeline(parts, _) => {
             for p in parts {
                 lint_expr(p, diags);

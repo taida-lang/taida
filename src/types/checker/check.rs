@@ -415,6 +415,13 @@ impl TypeChecker {
             Expr::CondBranch(_, _) => {
                 let _ = self.infer_expr_type_recording_only_e1605(expr);
             }
+            Expr::Block(stmts, _) => {
+                for stmt in stmts {
+                    if let Some(e) = stmt.yielded_expr() {
+                        self.check_comparison_errors_in_expr(e);
+                    }
+                }
+            }
             Expr::Lambda(params, body, _) => {
                 self.push_scope();
                 for param in params {
@@ -1462,6 +1469,13 @@ impl TypeChecker {
                 }
             }
             Expr::FieldAccess(x, _, _) => self.scan_expr_forward_refs(x, later_funcs, defined),
+            Expr::Block(stmts, _) => {
+                for st in stmts {
+                    if let Some(e) = st.yielded_expr() {
+                        self.scan_expr_forward_refs(e, later_funcs, defined);
+                    }
+                }
+            }
             Expr::CondBranch(arms, _) => {
                 for arm in arms {
                     if let Some(c) = &arm.condition {

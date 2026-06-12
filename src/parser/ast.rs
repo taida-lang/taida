@@ -444,6 +444,11 @@ pub enum Expr {
     Placeholder(Span),
     /// Hole: empty slot in function call for partial application `f(5)`
     Hole(Span),
+    /// Expression block: let-bindings followed by a result expression.
+    /// Only constructed as the body of a block-bodied lambda
+    /// (`_ x: Int =` + indented statements); follows the same
+    /// pure-expression discipline as `| |>` arm bodies.
+    Block(Vec<Statement>, Span),
 
     /// Buchi pack literal: `@(field <= value, ...)`
     BuchiPack(Vec<BuchiField>, Span),
@@ -519,7 +524,8 @@ impl Expr {
             | Expr::TypeInst(_, _, span)
             | Expr::EnumVariant(_, _, span)
             | Expr::TypeLiteral(_, _, span)
-            | Expr::Throw(_, span) => span,
+            | Expr::Throw(_, span)
+            | Expr::Block(_, span) => span,
         }
     }
 
@@ -553,7 +559,8 @@ impl Expr {
             | Expr::TypeInst(_, _, span)
             | Expr::EnumVariant(_, _, span)
             | Expr::TypeLiteral(_, _, span)
-            | Expr::Throw(_, span) => span,
+            | Expr::Throw(_, span)
+            | Expr::Block(_, span) => span,
         }
     }
 }
@@ -645,6 +652,11 @@ pub fn reassign_expr_node_ids(expr: &mut Expr, allocator: &mut NodeIdAllocator) 
         Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
             for field in fields {
                 reassign_expr_node_ids(&mut field.value, allocator);
+            }
+        }
+        Expr::Block(stmts, _) => {
+            for stmt in stmts {
+                reassign_statement_expr_node_ids(stmt, allocator);
             }
         }
         Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
@@ -1161,6 +1173,12 @@ fn append_consume_scalar_safe(e: &Expr, pname: &str, fname: &str) -> bool {
 fn expr_mentions_ident(e: &Expr, name: &str) -> bool {
     match e {
         Expr::Ident(n, _) => n == name,
+        // Fail-closed: a block body may bind/use the name through any
+        // statement form — treat any yielded expression mention as a use.
+        Expr::Block(stmts, _) => stmts.iter().any(|st| {
+            st.yielded_expr()
+                .is_none_or(|e| expr_mentions_ident(e, name))
+        }),
         Expr::IntLit(..)
         | Expr::FloatLit(..)
         | Expr::StringLit(..)

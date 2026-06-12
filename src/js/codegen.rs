@@ -1217,6 +1217,51 @@ impl JsCodegen {
         Ok(())
     }
 
+    /// F62B-022: emit `{ <stmts>; return <last value>; }` for a
+    /// block-bodied lambda. The block discipline (let-bindings + final
+    /// result expression or tail binding) is enforced by the parser.
+    fn gen_block_body(&mut self, stmts: &[Statement]) -> Result<(), JsError> {
+        self.write("{\n");
+        self.indent += 1;
+        let last_idx = stmts.len().saturating_sub(1);
+        for (i, stmt) in stmts.iter().enumerate() {
+            if i == last_idx {
+                match stmt {
+                    Statement::Expr(e) => {
+                        self.write_indent();
+                        self.write("return ");
+                        self.gen_expr(e)?;
+                        self.write(";\n");
+                    }
+                    Statement::Assignment(a) => {
+                        self.gen_statement(stmt)?;
+                        self.write_indent();
+                        self.write(&format!("return {};\n", a.target));
+                    }
+                    Statement::UnmoldForward(u) => {
+                        self.gen_statement(stmt)?;
+                        self.write_indent();
+                        self.write(&format!("return {};\n", u.target));
+                    }
+                    Statement::UnmoldBackward(u) => {
+                        self.gen_statement(stmt)?;
+                        self.write_indent();
+                        self.write(&format!("return {};\n", u.target));
+                    }
+                    _ => {
+                        self.gen_statement(stmt)?;
+                    }
+                }
+            } else {
+                self.gen_statement(stmt)?;
+            }
+        }
+        self.indent -= 1;
+        self.write_indent();
+        self.write("}");
+        Ok(())
+    }
+
     fn gen_statement(&mut self, stmt: &Statement) -> Result<(), JsError> {
         match stmt {
             Statement::Expr(expr) => {
@@ -4229,9 +4274,23 @@ impl JsCodegen {
                     }
                 }
                 self.write(&format!("(({}) => ", param_names.join(", ")));
-                self.gen_expr(body)?;
+                if let Expr::Block(stmts, _) = body.as_ref() {
+                    // F62B-022: block-bodied lambda — braces with the last
+                    // statement's value returned.
+                    self.gen_block_body(stmts)?;
+                } else {
+                    self.gen_expr(body)?;
+                }
                 self.write(")");
                 self.shadowed_net_builtins = prev_shadowed_net;
+                Ok(())
+            }
+            // F62B-022: a standalone expression block evaluates its
+            // statements in an IIFE and yields the last value.
+            Expr::Block(stmts, _) => {
+                self.write("(() => ");
+                self.gen_block_body(stmts)?;
+                self.write(")()");
                 Ok(())
             }
             Expr::Throw(inner, _) => {

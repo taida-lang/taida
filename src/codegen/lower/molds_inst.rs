@@ -3605,6 +3605,7 @@ fn rewrite_expr_ident_aliases(
         Expr::IntLit(v, s) => Expr::IntLit(*v, s.clone()),
         Expr::FloatLit(v, s) => Expr::FloatLit(*v, s.clone()),
         Expr::StringLit(v, s) => Expr::StringLit(v.clone(), s.clone()),
+        Expr::Block(stmts, s) => Expr::Block(stmts.clone(), s.clone()),
         Expr::TemplateLit(v, s) => Expr::TemplateLit(v.clone(), s.clone()),
         Expr::BoolLit(v, s) => Expr::BoolLit(*v, s.clone()),
         Expr::Gorilla(s) => Expr::Gorilla(s.clone()),

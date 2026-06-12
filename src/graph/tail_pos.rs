@@ -190,6 +190,14 @@ fn visit_expr(expr: &Expr, is_tail: bool, out: &mut Vec<CallSite>) {
             // cycle enumeration (still marked non-tail of outer).
             visit_expr(body, false, out);
         }
+        Expr::Block(stmts, _) => {
+            // A block only appears as a lambda body; like the lambda body
+            // expression itself, its statements are non-tail of the outer
+            // function but still enumerated for cycle detection.
+            for stmt in stmts {
+                visit_stmt(stmt, false, out);
+            }
+        }
         // Leaves — no sub-expressions.
         Expr::IntLit(..)
         | Expr::FloatLit(..)

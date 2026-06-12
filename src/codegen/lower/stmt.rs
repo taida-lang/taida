@@ -2889,6 +2889,31 @@ impl Lowering {
                 self.collect_free_vars_inner(lhs, bound, free, seen);
                 self.collect_free_vars_inner(rhs, bound, free, seen);
             }
+            // F62B-022: block-bodied lambda body — block-local bindings
+            // shadow as they are introduced, exactly like a function body.
+            Expr::Block(stmts, _) => {
+                let mut block_bound = bound.clone();
+                for stmt in stmts {
+                    match stmt {
+                        Statement::Expr(e) => {
+                            self.collect_free_vars_inner(e, &block_bound, free, seen)
+                        }
+                        Statement::Assignment(a) => {
+                            self.collect_free_vars_inner(&a.value, &block_bound, free, seen);
+                            block_bound.insert(a.target.as_str());
+                        }
+                        Statement::UnmoldForward(u) => {
+                            self.collect_free_vars_inner(&u.source, &block_bound, free, seen);
+                            block_bound.insert(u.target.as_str());
+                        }
+                        Statement::UnmoldBackward(u) => {
+                            self.collect_free_vars_inner(&u.source, &block_bound, free, seen);
+                            block_bound.insert(u.target.as_str());
+                        }
+                        _ => {}
+                    }
+                }
+            }
             Expr::UnaryOp(_, operand, _) => {
                 self.collect_free_vars_inner(operand, bound, free, seen);
             }

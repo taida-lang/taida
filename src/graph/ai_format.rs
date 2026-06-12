@@ -616,6 +616,7 @@ fn summarize_expr(expr: &Expr) -> String {
         Expr::TemplateLit(s, _) => format!("`{}`", truncate_str(s, 30)),
         Expr::BoolLit(b, _) => b.to_string(),
         Expr::Gorilla(_) => "><".to_string(),
+        Expr::Block(_, _) => "{ ... }".to_string(),
         Expr::Ident(name, _) => name.clone(),
         Expr::EnumVariant(enum_name, variant_name, _) => {
             format!("{}:{}()", enum_name, variant_name)

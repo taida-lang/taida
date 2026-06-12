@@ -332,6 +332,22 @@ impl TypeChecker {
                     .clone()
                     .unwrap_or(Type::Unknown)
             }
+            // F62B-022: expression block (block-bodied lambda body):
+            // let-bindings followed by a result expression, typed in its
+            // own scope; the block's type is the last statement's yield.
+            Expr::Block(stmts, _) => {
+                self.push_scope();
+                let mut block_ty = Type::Unknown;
+                for stmt in stmts {
+                    self.check_statement(stmt);
+                    block_ty = stmt
+                        .yielded_expr()
+                        .map(|e| self.infer_expr_type(e))
+                        .unwrap_or(Type::Unknown);
+                }
+                self.pop_scope();
+                block_ty
+            }
             Expr::Hole(span) => {
                 self.errors.push(TypeError {
                     message: "[E1502] Empty argument slots are only valid inside function calls. \

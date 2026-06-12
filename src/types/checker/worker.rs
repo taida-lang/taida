@@ -415,6 +415,14 @@ impl TypeChecker {
                     self.pop_scope();
                 }
             }
+            Expr::Block(stmts, _) => {
+                let mut block_locals = local_names.clone();
+                self.push_scope();
+                for stmt in stmts {
+                    self.validate_worker_stmt(stmt, &mut block_locals, function_stack);
+                }
+                self.pop_scope();
+            }
             Expr::MoldInst(name, type_args, fields, span) => {
                 let value_arg_count = Self::worker_mold_value_arg_count(name, type_args.len());
                 for arg in type_args.iter().take(value_arg_count) {

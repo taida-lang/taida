@@ -225,6 +225,10 @@ impl TypeChecker {
                         .find_map(|arg| Self::find_forbidden_default_ref(arg, forbidden))
                 }),
             Expr::FieldAccess(obj, _, _) => Self::find_forbidden_default_ref(obj, forbidden),
+            Expr::Block(stmts, _) => stmts.iter().find_map(|stmt| {
+                stmt.yielded_expr()
+                    .and_then(|e| Self::find_forbidden_default_ref(e, forbidden))
+            }),
             Expr::CondBranch(arms, _) => arms.iter().find_map(|arm| {
                 arm.condition
                     .as_ref()

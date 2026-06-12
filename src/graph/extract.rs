@@ -107,6 +107,14 @@ impl GraphExtractor {
             Expr::Ident(name, span) => {
                 Some(self.add_variable_node(graph, name, span.line, span.column))
             }
+            // F62B-022: block-bodied lambda body — extract each statement's
+            // dataflow; the block itself contributes no node.
+            Expr::Block(stmts, _) => {
+                for stmt in stmts {
+                    self.extract_dataflow_stmt(graph, stmt);
+                }
+                None
+            }
 
             Expr::EnumVariant(enum_name, variant_name, span) => {
                 let id = Graph::make_id(&self.file, span.line, span.column, &NodeKind::Literal);

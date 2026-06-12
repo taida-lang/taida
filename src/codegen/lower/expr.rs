@@ -16,6 +16,14 @@ impl Lowering {
         expr: &Expr,
     ) -> Result<IrVar, LowerError> {
         match expr {
+            // F62B-022: blocks are unwrapped into the lambda's statement
+            // body by lower_lambda; a standalone block reaching the
+            // expression lowerer is a compiler bug.
+            Expr::Block(_, _) => {
+                return Err(LowerError {
+                    message: "internal: expression block outside a lambda body".to_string(),
+                });
+            }
             Expr::IntLit(val, _) => {
                 let var = func.alloc_var();
                 func.push(IrInst::ConstInt(var, *val));
@@ -2402,7 +2410,50 @@ impl Lowering {
                 }
             }
 
-            let body_var = self.lower_expr(&mut lambda_fn, body)?;
+            // F62B-022: a block-bodied lambda lowers its statements through
+            // the same machinery named functions use; the block's value is
+            // the last statement's yield (final expression or tail binding).
+            let (body_var, body_value_expr): (IrVar, &Expr) = match body {
+                Expr::Block(stmts, _) => {
+                    let Some((last, init)) = stmts.split_last() else {
+                        return Err(LowerError {
+                            message: "internal: empty lambda block body".to_string(),
+                        });
+                    };
+                    for stmt in init {
+                        self.lower_statement(&mut lambda_fn, stmt)?;
+                    }
+                    match last {
+                        Statement::Expr(e) => (self.lower_expr(&mut lambda_fn, e)?, e),
+                        Statement::Assignment(a) => {
+                            self.lower_statement(&mut lambda_fn, last)?;
+                            let v = lambda_fn.alloc_var();
+                            lambda_fn.push(IrInst::UseVar(v, a.target.clone()));
+                            (v, &a.value)
+                        }
+                        Statement::UnmoldForward(u) => {
+                            self.lower_statement(&mut lambda_fn, last)?;
+                            let v = lambda_fn.alloc_var();
+                            lambda_fn.push(IrInst::UseVar(v, u.target.clone()));
+                            (v, &u.source)
+                        }
+                        Statement::UnmoldBackward(u) => {
+                            self.lower_statement(&mut lambda_fn, last)?;
+                            let v = lambda_fn.alloc_var();
+                            lambda_fn.push(IrInst::UseVar(v, u.target.clone()));
+                            (v, &u.source)
+                        }
+                        _ => {
+                            return Err(LowerError {
+                                message:
+                                    "internal: lambda block must end with an expression or binding"
+                                        .to_string(),
+                            });
+                        }
+                    }
+                }
+                other => (self.lower_expr(&mut lambda_fn, other)?, other),
+            };
 
             // NB-14: Set return type tag before Return (symmetric with lower_func_def)
             if let Some(&rtv) = self.return_tag_vars.get(&body_var) {
@@ -2413,7 +2464,7 @@ impl Lowering {
                     vec![rtv],
                 ));
             } else {
-                let tag = self.expr_type_tag(body);
+                let tag = self.expr_type_tag(body_value_expr);
                 if tag > 0 {
                     let tag_var = lambda_fn.alloc_var();
                     lambda_fn.push(IrInst::ConstInt(tag_var, tag));

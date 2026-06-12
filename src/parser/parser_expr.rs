@@ -482,6 +482,18 @@ impl Parser {
 
     pub(super) fn parse_lambda(&mut self, start_span: Span) -> Result<Expr, ParseError> {
         // `_ x: Int y: Int = expr` -> Lambda([x, y], expr)
+        //
+        // F62B-022: with a Newline after `=`, the body is an indented
+        // statement block (let-bindings + a final result expression — the
+        // same pure-expression discipline as `| |>` arm bodies):
+        //
+        //   _ r: Row =
+        //     subtotal <= r.quantity * r.price
+        //     @(name <= r.name, subtotal <= subtotal)
+        //
+        // Block-bodied lambdas require every parameter to carry a type
+        // annotation (the block boundary removes the call-site context the
+        // single-expression form can infer from).
         let mut params = Vec::new();
         while self.check_ident() {
             let param_span = self.current_span();
@@ -499,6 +511,29 @@ impl Parser {
             });
         }
         self.expect(&TokenKind::Eq)?;
+        if matches!(self.peek_kind(), TokenKind::Newline | TokenKind::Indent(_)) {
+            let block_span = self.current_span();
+            if let Some(missing) = params.iter().find(|p| p.type_annotation.is_none()) {
+                return Err(ParseError {
+                    message: format!(
+                        "[E1527] Block-bodied lambdas require a type annotation on every \
+                         parameter; `{}` has none. Write `_ {}: Type ... =` before the block.",
+                        missing.name, missing.name
+                    ),
+                    span: missing.span.clone(),
+                });
+            }
+            let block = self.parse_block()?;
+            if block.is_empty() {
+                return Err(self.error_at_current("Expected statements in lambda block body"));
+            }
+            Self::validate_expression_block_body(&block, "lambda block body")?;
+            return Ok(Expr::Lambda(
+                params,
+                Box::new(Expr::Block(block, block_span)),
+                start_span,
+            ));
+        }
         let body = self.parse_expression()?;
         Ok(Expr::Lambda(params, Box::new(body), start_span))
     }
@@ -642,8 +677,21 @@ impl Parser {
     /// bare call statements, discard pipelines, and nested definitions
     /// in non-final positions remain rejected.
     fn validate_cond_arm_body(block: &[Statement]) -> Result<(), ParseError> {
-        debug_assert!(!block.is_empty(), "empty arm body should be caught earlier");
-        Self::reject_discard_bindings_in_expression_block(block, "`| |>` arm body")?;
+        Self::validate_expression_block_body(block, "`| |>` arm body")
+    }
+
+    /// F62B-022: shared pure-expression discipline for `| |>` arm bodies
+    /// and block-bodied lambda bodies — optional let-bindings followed by
+    /// a final result expression or tail binding.
+    pub(super) fn validate_expression_block_body(
+        block: &[Statement],
+        label: &str,
+    ) -> Result<(), ParseError> {
+        debug_assert!(
+            !block.is_empty(),
+            "empty expression block should be caught earlier"
+        );
+        Self::reject_discard_bindings_in_expression_block(block, label)?;
         let last_idx = block.len() - 1;
         for (idx, stmt) in block.iter().enumerate() {
             if idx == last_idx {
@@ -657,7 +705,7 @@ impl Parser {
                         let span = Self::statement_span(stmt);
                         return Err(ParseError {
                             message: format!(
-                                "[E1616] `| |>` arm body must end with a result expression or a binding, not a {} statement. \
+                                "[E1616] {label} must end with a result expression or a binding, not a {} statement. \
                                  A condition arm is a pure expression: optional let-bindings \
                                  (`name <= expr`, `expr >=> name`, `name <=< expr`) may appear, \
                                  and the last line may be either a result expression or a tail binding. \
@@ -677,11 +725,14 @@ impl Parser {
                     Statement::Expr(_) => {
                         let span = Self::statement_span(stmt);
                         return Err(ParseError {
-                            message: "[E1616] side-effect statement is not allowed inside a `| |>` arm body. \
-                                      Only let-bindings (`name <= expr`, `expr >=> name`, `name <=< expr`) may \
-                                      appear before the final result expression — a bare function call or \
-                                      pipeline used for side effects breaks the pure-expression rule. \
-                                      See docs/guide/07_control_flow.md.".to_string(),
+                            message: format!(
+                                "[E1616] side-effect statement is not allowed inside a {}. \
+                                 Only let-bindings (`name <= expr`, `expr >=> name`, `name <=< expr`) may \
+                                 appear before the final result expression — a bare function call or \
+                                 pipeline used for side effects breaks the pure-expression rule. \
+                                 See docs/guide/07_control_flow.md.",
+                                label
+                            ),
                             span,
                         });
                     }
@@ -689,11 +740,12 @@ impl Parser {
                         let span = Self::statement_span(stmt);
                         return Err(ParseError {
                             message: format!(
-                                "[E1616] `{}` is not allowed inside a `| |>` arm body. \
-                                 A condition arm is a pure expression; definitions and module-level \
+                                "[E1616] `{}` is not allowed inside a {}. \
+                                 An expression block is pure; definitions and module-level \
                                  constructs must live at the top level of a function or module. \
                                  See docs/guide/07_control_flow.md.",
                                 Self::statement_kind_label(stmt),
+                                label,
                             ),
                             span,
                         });

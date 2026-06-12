@@ -1019,6 +1019,17 @@ impl Interpreter {
                 message: "[E1502] Empty argument slots are only valid inside function calls."
                     .to_string(),
             }),
+            // F62B-022: expression block (block-bodied lambda body). When a
+            // lambda is materialized the block unwraps into the FuncValue's
+            // statement body, so this arm only runs if a block is evaluated
+            // standalone — scoped statement evaluation keeps the semantics
+            // identical either way.
+            Expr::Block(stmts, _) => {
+                self.env.push_scope();
+                let result = self.eval_statements_no_tco(stmts);
+                self.env.pop_scope();
+                result
+            }
             // B11-6a: TypeLiteral is only valid inside TypeIs/TypeExtends — handled by mold
             Expr::TypeLiteral(name, variant, _) => {
                 if let Some(var) = variant {
@@ -1576,10 +1587,16 @@ impl Interpreter {
 
             Expr::Lambda(params, body, _) => {
                 let closure = Arc::new(self.env.snapshot());
+                // F62B-022: a block-bodied lambda carries its statements
+                // directly (the same shape named functions use).
+                let lambda_body = match body.as_ref() {
+                    Expr::Block(stmts, _) => stmts.clone(),
+                    other => vec![Statement::Expr(other.clone())],
+                };
                 Ok(Signal::Value(Value::Function(FuncValue {
                     name: "<lambda>".to_string(),
                     params: params.clone(),
-                    body: vec![Statement::Expr(*body.clone())],
+                    body: lambda_body,
                     closure,
                     return_type: None,
                     module_type_defs: None,
