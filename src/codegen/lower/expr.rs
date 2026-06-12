@@ -19,11 +19,9 @@ impl Lowering {
             // F62B-022: blocks are unwrapped into the lambda's statement
             // body by lower_lambda; a standalone block reaching the
             // expression lowerer is a compiler bug.
-            Expr::Block(_, _) => {
-                return Err(LowerError {
-                    message: "internal: expression block outside a lambda body".to_string(),
-                });
-            }
+            Expr::Block(_, _) => Err(LowerError {
+                message: "internal: expression block outside a lambda body".to_string(),
+            }),
             Expr::IntLit(val, _) => {
                 let var = func.alloc_var();
                 func.push(IrInst::ConstInt(var, *val));
