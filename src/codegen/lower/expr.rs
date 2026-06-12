@@ -2041,12 +2041,14 @@ impl Lowering {
                 Statement::UnmoldForward(crate::parser::UnmoldForwardStmt {
                     source: self.rewrite_placeholder(&u.source, replacement, span),
                     target: u.target.clone(),
+                    type_annotation: u.type_annotation.clone(),
                     span: u.span.clone(),
                 })
             }
             Statement::UnmoldBackward(u) => {
                 Statement::UnmoldBackward(crate::parser::UnmoldBackwardStmt {
                     target: u.target.clone(),
+                    type_annotation: u.type_annotation.clone(),
                     source: self.rewrite_placeholder(&u.source, replacement, span),
                     span: u.span.clone(),
                 })

@@ -449,9 +449,27 @@ impl Parser {
 
             // `name: Type <= expr` -> typed assignment
             // `name: Type <= step <= ... <= data` -> typed backward pipeline assignment
+            // `name: Type <=< expr` -> typed unmold backward
             TokenKind::Colon => {
                 self.advance(); // consume `:`
                 let type_ann = self.parse_type_expr()?;
+                if self.check(&TokenKind::UnmoldBackward) {
+                    self.advance(); // consume `<=<`
+                    let source = self.parse_expression()?;
+                    // Single-direction constraint: <=< used, >=> must not follow
+                    if self.check(&TokenKind::UnmoldForward) {
+                        return Err(ParseError {
+                            message: "E0302: 単一方向制約違反 — 一つの文内で >=> と <=< を混在させることはできません".to_string(),
+                            span: self.current_span(),
+                        });
+                    }
+                    return Ok(Statement::UnmoldBackward(UnmoldBackwardStmt {
+                        target: name,
+                        type_annotation: Some(type_ann),
+                        source,
+                        span: start_span,
+                    }));
+                }
                 self.expect(&TokenKind::LtEq)?;
                 // Allow multi-line rhs (parity with the untyped `<=` form).
                 self.skip_newlines();
@@ -570,10 +588,11 @@ impl Parser {
                 self.finish_expr_as_statement(expr, start_span, doc_comments)
             }
 
-            // `expr >=> name` -> unmold forward
+            // `expr >=> name` / `expr >=> name: Type` -> unmold forward
             TokenKind::UnmoldForward => {
                 self.advance(); // consume `>=>`
                 let target = self.expect_ident()?;
+                let type_annotation = self.parse_optional_unmold_target_annotation()?;
                 // Single-direction constraint: >=> used, <=< must not follow
                 if self.check(&TokenKind::UnmoldBackward) {
                     return Err(ParseError {
@@ -584,6 +603,7 @@ impl Parser {
                 Ok(Statement::UnmoldForward(UnmoldForwardStmt {
                     source: Expr::Ident(name, start_span.clone()),
                     target,
+                    type_annotation,
                     span: start_span,
                 }))
             }
@@ -601,6 +621,7 @@ impl Parser {
                 }
                 Ok(Statement::UnmoldBackward(UnmoldBackwardStmt {
                     target: name,
+                    type_annotation: None,
                     source,
                     span: start_span,
                 }))
@@ -1976,9 +1997,11 @@ impl Parser {
                     let span = self.current_span();
                     self.advance();
                     let target = self.expect_ident()?;
+                    let type_annotation = self.parse_optional_unmold_target_annotation()?;
                     return Ok(Statement::UnmoldForward(UnmoldForwardStmt {
                         source: steps.into_iter().next().unwrap(),
                         target,
+                        type_annotation,
                         span,
                     }));
                 }
@@ -2009,13 +2032,26 @@ impl Parser {
             let span = self.current_span();
             self.advance(); // consume `>=>`
             let target = self.expect_ident()?;
+            let type_annotation = self.parse_optional_unmold_target_annotation()?;
             Ok(Statement::UnmoldForward(UnmoldForwardStmt {
                 source: expr,
                 target,
+                type_annotation,
                 span,
             }))
         } else {
             Ok(Statement::Expr(expr))
+        }
+    }
+
+    /// Optional `: Type` after an unmold-forward target (`expr >=> name: Type`).
+    /// Symmetric with the typed backward form `name: Type <=< expr`.
+    fn parse_optional_unmold_target_annotation(&mut self) -> Result<Option<TypeExpr>, ParseError> {
+        if self.check(&TokenKind::Colon) {
+            self.advance(); // consume `:`
+            Ok(Some(self.parse_type_expr()?))
+        } else {
+            Ok(None)
         }
     }
 

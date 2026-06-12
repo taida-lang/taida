@@ -886,11 +886,12 @@ fn wasm_full_parity_allowlist_guard() {
     //   F62B-003: +compile_f62b003_str_molds (search/replace/pad molds) -> 73.
     //   F62B-020: +compile_f62b020_lte_between (ordering molds) -> 74.
     //   F62B-022: +compile_f62b022_lambda_blocks (block-bodied lambdas) -> 75.
+    //   F62B-023: +compile_f62b023_typed_unmold (typed unmold bindings) -> 76.
     assert_eq!(
         expected_parity_ok,
-        75,
+        76,
         "WF-5: parity-OK count drift — got {} = |fixtures {}| - |skip {}| - |rejected {}| - \
-         |native_fail {}| - |diff {}|. Expected 75. Update this constant deliberately.",
+         |native_fail {}| - |diff {}|. Expected 76. Update this constant deliberately.",
         expected_parity_ok,
         all.len(),
         FULL_SKIP_STEMS.len(),

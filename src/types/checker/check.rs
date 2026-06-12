@@ -1028,21 +1028,33 @@ impl TypeChecker {
                 // `expr >=> target` -- target gets the unmolded (inner) value
                 let source_ty = self.infer_expr_type(&uf.source);
                 self.reject_sealed_carrier_unmold(&source_ty, &uf.span);
-                let target_ty = self.unmold_type(&source_ty);
-                self.define_var_with_span(&uf.target, target_ty.clone(), Some(&uf.span));
-                if target_ty == Type::Molten
+                let inferred_target = self.unmold_type(&source_ty);
+                let target_ty = self.apply_unmold_target_annotation(
+                    &uf.target,
+                    uf.type_annotation.as_ref(),
+                    inferred_target.clone(),
+                    &uf.span,
+                );
+                self.define_var_with_span(&uf.target, target_ty, Some(&uf.span));
+                if inferred_target == Type::Molten
                     && let Some(branch) = self.gorillax_value_branch_for_expr(&uf.source)
                 {
                     self.define_branch_info(&uf.target, BranchInfo::Molten(branch));
                 }
             }
             Statement::UnmoldBackward(ub) => {
-                // `target <=< expr`
+                // `target <=< expr` / `target: Type <=< expr`
                 let source_ty = self.infer_expr_type(&ub.source);
                 self.reject_sealed_carrier_unmold(&source_ty, &ub.span);
-                let target_ty = self.unmold_type(&source_ty);
-                self.define_var_with_span(&ub.target, target_ty.clone(), Some(&ub.span));
-                if target_ty == Type::Molten
+                let inferred_target = self.unmold_type(&source_ty);
+                let target_ty = self.apply_unmold_target_annotation(
+                    &ub.target,
+                    ub.type_annotation.as_ref(),
+                    inferred_target.clone(),
+                    &ub.span,
+                );
+                self.define_var_with_span(&ub.target, target_ty, Some(&ub.span));
+                if inferred_target == Type::Molten
                     && let Some(branch) = self.gorillax_value_branch_for_expr(&ub.source)
                 {
                     self.define_branch_info(&ub.target, BranchInfo::Molten(branch));
@@ -1079,6 +1091,34 @@ impl TypeChecker {
             // added here when introduced.
             _ => {}
         }
+    }
+
+    /// Resolve an optional `: Type` annotation on an unmold-binding target
+    /// (`name: T <=< expr` / `expr >=> name: T`) against the inferred unmolded
+    /// type. Mirrors the typed-assignment rules: mismatch is an error unless
+    /// the inference came back `Unknown` (e.g. unresolved cross-module types,
+    /// where the annotation is exactly the intended escape hatch), and the
+    /// annotated type wins as the binding type.
+    fn apply_unmold_target_annotation(
+        &mut self,
+        target: &str,
+        annotation: Option<&TypeExpr>,
+        inferred: Type,
+        span: &Span,
+    ) -> Type {
+        let Some(type_ann) = annotation else {
+            return inferred;
+        };
+        let expected = self.registry.resolve_type(type_ann);
+        if !self.registry.is_subtype_of(&inferred, &expected) && inferred != Type::Unknown {
+            self.errors.push(TypeError {
+                message: format!(
+                    "Type mismatch in unmold binding to '{target}': expected {expected}, got {inferred}"
+                ),
+                span: span.clone(),
+            });
+        }
+        expected
     }
 
     /// Check a condition branch expression (extracted from `infer_expr_type`).

@@ -407,18 +407,25 @@ pub struct ExportStmt {
     pub span: Span,
 }
 
-/// Unmold forward: `expr >=> name`
+/// Unmold forward: `expr >=> name` / `expr >=> name: Type`
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnmoldForwardStmt {
     pub source: Expr,
     pub target: String,
+    /// Optional annotation on the unmolded value (`expr >=> rows: PostRows`).
+    /// Checker-only: validated against the unmolded type and used as the
+    /// binding type (sharpens `Unknown` from unresolved cross-module types).
+    pub type_annotation: Option<TypeExpr>,
     pub span: Span,
 }
 
-/// Unmold backward: `name <=< expr`
+/// Unmold backward: `name <=< expr` / `name: Type <=< expr`
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnmoldBackwardStmt {
     pub target: String,
+    /// Optional annotation on the unmolded value (`half: Int <=< expr`).
+    /// Same semantics as [`UnmoldForwardStmt::type_annotation`].
+    pub type_annotation: Option<TypeExpr>,
     pub source: Expr,
     pub span: Span,
 }

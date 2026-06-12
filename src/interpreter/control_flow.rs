@@ -167,10 +167,12 @@ fn rewrite_statement_placeholder(
         Statement::UnmoldForward(unmold) => Statement::UnmoldForward(UnmoldForwardStmt {
             source: rewrite_nested_placeholder(&unmold.source, replacement, span),
             target: unmold.target.clone(),
+            type_annotation: unmold.type_annotation.clone(),
             span: unmold.span.clone(),
         }),
         Statement::UnmoldBackward(unmold) => Statement::UnmoldBackward(UnmoldBackwardStmt {
             target: unmold.target.clone(),
+            type_annotation: unmold.type_annotation.clone(),
             source: rewrite_nested_placeholder(&unmold.source, replacement, span),
             span: unmold.span.clone(),
         }),
