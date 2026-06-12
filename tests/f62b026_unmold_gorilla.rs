@@ -215,16 +215,38 @@ fn runtime_plain_pack_gorilla_native_and_js() {
 }
 
 /// Bare scalars stay identity at runtime (no mold provenance on values —
-/// the checker is the static line of defence).
+/// the checker is the static line of defence). The large values pin the
+/// native pointer-heuristic edges (page boundary, >2^32) that previously
+/// lived in the crash-regression corpus as bare-operand fixtures.
 #[test]
 fn runtime_bare_scalar_stays_identity_unchecked() {
-    let output = run_interp_no_check("f62b026_rt_scalar", "5 >=> e\nstdout(e.toString())\n");
+    let output = run_interp_no_check(
+        "f62b026_rt_scalar",
+        "5 >=> e\nstdout(e.toString())\nx1 <= 4097\nx1 >=> y1\nstdout(y1.toString())\nx2 <= 1234567890123\nx2 >=> y2\nstdout(y2.toString())\n",
+    );
     assert!(
         output.status.success(),
         "unchecked bare scalar unmold stays identity\nstderr={}",
         stderr_text(&output)
     );
-    assert_eq!(stdout_text(&output), "5\n");
+    assert_eq!(stdout_text(&output), "5\n4097\n1234567890123\n");
+}
+
+/// The native pointer heuristic survives raw large-int operands through
+/// the unchecked runtime path (the original crash shape: an Int whose
+/// value lands in plausible-pointer ranges must not be dereferenced).
+#[test]
+fn runtime_native_ptr_heuristic_edges_unchecked() {
+    let source = "x1 <= 4097\nx1 >=> y1\nstdout(y1.toString())\nx2 <= 1234567890123\nx2 >=> y2\nstdout(y2.toString())\n";
+    let Some(output) = build_and_run("f62b026_rt_ptr_edges", source, "native") else {
+        panic!("native build failed");
+    };
+    assert!(
+        output.status.success(),
+        "native unchecked large-int unmold must not crash\nstderr={}",
+        stderr_text(&output)
+    );
+    assert_eq!(stdout_text(&output), "4097\n1234567890123\n");
 }
 
 // ── F62B-033: custom mold unmold hook runs on JS ─────────────────
