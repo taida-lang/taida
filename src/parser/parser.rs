@@ -273,6 +273,10 @@ impl Parser {
     /// languages that must skip to `;` or `}` — here, newline sync is sufficient
     /// because each logical line is a complete statement.
     fn synchronize(&mut self) {
+        // Phase-2 review Low-4: defensive reset — a leaked bracket-args
+        // depth would silently exempt every later bare mold from [E1546]
+        // for the rest of the file.
+        self.mold_bracket_args_depth = 0;
         while !self.is_at_end() {
             if matches!(self.peek_kind(), TokenKind::Newline) {
                 self.advance();
@@ -2040,6 +2044,12 @@ impl Parser {
                 self.advance();
                 let target = self.expect_ident()?;
                 let type_annotation = self.parse_optional_unmold_target_annotation()?;
+                if self.check(&TokenKind::UnmoldBackward) {
+                    return Err(ParseError {
+                        message: "E0302: 単一方向制約違反 — 一つの文内で >=> と <=< を混在させることはできません".to_string(),
+                        span: self.current_span(),
+                    });
+                }
                 return Ok(Statement::UnmoldForward(UnmoldForwardStmt {
                     source: Expr::Pipeline(steps, start_span),
                     target,
@@ -2073,6 +2083,15 @@ impl Parser {
             self.advance(); // consume `>=>`
             let target = self.expect_ident()?;
             let type_annotation = self.parse_optional_unmold_target_annotation()?;
+            // Phase-2 review Low-1: same E0302 guard as the ident-source
+            // path, so the non-Ident source form reports the
+            // single-direction violation instead of a generic parse error.
+            if self.check(&TokenKind::UnmoldBackward) {
+                return Err(ParseError {
+                    message: "E0302: 単一方向制約違反 — 一つの文内で >=> と <=< を混在させることはできません".to_string(),
+                    span: self.current_span(),
+                });
+            }
             Ok(Statement::UnmoldForward(UnmoldForwardStmt {
                 source: expr,
                 target,

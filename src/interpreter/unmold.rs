@@ -440,7 +440,15 @@ impl Interpreter {
                     return self.call_function_preserving_signals(&unmold_func, &[]);
                 }
 
-                if let Some((_, inner)) = fields.iter().find(|(k, _)| k == "__value") {
+                // Phase-2 review M-2: the `__value` channel is mold
+                // machinery and demands a `__type` tag — a hand-written
+                // plain pack that happens to carry a `__value` field is
+                // still a plain pack (native/wasm already behaved this
+                // way; the bare fallback here and in JS was the 2-vs-2
+                // divergence).
+                if type_name.is_some()
+                    && let Some((_, inner)) = fields.iter().find(|(k, _)| k == "__value")
+                {
                     Ok(Signal::Value(inner.clone()))
                 } else if type_name.is_none() {
                     // F62B-026: a machinery-less plain pack (no __type, no

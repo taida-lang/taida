@@ -392,10 +392,23 @@ impl TypeChecker {
                 let mut block_ty = Type::Unknown;
                 for stmt in stmts {
                     self.check_statement(stmt);
-                    block_ty = stmt
-                        .yielded_expr()
-                        .map(|e| self.infer_expr_type(e))
-                        .unwrap_or(Type::Unknown);
+                    // Phase-2 review M-1: a tail unmold binding yields the
+                    // BOUND value (the unmolded result), not the source —
+                    // `Lax[n]() >=> x` as the block tail yields `x: Int`,
+                    // not `Lax[Int]`. The bound target was just defined by
+                    // check_statement, so look it up like arm_result_type.
+                    block_ty = match stmt {
+                        Statement::UnmoldForward(u) => {
+                            self.lookup_var(&u.target).unwrap_or(Type::Unknown)
+                        }
+                        Statement::UnmoldBackward(u) => {
+                            self.lookup_var(&u.target).unwrap_or(Type::Unknown)
+                        }
+                        _ => stmt
+                            .yielded_expr()
+                            .map(|e| self.infer_expr_type(e))
+                            .unwrap_or(Type::Unknown),
+                    };
                 }
                 self.pop_scope();
                 block_ty
@@ -1462,6 +1475,14 @@ impl TypeChecker {
 
             Expr::MethodCall(obj, method, args, span) => {
                 let obj_type = self.infer_expr_type(obj);
+                // Phase-2 review High-2: `.unmold()` is the method spelling
+                // of `>=>` / `<=<` — the bare-source rule applies to it too.
+                // Receivers whose own method tables define `unmold` (Lax,
+                // Async, custom molds, ...) are not definitely-bare and
+                // pass through to normal method resolution.
+                if method == "unmold" && args.is_empty() {
+                    self.reject_bare_unmold_source(obj, &obj_type, span);
+                }
                 // F56: a sealed carrier exposes *no* observable methods — the
                 // interpreter rejects every `.method()` on a `Moltenized`/`Secret`
                 // (see `interpreter/methods.rs`), so reject them at compile time
@@ -1831,6 +1852,26 @@ impl TypeChecker {
                     });
                 }
                 match name.as_str() {
+                    // Phase-2 review High-1: ordering molds check the same
+                    // operand rule as the `<` / `>` / `>=` operators.
+                    "Lte" => {
+                        if type_args.len() == 2 {
+                            let a = self.infer_expr_type(&type_args[0]);
+                            let b = self.infer_expr_type(&type_args[1]);
+                            self.validate_ordering_mold_pair("Lte", &a, &b, mold_span);
+                        }
+                        Type::Bool
+                    }
+                    "Between" => {
+                        if type_args.len() == 3 {
+                            let x = self.infer_expr_type(&type_args[0]);
+                            let lo = self.infer_expr_type(&type_args[1]);
+                            let hi = self.infer_expr_type(&type_args[2]);
+                            self.validate_ordering_mold_pair("Between", &lo, &x, mold_span);
+                            self.validate_ordering_mold_pair("Between", &x, &hi, mold_span);
+                        }
+                        Type::Bool
+                    }
                     "HostCapability" => self.infer_host_capability_type(type_args, mold_span),
                     "HostStep" => self.infer_host_step_type(type_args, mold_span),
                     // F62B-024: builder chain — `Cage[subject]()` opens a

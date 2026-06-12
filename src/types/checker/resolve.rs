@@ -1267,6 +1267,25 @@ impl TypeChecker {
                 }
             },
             Statement::FuncDef(fd) => {
+                // Phase-2 review M-3: function names join the same [E1501]
+                // collision space as type definitions — symmetrically, so
+                // the alias-first order is detected too (the alias side
+                // already checks func_types).
+                let type_collision = self.registry.type_defs.contains_key(&fd.name)
+                    || self.registry.enum_defs.contains_key(&fd.name)
+                    || self.registry.mold_defs.contains_key(&fd.name)
+                    || self.registry.type_aliases.contains_key(&fd.name);
+                if type_collision {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1501] Name '{}' is already defined in this scope. \
+                             Redefinition in the same scope is not allowed. \
+                             Hint: Use a different name, or define it in an inner scope (shadowing is allowed).",
+                            fd.name
+                        ),
+                        span: fd.span.clone(),
+                    });
+                }
                 let duplicate_func_name = !self.seen_func_defs.insert(fd.name.clone());
                 let generic_is_inferable = if fd.type_params.is_empty() {
                     true

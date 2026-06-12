@@ -2451,7 +2451,11 @@ impl Lowering {
             // F62B-022: a block-bodied lambda lowers its statements through
             // the same machinery named functions use; the block's value is
             // the last statement's yield (final expression or tail binding).
-            let (body_var, body_value_expr): (IrVar, &Expr) = match body {
+            // Phase-2 review M-1: tail unmold bindings yield the BOUND
+            // value, whose type differs from the source (`Lax[n]() >=> x`
+            // yields the Int) — their return tag must not be derived from
+            // the source expression, so they carry no tag expression.
+            let (body_var, body_value_expr): (IrVar, Option<&Expr>) = match body {
                 Expr::Block(stmts, _) => {
                     let Some((last, init)) = stmts.split_last() else {
                         return Err(LowerError {
@@ -2462,24 +2466,24 @@ impl Lowering {
                         self.lower_statement(&mut lambda_fn, stmt)?;
                     }
                     match last {
-                        Statement::Expr(e) => (self.lower_expr(&mut lambda_fn, e)?, e),
+                        Statement::Expr(e) => (self.lower_expr(&mut lambda_fn, e)?, Some(e)),
                         Statement::Assignment(a) => {
                             self.lower_statement(&mut lambda_fn, last)?;
                             let v = lambda_fn.alloc_var();
                             lambda_fn.push(IrInst::UseVar(v, a.target.clone()));
-                            (v, &a.value)
+                            (v, Some(&a.value))
                         }
                         Statement::UnmoldForward(u) => {
                             self.lower_statement(&mut lambda_fn, last)?;
                             let v = lambda_fn.alloc_var();
                             lambda_fn.push(IrInst::UseVar(v, u.target.clone()));
-                            (v, &u.source)
+                            (v, None)
                         }
                         Statement::UnmoldBackward(u) => {
                             self.lower_statement(&mut lambda_fn, last)?;
                             let v = lambda_fn.alloc_var();
                             lambda_fn.push(IrInst::UseVar(v, u.target.clone()));
-                            (v, &u.source)
+                            (v, None)
                         }
                         _ => {
                             return Err(LowerError {
@@ -2490,7 +2494,7 @@ impl Lowering {
                         }
                     }
                 }
-                other => (self.lower_expr(&mut lambda_fn, other)?, other),
+                other => (self.lower_expr(&mut lambda_fn, other)?, Some(other)),
             };
 
             // NB-14: Set return type tag before Return (symmetric with lower_func_def)
@@ -2501,7 +2505,7 @@ impl Lowering {
                     "taida_set_return_tag".to_string(),
                     vec![rtv],
                 ));
-            } else {
+            } else if let Some(body_value_expr) = body_value_expr {
                 let tag = self.expr_type_tag(body_value_expr);
                 if tag > 0 {
                     let tag_var = lambda_fn.alloc_var();

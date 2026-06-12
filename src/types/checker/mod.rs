@@ -914,6 +914,12 @@ impl TypeChecker {
         self.worker_effect_symbols.clear();
         self.worker_addon_symbols.clear();
         self.worker_addon_bindings.clear();
+        // Phase-2 review Low-2: AST node ids restart at 1 per parse — a
+        // reused checker must not leak per-program node-id-keyed state
+        // into the next program.
+        self.empty_literal_hints.clear();
+        self.explicit_generic_call_bindings.clear();
+        self.schema_passing_generic_funcs.clear();
         for stmt in &program.statements {
             match stmt {
                 Statement::EnumDef(ed) => {
@@ -970,6 +976,39 @@ impl TypeChecker {
             );
             if !is_inheritance {
                 self.register_types(stmt);
+            }
+        }
+
+        // Phase-2 review M-4: alias targets resolve at registration, so a
+        // forward reference (`Grid = @[Row]` before `Row = @[Int]`) left an
+        // unexpanded `Named` inside the stored type. Re-resolve every alias
+        // from its source TypeExpr until the table is stable — each round
+        // can pick up names registered later in the file; the round count
+        // is bounded by the alias count (a cycle simply stops expanding).
+        let alias_defs: Vec<(String, crate::parser::TypeExpr)> = program
+            .statements
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Statement::ClassLikeDef(cl) => match &cl.kind {
+                    crate::parser::ClassLikeKind::Alias { target } => {
+                        Some((cl.name.clone(), target.clone()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        for _ in 0..alias_defs.len().saturating_sub(1) {
+            let mut changed = false;
+            for (name, target) in &alias_defs {
+                let resolved = self.registry.resolve_type(target);
+                if self.registry.type_aliases.get(name) != Some(&resolved) {
+                    self.registry.register_type_alias(name, resolved);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
             }
         }
 

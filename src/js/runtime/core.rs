@@ -2949,8 +2949,11 @@ function __taida_unmold(v) {
     if (!Array.isArray(v)
         && !__taida_isEnumVal(v)
         && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null)) {
-      if (Object.prototype.hasOwnProperty.call(v, '__value')) return v.__value;
+      // Phase-2 review M-2: the __value channel demands a __type tag —
+      // a plain pack stays a plain pack even with a __value field
+      // (parity with the interpreter / native / wasm rule).
       if (v.__type === undefined) return __taida_non_mold_unmold_gorilla();
+      if (Object.prototype.hasOwnProperty.call(v, '__value')) return v.__value;
     }
   }
   return v;

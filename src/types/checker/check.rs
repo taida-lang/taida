@@ -1175,6 +1175,11 @@ impl TypeChecker {
             Type::Int | Type::Float | Type::Num | Type::Str | Type::Bytes | Type::Bool => true,
             Type::List(_) => true,
             Type::BuchiPack(_) => true,
+            // Phase-2 review High-2: containers and function values are
+            // bare too — without these, `hashMap(...) >=> leaked` slipped
+            // through the static rule into the runtime identity path.
+            Type::Function(_, _) => true,
+            Type::Generic(name, _) if name == "HashMap" || name == "Set" => true,
             Type::Named(name) => {
                 // A registered pack type-def or enum is a data value. A
                 // registered mold (or anything unresolved) is not flagged.
@@ -1357,6 +1362,49 @@ impl TypeChecker {
     // pushes long boolean expressions next to the pattern and hurts
     // readability without changing semantics.
     #[allow(clippy::collapsible_match)]
+    /// Phase-2 review High-1: shared ordering operand rule for the
+    /// `Lte` / `Between` molds — `<=` is the binding operator, so
+    /// "less-or-equal" is a mold, but it obeys the same operand rules as
+    /// `<` / `>` / `>=` (numeric pairs, Str pairs, same-Enum pairs).
+    /// Without this the mold forms accepted cross-Enum operands the
+    /// operator forms reject, and the backends disagreed on the result.
+    pub(super) fn validate_ordering_mold_pair(
+        &mut self,
+        mold: &str,
+        left_type: &Type,
+        right_type: &Type,
+        span: &Span,
+    ) {
+        if left_type == &Type::Unknown
+            || right_type == &Type::Unknown
+            || Self::contains_unknown(left_type)
+            || Self::contains_unknown(right_type)
+        {
+            return;
+        }
+        let left_is_numeric_ext = left_type.is_numeric()
+            || matches!(left_type, Type::Named(n) if self.type_param_is_numeric(n));
+        let right_is_numeric_ext = right_type.is_numeric()
+            || matches!(right_type, Type::Named(n) if self.type_param_is_numeric(n));
+        let both_str = matches!(left_type, Type::Str) && matches!(right_type, Type::Str);
+        let same_enum = match (left_type, right_type) {
+            (Type::Named(a), Type::Named(b)) => a == b && self.registry.is_enum_type(a),
+            _ => false,
+        };
+        let valid = (left_is_numeric_ext && right_is_numeric_ext) || both_str || same_enum;
+        if !valid {
+            self.push_e1605_once(
+                span,
+                format!(
+                    "[E1605] Cannot compare {} with {} in `{}[...]()`. \
+                     Hint: Ordering comparison requires numeric, string, or same-Enum operands. \
+                     For Enum↔Int comparisons use `Ordinal[<enum>]()` to obtain the Int first.",
+                    left_type, right_type, mold
+                ),
+            );
+        }
+    }
+
     pub(super) fn emit_comparison_mismatch_if_needed(
         &mut self,
         left_type: &Type,
