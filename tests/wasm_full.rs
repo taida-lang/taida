@@ -888,11 +888,12 @@ fn wasm_full_parity_allowlist_guard() {
     //   F62B-022: +compile_f62b022_lambda_blocks (block-bodied lambdas) -> 75.
     //   F62B-023: +compile_f62b023_typed_unmold (typed unmold bindings) -> 76.
     //   F62B-023(b): +compile_f62b023_type_alias (list type aliases) -> 77.
+    //   F62B-023(a): +compile_f62b023_bidi_inference (expected-type hints) -> 78.
     assert_eq!(
         expected_parity_ok,
-        77,
+        78,
         "WF-5: parity-OK count drift — got {} = |fixtures {}| - |skip {}| - |rejected {}| - \
-         |native_fail {}| - |diff {}|. Expected 77. Update this constant deliberately.",
+         |native_fail {}| - |diff {}|. Expected 78. Update this constant deliberately.",
         expected_parity_ok,
         all.len(),
         FULL_SKIP_STEMS.len(),

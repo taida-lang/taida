@@ -175,12 +175,64 @@ impl TypeChecker {
             }
         }
 
+        // F62B-023 (a): push the expected type down into literal trees
+        // before plain inference runs, so empty `@[]` literals in hinted
+        // positions type as the expected list (instead of `@[?]` residue
+        // that fails the binding check and trips [E1529]).
+        self.seed_empty_literal_hints(expr, expected);
+
         let inferred = self.infer_expr_type(expr);
         let hinted = Self::fill_unknowns_from_expected(&inferred, expected);
         if hinted != inferred {
             self.typed_expr_table.record(expr, hinted.clone());
         }
         hinted
+    }
+
+    /// F62B-023 (a): bidirectional hints for empty list literals. Descends
+    /// an expression tree alongside the expected type and records the
+    /// expected list type for every empty `@[]` literal that has one, keyed
+    /// by AST node id. Only literal structure is walked (packs, type
+    /// constructors, lists), so homogeneity checks and the rest of
+    /// inference run unchanged on the single plain pass that follows.
+    pub(super) fn seed_empty_literal_hints(&mut self, expr: &Expr, expected: &Type) {
+        let expected = self.expand_expected_structural(expected);
+        match (expr, &expected) {
+            (Expr::ListLit(items, _), Type::List(elem)) => {
+                if items.is_empty() {
+                    self.empty_literal_hints
+                        .insert(expr.node_id(), Type::List(elem.clone()));
+                } else {
+                    for item in items {
+                        self.seed_empty_literal_hints(item, elem);
+                    }
+                }
+            }
+            (
+                Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _),
+                Type::BuchiPack(expected_fields),
+            ) => {
+                for f in fields {
+                    if let Some((_, expected_ty)) =
+                        expected_fields.iter().find(|(n, _)| n == &f.name)
+                    {
+                        self.seed_empty_literal_hints(&f.value, expected_ty);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Expand a `Type::Named` pack type to its structural form so literal
+    /// hints can descend through it. Non-pack names pass through.
+    fn expand_expected_structural(&self, expected: &Type) -> Type {
+        if let Type::Named(name) = expected
+            && let Some(fields) = self.registry.get_type_fields(name)
+        {
+            return Type::BuchiPack(fields.to_vec());
+        }
+        expected.clone()
     }
 
     fn infer_named_function_with_hint(
@@ -398,7 +450,13 @@ impl TypeChecker {
 
             Expr::ListLit(items, span) => {
                 if items.is_empty() {
-                    Type::List(Box::new(Type::Unknown))
+                    // F62B-023 (a): an empty literal in a hinted position
+                    // takes the expected list type seeded beforehand.
+                    if let Some(hint) = self.empty_literal_hints.get(&expr.node_id()) {
+                        hint.clone()
+                    } else {
+                        Type::List(Box::new(Type::Unknown))
+                    }
                 } else {
                     let first_type = self.infer_expr_type(&items[0]);
                     // リスト要素の同質性チェック (E0401)

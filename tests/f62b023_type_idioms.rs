@@ -267,3 +267,94 @@ fn list_type_alias_imports_across_modules() {
     );
     assert_eq!(stdout_text(&output), "1\n");
 }
+
+// ── (a) bidirectional expected-type inference for empty literals ────
+
+/// (a) the headline repro: an annotated binding's expected type reaches an
+/// empty `@[]` inside a pack literal (previously a binding mismatch plus
+/// an unresolved-type error).
+#[test]
+fn bidi_annotated_binding_types_empty_list_in_pack() {
+    let output = run_interp(
+        "f62b023_bidi_binding",
+        "WebRequest = @(path: Str, query: @[@(name: Str, value: Str)])\nreq: WebRequest <= @(path <= \"/x\", query <= @[])\nstdout(req.query.length().toString())\n",
+    );
+    assert!(
+        output.status.success(),
+        "hinted empty list must check\nstderr={}",
+        stderr_text(&output)
+    );
+    assert_eq!(stdout_text(&output), "0\n");
+}
+
+/// (a) type constructors hint their declared field types.
+#[test]
+fn bidi_type_constructor_types_empty_list_field() {
+    let output = run_interp(
+        "f62b023_bidi_ctor",
+        "WebRequest = @(path: Str, query: @[@(name: Str, value: Str)])\nreq <= WebRequest(path <= \"/y\", query <= @[])\nstdout(req.query.length().toString())\n",
+    );
+    assert!(
+        output.status.success(),
+        "constructor-hinted empty list must check\nstderr={}",
+        stderr_text(&output)
+    );
+    assert_eq!(stdout_text(&output), "0\n");
+}
+
+/// (a) annotated call arguments hint literal arguments.
+#[test]
+fn bidi_call_argument_types_empty_list_in_pack() {
+    let output = run_interp(
+        "f62b023_bidi_arg",
+        "WebRequest = @(path: Str, query: @[@(name: Str, value: Str)])\nhandle r: WebRequest = r.path => :Str\nstdout(handle(@(path <= \"/z\", query <= @[])))\n",
+    );
+    assert!(
+        output.status.success(),
+        "call-arg-hinted empty list must check\nstderr={}",
+        stderr_text(&output)
+    );
+    assert_eq!(stdout_text(&output), "/z\n");
+}
+
+/// (a) hints descend through non-empty lists to nested empties.
+#[test]
+fn bidi_nested_empty_list_inside_nonempty_list() {
+    let output = run_interp(
+        "f62b023_bidi_nested",
+        "grid: @[@[Int]] <= @[@[], @[1]]\nstdout(grid.length().toString())\n",
+    );
+    assert!(
+        output.status.success(),
+        "nested hinted empty list must check\nstderr={}",
+        stderr_text(&output)
+    );
+    assert_eq!(stdout_text(&output), "2\n");
+}
+
+/// (a) negatives hold: a bare ambiguous `@[]` still requires an
+/// annotation, and a wrongly-typed non-empty list still mismatches.
+#[test]
+fn bidi_negative_cases_still_rejected() {
+    let bare = run_interp("f62b023_bidi_neg_bare", "ys <= @[]\n");
+    assert!(
+        !bare.status.success(),
+        "bare empty list must stay ambiguous"
+    );
+    assert!(
+        stderr_text(&bare).contains("requires a type annotation"),
+        "expected ambiguity diagnostic, got: {}",
+        stderr_text(&bare)
+    );
+
+    let wrong = run_interp(
+        "f62b023_bidi_neg_wrong",
+        "WebRequest = @(path: Str, query: @[@(name: Str, value: Str)])\nreq: WebRequest <= @(path <= \"/x\", query <= @[1])\n",
+    );
+    assert!(!wrong.status.success(), "wrong element type must mismatch");
+    assert!(
+        stderr_text(&wrong).contains("Type mismatch in assignment to 'req'"),
+        "expected binding mismatch, got: {}",
+        stderr_text(&wrong)
+    );
+}

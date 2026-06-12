@@ -1,4 +1,4 @@
-docs/guide/01_types.md:465
+docs/guide/01_types.md:472
 docs/guide/02_strict_typing.md:247
 docs/guide/02_strict_typing.md:63
 docs/guide/04_buchi_pack.md:213

@@ -374,6 +374,13 @@ pub struct TypeChecker {
     /// every observed `Expr` here so codegen lowering can answer
     /// "is this expression Bool?" by looking up the recorded type.
     pub typed_expr_table: super::typed_hir::TypedExprTable,
+    /// Bidirectional hints for empty list literals, keyed by AST node id.
+    /// Seeded by `seed_empty_literal_hints` when an expected type reaches a
+    /// literal tree (annotated bindings, annotated call arguments, type
+    /// constructors); consulted by the plain `ListLit` inference arm so an
+    /// empty `@[]` in a hinted position types as the expected list instead
+    /// of `@[?]`.
+    pub(super) empty_literal_hints: HashMap<usize, Type>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -475,6 +482,7 @@ impl TypeChecker {
             descriptor_scope_shadows: HashSet::new(),
             pipeline_placeholder_type: None,
             typed_expr_table: super::typed_hir::TypedExprTable::new(),
+            empty_literal_hints: HashMap::new(),
         };
         // C19B-002 (import-less): the C19 interactive variants are core-bundled
         // in `src/codegen/lower/core.rs` (import-less parity with interpreter/
