@@ -44,25 +44,6 @@ impl Lowering {
         let mut module = IrModule::new();
         module.module_key = Some(self.current_module_key().to_string());
 
-        // F62B-038 #11: schema-passing is transitive over explicit generic
-        // calls (`outer[T] = inner[T](..)`) — the hidden-schema-param sets
-        // are a whole-program fixpoint, built from the same shared closure
-        // the checker uses for call-form enforcement (the two must never
-        // disagree). A per-definition scan here missed the forwarding-only
-        // generics and lowering failed with "Unknown schema type 'T'".
-        {
-            let fd_refs: Vec<&crate::parser::FuncDef> = program
-                .statements
-                .iter()
-                .filter_map(|s| match s {
-                    Statement::FuncDef(fd) => Some(fd),
-                    _ => None,
-                })
-                .collect();
-            self.generic_schema_params
-                .extend(crate::parser::close_schema_passing_type_params(&fd_refs));
-        }
-
         // 1st pass: 関数定義、型定義、エクスポート/インポートを収集
         for stmt in &program.statements {
             match stmt {
@@ -588,6 +569,41 @@ impl Lowering {
         }
 
         self.register_mold_solidify_helpers()?;
+
+        // F62B-038 #11 / F62B-040: schema-passing is transitive over
+        // explicit generic calls (`outer[T] = inner[T](..)`) — the
+        // hidden-schema-param sets are a whole-program fixpoint built from
+        // the same shared closure the checker uses for call-form
+        // enforcement (the two must never disagree). Runs AFTER the import
+        // pass: earlier modules' registrations (this instance lowers
+        // dependencies first and accumulates) plus the alias copies above
+        // seed the closure, so a forwarding generic whose callee is
+        // imported is detected like a local one. The old per-definition
+        // scan missed forwarding-only generics and lowering failed with a
+        // non-diagnostic "Unknown schema type 'T'".
+        {
+            let seed: std::collections::HashMap<String, (Vec<String>, Vec<String>)> = self
+                .generic_schema_params
+                .iter()
+                .filter_map(|(name, schema)| {
+                    self.generic_fn_type_params
+                        .get(name)
+                        .map(|decl| (name.clone(), (decl.clone(), schema.clone())))
+                })
+                .collect();
+            let fd_refs: Vec<&crate::parser::FuncDef> = program
+                .statements
+                .iter()
+                .filter_map(|s| match s {
+                    Statement::FuncDef(fd) => Some(fd),
+                    _ => None,
+                })
+                .collect();
+            self.generic_schema_params
+                .extend(crate::parser::close_schema_passing_type_params(
+                    &fd_refs, &seed,
+                ));
+        }
 
         // Pre-2nd pass: トップレベル変数名と型情報を収集（Native グローバル変数テーブル用）
         for stmt in &program.statements {

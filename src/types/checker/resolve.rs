@@ -574,32 +574,21 @@ impl TypeChecker {
     /// occupied by cyclic-inheritance detection.
     /// - Aliased imports (`>>>./m.td => @(Color: Paint)`) register the enum
     /// under the alias, mirroring the interpreter behaviour.
-    pub(super) fn register_imported_types(&mut self, imp: &crate::parser::ImportStmt) {
-        use crate::parser::Statement as S;
-
-        if imp.path == "taida-lang/abi" {
-            self.register_abi_imports(&imp.symbols);
-            return;
-        }
-
-        // Core bundled packages are handled elsewhere (net / crypto).
+    /// Resolve an import statement's target to its `.td` file, from the
+    /// importing file's location (relative paths) or the project package
+    /// store. `None` for core bundled packages and unresolvable targets.
+    /// Same path-resolution strategy as `validate_import_symbols`.
+    fn resolve_import_td_path(
+        source_file: &std::path::Path,
+        imp: &crate::parser::ImportStmt,
+    ) -> Option<std::path::PathBuf> {
         if imp.path.starts_with("npm:") || imp.path.starts_with("taida-lang/") {
-            return;
+            return None;
         }
-
-        // Same path-resolution strategy as `validate_import_symbols`.
-        let source_file = match &self.source_file {
-            Some(f) => f.clone(),
-            None => return,
-        };
-
-        let td_path: std::path::PathBuf = if imp.path.starts_with("./")
-            || imp.path.starts_with("../")
-            || imp.path.starts_with('/')
-        {
+        if imp.path.starts_with("./") || imp.path.starts_with("../") || imp.path.starts_with('/') {
             let source_dir = source_file.parent().unwrap_or(std::path::Path::new("."));
             let path = source_dir.join(&imp.path);
-            if path.exists() { path } else { return }
+            if path.exists() { Some(path) } else { None }
         } else {
             // Package import — resolve via .taida/deps/
             let source_dir = source_file.parent().unwrap_or(std::path::Path::new("."));
@@ -617,7 +606,11 @@ impl TypeChecker {
                 Some(res) => match &res.submodule {
                     Some(sub) => {
                         let sub_path = res.pkg_dir.join(format!("{}.td", sub));
-                        if sub_path.exists() { sub_path } else { return }
+                        if sub_path.exists() {
+                            Some(sub_path)
+                        } else {
+                            None
+                        }
                     }
                     None => {
                         let entry_name =
@@ -631,14 +624,98 @@ impl TypeChecker {
                             res.pkg_dir.join(&entry_name)
                         };
                         if entry_path.exists() {
-                            entry_path
+                            Some(entry_path)
                         } else {
-                            return;
+                            None
                         }
                     }
                 },
-                None => return,
+                None => None,
             }
+        }
+    }
+
+    /// F62B-040: a module's transitive schema-passing closure, following
+    /// its own imports depth-first (visited-guarded against cycles) so a
+    /// forwarding generic whose callee lives in another file is detected.
+    /// Returns `orig-name -> (declared type params, schema params)` for
+    /// every schema-passing generic the module defines.
+    fn module_schema_passing_closure(
+        td_path: &std::path::Path,
+        visited: &mut std::collections::HashSet<std::path::PathBuf>,
+    ) -> std::collections::HashMap<String, (Vec<String>, Vec<String>)> {
+        let canonical = td_path
+            .canonicalize()
+            .unwrap_or_else(|_| td_path.to_path_buf());
+        if !visited.insert(canonical) {
+            return Default::default();
+        }
+        let Ok(source) = std::fs::read_to_string(td_path) else {
+            return Default::default();
+        };
+        let (program, _) = crate::parser::parse(&source);
+        // Seed: the module's own imports, keyed by the local alias its
+        // bodies use.
+        let mut seed: std::collections::HashMap<String, (Vec<String>, Vec<String>)> =
+            std::collections::HashMap::new();
+        for stmt in &program.statements {
+            if let crate::parser::Statement::Import(imp2) = stmt
+                && let Some(dep_path) = Self::resolve_import_td_path(td_path, imp2)
+            {
+                let dep = Self::module_schema_passing_closure(&dep_path, visited);
+                for sym in &imp2.symbols {
+                    if let Some(entry) = dep.get(&sym.name) {
+                        let local = sym.alias.clone().unwrap_or_else(|| sym.name.clone());
+                        seed.insert(local, entry.clone());
+                    }
+                }
+            }
+        }
+        let fd_refs: Vec<&crate::parser::FuncDef> = program
+            .statements
+            .iter()
+            .filter_map(|s| match s {
+                crate::parser::Statement::FuncDef(fd) => Some(fd),
+                _ => None,
+            })
+            .collect();
+        let closure = crate::parser::close_schema_passing_type_params(&fd_refs, &seed);
+        let mut out = std::collections::HashMap::new();
+        for fd in &fd_refs {
+            if fd.type_params.is_empty() {
+                continue;
+            }
+            if let Some(schema) = closure.get(&fd.name)
+                && !schema.is_empty()
+            {
+                out.insert(
+                    fd.name.clone(),
+                    (
+                        fd.type_params.iter().map(|tp| tp.name.clone()).collect(),
+                        schema.clone(),
+                    ),
+                );
+            }
+        }
+        out
+    }
+
+    pub(super) fn register_imported_types(&mut self, imp: &crate::parser::ImportStmt) {
+        use crate::parser::Statement as S;
+
+        if imp.path == "taida-lang/abi" {
+            self.register_abi_imports(&imp.symbols);
+            return;
+        }
+
+        let source_file = match &self.source_file {
+            Some(f) => f.clone(),
+            None => return,
+        };
+
+        let td_path = match Self::resolve_import_td_path(&source_file, imp) {
+            Some(p) => p,
+            None => return,
         };
 
         let source = match std::fs::read_to_string(&td_path) {
@@ -646,6 +723,14 @@ impl TypeChecker {
             Err(_) => return,
         };
         let (program, _) = crate::parser::parse(&source);
+        // F62B-040: imported schema-passing generics (direct or forwarding)
+        // keep their call-form enforcement across the module boundary —
+        // without this an inference-form call to an imported generic whose
+        // type parameter IS inferable from the arguments passed the checker
+        // and reached native/wasm lowering with the hidden schema argument
+        // missing (an ABI arity mismatch).
+        let schema_closure =
+            Self::module_schema_passing_closure(&td_path, &mut std::collections::HashSet::new());
 
         // Build a map of imported-symbol-name → local-alias (or the same name).
         let requested: std::collections::HashMap<&str, &str> = imp
@@ -803,6 +888,13 @@ impl TypeChecker {
                 && let Some(&local_name) = requested.get(fd.name.as_str())
             {
                 self.register_imported_function_signature(fd, local_name, &type_aliases);
+                // F62B-040: carry the schema-passing set over, under the
+                // local alias (type-parameter names are definition-side
+                // and survive aliasing unchanged).
+                if let Some((_, schema)) = schema_closure.get(fd.name.as_str()) {
+                    self.schema_passing_generic_funcs
+                        .insert(local_name.to_string(), schema.clone());
+                }
             }
         }
     }

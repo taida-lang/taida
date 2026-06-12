@@ -898,6 +898,35 @@ impl TypeChecker {
             .collect()
     }
 
+    /// F62B-040: schema-passing metadata for codegen lowering —
+    /// `name -> (declared type params, schema params)` for every callable
+    /// this checker knows to be schema-passing, local and imported alike
+    /// (imported ones under their local aliases). The driver hands this
+    /// to `Lowering::set_schema_passing_metadata` next to the typed-HIR
+    /// table so the checker's call-form enforcement and the lowering's
+    /// hidden schema params never disagree across module boundaries.
+    pub fn schema_passing_metadata(
+        &self,
+    ) -> std::collections::HashMap<String, (Vec<String>, Vec<String>)> {
+        self.schema_passing_generic_funcs
+            .iter()
+            .filter_map(|(name, schema)| {
+                self.generic_func_defs.get(name).map(|fd| {
+                    (
+                        name.clone(),
+                        (
+                            fd.type_params
+                                .iter()
+                                .map(|tp| tp.name.clone())
+                                .collect::<Vec<String>>(),
+                            schema.clone(),
+                        ),
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// Check an entire program. Collects type definitions first,
     /// then checks all statements.
     pub fn check_program(&mut self, program: &Program) {
@@ -912,24 +941,6 @@ impl TypeChecker {
         // into the next program.
         self.empty_literal_hints.clear();
         self.schema_passing_generic_funcs.clear();
-        // F62B-038 #11: schema-passing is transitive over explicit generic
-        // calls (`outer[T] = inner[T](..)`), so the per-function sets are a
-        // whole-program fixpoint, not a per-definition scan. Built up front
-        // from the shared closure also used by codegen lowering — the
-        // checker's call-form enforcement and the lowering's hidden schema
-        // params must never disagree.
-        {
-            let fd_refs: Vec<&FuncDef> = program
-                .statements
-                .iter()
-                .filter_map(|s| match s {
-                    Statement::FuncDef(fd) => Some(fd),
-                    _ => None,
-                })
-                .collect();
-            self.schema_passing_generic_funcs =
-                crate::parser::close_schema_passing_type_params(&fd_refs);
-        }
         for stmt in &program.statements {
             match stmt {
                 Statement::EnumDef(ed) => {
@@ -987,6 +998,47 @@ impl TypeChecker {
             if !is_inheritance {
                 self.register_types(stmt);
             }
+        }
+
+        // F62B-038 #11 / F62B-040: schema-passing is transitive over
+        // explicit generic calls (`outer[T] = inner[T](..)`), so the
+        // per-function sets are a whole-program fixpoint, not a
+        // per-definition scan. Built AFTER the register_types pass so the
+        // imported schema-passing generics registered there (under their
+        // local aliases) seed the closure — a local forwarding generic
+        // whose callee is imported is detected like a local one. Shared
+        // closure with codegen lowering: the checker's call-form
+        // enforcement and the lowering's hidden schema params must never
+        // disagree.
+        {
+            let seed: std::collections::HashMap<String, (Vec<String>, Vec<String>)> = self
+                .schema_passing_generic_funcs
+                .iter()
+                .filter_map(|(name, schema)| {
+                    self.generic_func_defs.get(name).map(|fd| {
+                        (
+                            name.clone(),
+                            (
+                                fd.type_params
+                                    .iter()
+                                    .map(|tp| tp.name.clone())
+                                    .collect::<Vec<String>>(),
+                                schema.clone(),
+                            ),
+                        )
+                    })
+                })
+                .collect();
+            let fd_refs: Vec<&FuncDef> = program
+                .statements
+                .iter()
+                .filter_map(|s| match s {
+                    Statement::FuncDef(fd) => Some(fd),
+                    _ => None,
+                })
+                .collect();
+            self.schema_passing_generic_funcs =
+                crate::parser::close_schema_passing_type_params(&fd_refs, &seed);
         }
 
         // Phase-2 review M-4: alias targets resolve at registration, so a

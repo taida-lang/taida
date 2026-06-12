@@ -156,7 +156,12 @@ fn incage_non_builder_reports_and_exits_on_wasm() {
         eprintln!("wasmtime not installed; skipping");
         return;
     };
-    assert!(!out.status.success());
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "must exit(1) via proc_exit, not trap; stderr={}",
+        stderr_text(&out)
+    );
     assert!(
         stderr_text(&out).contains(INCAGE_GOT_INT),
         "expected the typed builder rejection, got: {}",
@@ -185,7 +190,12 @@ fn uncage_non_builder_reports_got_str_on_all_backends() {
     );
 
     if let Some(wasm) = build_and_run_wasm("f62b038_uncage_wasm", NON_BUILDER_UNCAGE, true) {
-        assert!(!wasm.status.success());
+        assert_eq!(
+            wasm.status.code(),
+            Some(1),
+            "wasm: must exit(1) via proc_exit, not trap; stderr={}",
+            stderr_text(&wasm)
+        );
         assert!(
             stderr_text(&wasm).contains(UNCAGE_GOT_STR),
             "wasm: expected the typed builder rejection, got: {}",
@@ -384,4 +394,351 @@ fn builder_display_is_stable_and_pointer_free() {
     } else {
         eprintln!("wasmtime not installed; skipping the wasm leg");
     }
+}
+
+// ── F62B-040: schema-passing across module boundaries ────────────
+//
+// Each module is lowered by its own `Lowering` instance, so an imported
+// generic's hidden-schema metadata cannot be observed from the exporting
+// module's pass. Before the fix, explicit calls to an imported
+// schema-passing generic emitted no hidden schema arguments (an ABI
+// arity mismatch — wasm's C type-check rejected the build outright,
+// native silently called a 3-arg function with 2 arguments), inferable
+// inference-form calls passed the checker entirely, and a forwarding
+// generic whose callee lives in another file was not detected. The
+// checker now computes a recursive per-module closure at import
+// registration and hands the metadata to lowering next to the typed-HIR
+// table. A successful wasm build doubles as a structural arity proof.
+
+const XMOD_LIB: &str = r#"queryAll[T] db: CageBuilder  sql: Str =
+  db => InCage[_, "prepare", @[sql]]() => Uncage[_, "all", T]() >=> rows
+  rows
+=> :T
+
+<<< @(queryAll)
+"#;
+
+/// Write a multi-file module fixture and build/run the entry natively.
+fn build_and_run_native_modules(label: &str, files: &[(&str, &str)], entry: &str) -> Output {
+    let dir = unique_temp_dir(label);
+    for (name, content) in files {
+        write_file(&dir.join(name), content);
+    }
+    let bin = dir.join("main_bin");
+    let build = Command::new(taida_bin())
+        .arg("build")
+        .arg(dir.join(entry))
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("native build");
+    assert!(
+        build.status.success(),
+        "native build must succeed\nstderr={}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(&bin).output().expect("run native");
+    let _ = fs::remove_dir_all(&dir);
+    run
+}
+
+/// Write a multi-file module fixture and build/run the entry on wasm.
+/// Returns `None` when wasmtime is not installed.
+fn build_and_run_wasm_modules(label: &str, files: &[(&str, &str)], entry: &str) -> Option<Output> {
+    let wasmtime = wasmtime_bin()?;
+    let dir = unique_temp_dir(label);
+    for (name, content) in files {
+        write_file(&dir.join(name), content);
+    }
+    let wasm = dir.join("main.wasm");
+    let build = Command::new(taida_bin())
+        .arg("build")
+        .arg("wasm-wasi")
+        .arg(dir.join(entry))
+        .arg("-o")
+        .arg(&wasm)
+        .output()
+        .expect("wasm build");
+    assert!(
+        build.status.success(),
+        "wasm build must succeed (a failure here is the hidden-schema \
+         ABI arity mismatch)\nstderr={}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(&wasmtime)
+        .arg(&wasm)
+        .output()
+        .expect("run wasmtime");
+    let _ = fs::remove_dir_all(&dir);
+    Some(run)
+}
+
+/// Explicit call to an imported schema-passing generic: lowers on native
+/// and wasm with the hidden schema argument attached, and reaches the
+/// deterministic session-less rejection.
+#[test]
+fn imported_schema_passing_explicit_call_lowers() {
+    let main = concat!(
+        ">>> ./lib.td => @(queryAll)\n",
+        "cap <= HostCapability[\"CAP\", \"mock/kind\"]()\n",
+        "base <= Cage[cap]()\n",
+        "out <= queryAll[Str](base, \"select 1\")\n",
+        "stdout(out)\n",
+    );
+    let files = [("lib.td", XMOD_LIB), ("main.td", main)];
+    let native = build_and_run_native_modules("f62b040_explicit_native", &files, "main.td");
+    assert!(!native.status.success());
+    assert!(
+        stderr_text(&native).contains("host capabilities are not available"),
+        "native: expected the session-less rejection, got: {}",
+        stderr_text(&native)
+    );
+    if let Some(wasm) = build_and_run_wasm_modules("f62b040_explicit_wasm", &files, "main.td") {
+        assert!(!wasm.status.success());
+        assert!(
+            stderr_text(&wasm).contains("HostCapabilityError"),
+            "wasm: expected the host-capability rejection, got: {}",
+            stderr_text(&wasm)
+        );
+    } else {
+        eprintln!("wasmtime not installed; skipping the wasm leg");
+    }
+}
+
+/// The alias form keeps the metadata: `queryAll => qa` calls as
+/// `qa[Str](...)` with the schema argument attached.
+#[test]
+fn imported_schema_passing_alias_explicit_call_lowers() {
+    let main = concat!(
+        ">>> ./lib.td => @(queryAll => qa)\n",
+        "cap <= HostCapability[\"CAP\", \"mock/kind\"]()\n",
+        "base <= Cage[cap]()\n",
+        "out <= qa[Str](base, \"select 1\")\n",
+        "stdout(out)\n",
+    );
+    let files = [("lib.td", XMOD_LIB), ("main.td", main)];
+    let native = build_and_run_native_modules("f62b040_alias_native", &files, "main.td");
+    assert!(!native.status.success());
+    assert!(
+        stderr_text(&native).contains("host capabilities are not available"),
+        "native: expected the session-less rejection, got: {}",
+        stderr_text(&native)
+    );
+}
+
+/// An INFERABLE inference-form call to an imported schema-passing generic
+/// is rejected with the explicit-call guidance. (A return-only type
+/// parameter was already stopped by plain inference failure; a parameter
+/// that also appears in an argument type inferred fine and sailed
+/// through to the ABI mismatch.)
+#[test]
+fn imported_schema_passing_inferable_call_rejected() {
+    let lib = r#"echoQuery[T] db: CageBuilder  x: T =
+  db => InCage[_, "ping", @[]]() => Uncage[_, "all", T]() >=> rows
+  rows
+=> :T
+
+<<< @(echoQuery)
+"#;
+    let main = concat!(
+        ">>> ./lib.td => @(echoQuery)\n",
+        "cap <= HostCapability[\"CAP\", \"mock/kind\"]()\n",
+        "base <= Cage[cap]()\n",
+        "out <= echoQuery(base, \"hello\")\n",
+        "stdout(out)\n",
+    );
+    let dir = unique_temp_dir("f62b040_inferable");
+    write_file(&dir.join("lib.td"), lib);
+    write_file(&dir.join("main.td"), main);
+    let output = Command::new(taida_bin())
+        .arg(dir.join("main.td"))
+        .output()
+        .expect("run taida interpreter");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!output.status.success());
+    let stderr = stderr_text(&output);
+    assert!(
+        stderr.contains("[E1510]")
+            && stderr.contains("'echoQuery'")
+            && stderr.contains("host-call Out slot"),
+        "expected the explicit-arguments requirement, got: {stderr}"
+    );
+}
+
+/// Cross-module forwarding: `outer[T] = queryAll[T](..)` where queryAll
+/// is imported. The recursive import closure marks `outer` schema-passing
+/// in its own module, the re-export carries it to the entry, and both
+/// backends lower with the hidden schema threaded through two hops.
+#[test]
+fn cross_module_forwarding_lowers_and_enforces() {
+    let mid = concat!(
+        ">>> ./lib.td => @(queryAll)\n",
+        "\n",
+        "outer[T] db: CageBuilder  sql: Str =\n",
+        "  queryAll[T](db, sql) => r\n",
+        "  r\n",
+        "=> :T\n",
+        "\n",
+        "<<< @(outer)\n",
+    );
+    let main = concat!(
+        ">>> ./mid.td => @(outer)\n",
+        "cap <= HostCapability[\"CAP\", \"mock/kind\"]()\n",
+        "base <= Cage[cap]()\n",
+        "out <= outer[Str](base, \"select 1\")\n",
+        "stdout(out)\n",
+    );
+    let files = [("lib.td", XMOD_LIB), ("mid.td", mid), ("main.td", main)];
+    let native = build_and_run_native_modules("f62b040_xfwd_native", &files, "main.td");
+    assert!(!native.status.success());
+    assert!(
+        stderr_text(&native).contains("host capabilities are not available"),
+        "native: expected the session-less rejection, got: {}",
+        stderr_text(&native)
+    );
+    if let Some(wasm) = build_and_run_wasm_modules("f62b040_xfwd_wasm", &files, "main.td") {
+        assert!(!wasm.status.success());
+        assert!(
+            stderr_text(&wasm).contains("HostCapabilityError"),
+            "wasm: expected the host-capability rejection, got: {}",
+            stderr_text(&wasm)
+        );
+    } else {
+        eprintln!("wasmtime not installed; skipping the wasm leg");
+    }
+
+    // The forwarding generic itself demands explicit type arguments.
+    let main_inf = concat!(
+        ">>> ./mid.td => @(outer)\n",
+        "cap <= HostCapability[\"CAP\", \"mock/kind\"]()\n",
+        "base <= Cage[cap]()\n",
+        "out <= outer(base, \"select 1\")\n",
+        "stdout(out)\n",
+    );
+    let dir = unique_temp_dir("f62b040_xfwd_inference");
+    write_file(&dir.join("lib.td"), XMOD_LIB);
+    write_file(&dir.join("mid.td"), mid);
+    write_file(&dir.join("main.td"), main_inf);
+    let output = Command::new(taida_bin())
+        .arg(dir.join("main.td"))
+        .output()
+        .expect("run taida interpreter");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!output.status.success());
+    assert!(
+        stderr_text(&output).contains("[E1510]") && stderr_text(&output).contains("'outer'"),
+        "expected the explicit-arguments requirement on the imported forwarder, got: {}",
+        stderr_text(&output)
+    );
+}
+
+/// Two local forwarding hops (`middle[T] = outer[T](..) = inner[T](..)`):
+/// the fixpoint closes over chains, not just single edges.
+#[test]
+fn two_hop_local_forwarding_lowers() {
+    let source = concat!(
+        "inner[T] db: CageBuilder  sql: Str =\n",
+        "  db => InCage[_, \"prepare\", @[sql]]() => Uncage[_, \"all\", T]() >=> rows\n",
+        "  rows\n",
+        "=> :T\n",
+        "\n",
+        "outer[T] db: CageBuilder  sql: Str =\n",
+        "  inner[T](db, sql) => r\n",
+        "  r\n",
+        "=> :T\n",
+        "\n",
+        "middle[T] db: CageBuilder  sql: Str =\n",
+        "  outer[T](db, sql) => r\n",
+        "  r\n",
+        "=> :T\n",
+        "\n",
+        "cap <= HostCapability[\"CAP\", \"mock/kind\"]()\n",
+        "base <= Cage[cap]()\n",
+        "out <= middle[Str](base, \"select 1\")\n",
+        "stdout(out)\n",
+    );
+    let run = build_and_run_native("f62b040_two_hop", source, false);
+    assert!(!run.status.success());
+    assert!(
+        stderr_text(&run).contains("host capabilities are not available"),
+        "expected the session-less rejection, got: {}",
+        stderr_text(&run)
+    );
+}
+
+// ── F62B-041: the combined bracket form on the build backends ────
+
+/// `fn[1](2)` is rejected at build time on native/wasm/js too — the
+/// interpreter-only guard left the lowering and JS paths silently
+/// dropping the bracket on unchecked builds.
+#[test]
+fn non_generic_bracket_with_call_args_rejected_on_build_backends() {
+    let source = "f x: Int = x => :Int\nstdout(f[7](3))\n";
+    let dir = unique_temp_dir("f62b041_native");
+    let src = dir.join("main.td");
+    write_file(&src, source);
+
+    let native = Command::new(taida_bin())
+        .arg("build")
+        .arg("--no-check")
+        .arg(&src)
+        .arg("-o")
+        .arg(dir.join("main_bin"))
+        .output()
+        .expect("native build");
+    assert!(!native.status.success());
+    assert!(
+        stderr_text(&native).contains("cannot take both bracket values and call arguments"),
+        "native: expected the combined-form rejection, got: {}",
+        stderr_text(&native)
+    );
+
+    let wasm = Command::new(taida_bin())
+        .arg("build")
+        .arg("wasm-wasi")
+        .arg("--no-check")
+        .arg(&src)
+        .arg("-o")
+        .arg(dir.join("main.wasm"))
+        .output()
+        .expect("wasm build");
+    assert!(!wasm.status.success());
+    assert!(
+        stderr_text(&wasm).contains("cannot take both bracket values and call arguments"),
+        "wasm: expected the combined-form rejection, got: {}",
+        stderr_text(&wasm)
+    );
+
+    let js = Command::new(taida_bin())
+        .arg("build")
+        .arg("js")
+        .arg("--no-check")
+        .arg(&src)
+        .arg("-o")
+        .arg(dir.join("main.js"))
+        .output()
+        .expect("js build");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!js.status.success());
+    assert!(
+        stderr_text(&js).contains("cannot take both bracket values and call arguments"),
+        "js: expected the combined-form rejection, got: {}",
+        stderr_text(&js)
+    );
+}
+
+/// The legacy positional bracket call still lowers everywhere.
+#[test]
+fn non_generic_legacy_bracket_call_still_lowers() {
+    let run = build_and_run_native(
+        "f62b041_legacy_native",
+        "f x: Int = x => :Int\nstdout(f[3]())\n",
+        true,
+    );
+    assert!(
+        run.status.success(),
+        "legacy bracket call must run natively\nstderr={}",
+        stderr_text(&run)
+    );
+    assert_eq!(stdout_text(&run), "3\n");
 }

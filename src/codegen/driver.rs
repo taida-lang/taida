@@ -594,6 +594,7 @@ fn compile_to_object_inner(
     checker.set_source_file(input_path);
     checker.check_program(&program);
     lowering.set_typed_expr_table(checker.typed_expr_table.clone());
+    lowering.set_schema_passing_metadata(checker.schema_passing_metadata());
     let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
         message: format!("{}", e),
     })?;
@@ -1396,6 +1397,7 @@ fn inline_wasm_module_imports_with_backend(
         dep_checker.set_source_file(&dep_path);
         dep_checker.check_program(&dep_program);
         dep_lowering.set_typed_expr_table(dep_checker.typed_expr_table.clone());
+        dep_lowering.set_schema_passing_metadata(dep_checker.schema_passing_metadata());
         let dep_ir = dep_lowering
             .lower_program(&dep_program)
             .map_err(|e| CompileError {
@@ -1581,6 +1583,7 @@ fn wasm_frontend(
     checker.set_source_file(input_path);
     checker.check_program(&program);
     lowering.set_typed_expr_table(checker.typed_expr_table.clone());
+    lowering.set_schema_passing_metadata(checker.schema_passing_metadata());
     let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
         message: format!("{}", e),
     })?;

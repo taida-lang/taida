@@ -3564,6 +3564,26 @@ impl Lowering {
                                 }
                             }
                             if all_positional {
+                                // F62B-041 (the lowering twin of the
+                                // interpreter's combined-form guard): for a
+                                // NON-generic function the bracket is the
+                                // legacy positional call (`fn[arg1, arg2]()`),
+                                // so combining it with `()` arguments
+                                // (`fn[1](2)`) is ambiguous. The checker
+                                // rejects this statically; without this guard
+                                // an unchecked build silently dropped the
+                                // bracket values and lowered `fn(2)`.
+                                if !is_generic && !type_args.is_empty() {
+                                    return Err(LowerError {
+                                        message: format!(
+                                            "Non-generic function '{}' cannot take both \
+                                             bracket values and call arguments. \
+                                             Call it as {}(arg1, arg2) or with the \
+                                             positional bracket form {}[arg1, arg2]().",
+                                            type_name, type_name, type_name
+                                        ),
+                                    });
+                                }
                                 let mut callee = Expr::Ident(
                                     type_name.to_string(),
                                     crate::lexer::Span::new(0, 0, 0, 0),

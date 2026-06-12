@@ -922,12 +922,25 @@ pub fn fn_schema_passing_type_params(fd: &FuncDef) -> Vec<String> {
 /// plus parameters forwarded into an already-schema-passing callee's slot.
 /// Shared single definition for the checker (call-form enforcement) and
 /// codegen lowering (hidden schema params) — the two must never disagree.
+///
+/// `seed` carries callables that are already known to be schema-passing
+/// but whose definitions are not in `defs` — imported generics, under the
+/// name the scanned bodies use for them — as
+/// `name -> (declared type params, schema params)`. Forwarding into a
+/// seeded callee is detected exactly like forwarding into a local one.
 pub fn close_schema_passing_type_params(
     defs: &[&FuncDef],
+    seed: &std::collections::HashMap<String, (Vec<String>, Vec<String>)>,
 ) -> std::collections::HashMap<String, Vec<String>> {
     let mut declared: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for (name, (decl, schema)) in seed {
+        declared.insert(name.clone(), decl.clone());
+        if !schema.is_empty() {
+            map.insert(name.clone(), schema.clone());
+        }
+    }
     for fd in defs {
         if fd.type_params.is_empty() {
             continue;

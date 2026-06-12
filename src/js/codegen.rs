@@ -4272,6 +4272,24 @@ impl JsCodegen {
                         f.name.starts_with('_') && f.name[1..].chars().all(|c| c.is_ascii_digit())
                     });
                     if all_positional {
+                        // F62B-041 (JS leg of the combined-form guard): for
+                        // a NON-generic function the bracket is the legacy
+                        // positional call (`fn[arg1, arg2]()`), so combining
+                        // it with `()` arguments (`fn[1](2)`) is ambiguous.
+                        // The checker rejects this statically; without this
+                        // guard an unchecked build silently dropped the
+                        // bracket values and emitted `fn(2)`.
+                        if !self.generic_funcs.contains(name.as_str()) && !type_args.is_empty() {
+                            return Err(JsError {
+                                message: format!(
+                                    "Non-generic function '{}' cannot take both \
+                                     bracket values and call arguments. \
+                                     Call it as {}(arg1, arg2) or with the \
+                                     positional bracket form {}[arg1, arg2]().",
+                                    name, name, name
+                                ),
+                            });
+                        }
                         self.write(&format!("{}(", name));
                         for (i, field) in fields.iter().enumerate() {
                             if i > 0 {

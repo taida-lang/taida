@@ -211,6 +211,31 @@ impl Lowering {
         self.typed_expr_table = table;
     }
 
+    /// F62B-040: receive the checker's schema-passing metadata —
+    /// `name -> (declared type params, schema params)` for every callable
+    /// the checker knows to be schema-passing, local and imported alike
+    /// (imported ones under their local aliases). Each module is lowered
+    /// by its own `Lowering` instance, so an imported generic's metadata
+    /// cannot be observed from the exporting module's pass; this hand-off
+    /// is what lets explicit calls to imported schema-passing generics
+    /// append the hidden schema arguments (the callee is lowered with
+    /// them — missing them is an ABI arity mismatch) and lets the
+    /// transitive closure seed from imported callees. Local definitions
+    /// registered by the 1st pass take precedence over these entries.
+    pub fn set_schema_passing_metadata(
+        &mut self,
+        metadata: std::collections::HashMap<String, (Vec<String>, Vec<String>)>,
+    ) {
+        for (name, (declared, schema)) in metadata {
+            self.generic_fn_type_params
+                .entry(name.clone())
+                .or_insert(declared);
+            if !schema.is_empty() {
+                self.generic_schema_params.entry(name).or_insert(schema);
+            }
+        }
+    }
+
     /// Set the addon backend for this lowering run. Called by the
     /// driver immediately after `Lowering::new()` for non-native targets
     /// so that `lower_addon_import` can surface the correct backend-policy
