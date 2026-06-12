@@ -595,12 +595,31 @@ impl NodeIdAllocator {
         Self { next }
     }
 
+    /// Allocator for compiler-synthesised expression nodes.
+    ///
+    /// Parser-assigned ids start at 1 and grow upward, and
+    /// `TypedExprTable` is keyed by node id alone — a synthetic node
+    /// reusing a parser id (or a cloned source id) would resolve to an
+    /// unrelated source expression's recorded type. Synthetic ids live
+    /// in the top half of the id space so table lookups for them are
+    /// guaranteed misses (synthetic nodes have no checker-recorded
+    /// type), never collisions.
+    pub fn synthetic() -> Self {
+        Self {
+            next: SYNTHETIC_NODE_ID_BASE,
+        }
+    }
+
     pub fn fresh(&mut self) -> usize {
         let id = self.next;
         self.next += 1;
         id
     }
 }
+
+/// First node id of the compiler-synthesised expression id space.
+/// See [`NodeIdAllocator::synthetic`].
+pub const SYNTHETIC_NODE_ID_BASE: usize = usize::MAX / 2;
 
 impl Default for NodeIdAllocator {
     fn default() -> Self {
@@ -889,6 +908,177 @@ pub fn fn_schema_passing_type_params(fd: &FuncDef) -> Vec<String> {
         scan_stmt_schema_params(stmt, &params, &mut out);
     }
     out
+}
+
+/// F62B-038 #11 root cause: schema-passing is TRANSITIVE over explicit
+/// generic calls. A generic that forwards its own type parameter into the
+/// type-argument list of a schema-passing generic (`outer[T] = inner[T](..)`)
+/// needs the hidden schema parameter too, even though its body never names
+/// a host-call Out slot directly — without it, native/wasm lowering has no
+/// schema to forward and fails with a non-diagnostic "Unknown schema type".
+///
+/// Computes the per-function schema-param sets for a whole program as the
+/// fixpoint of: direct Out-slot references (`fn_schema_passing_type_params`)
+/// plus parameters forwarded into an already-schema-passing callee's slot.
+/// Shared single definition for the checker (call-form enforcement) and
+/// codegen lowering (hidden schema params) — the two must never disagree.
+pub fn close_schema_passing_type_params(
+    defs: &[&FuncDef],
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut declared: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for fd in defs {
+        if fd.type_params.is_empty() {
+            continue;
+        }
+        declared.insert(
+            fd.name.clone(),
+            fd.type_params.iter().map(|tp| tp.name.clone()).collect(),
+        );
+        let direct = fn_schema_passing_type_params(fd);
+        if !direct.is_empty() {
+            map.insert(fd.name.clone(), direct);
+        }
+    }
+    loop {
+        let mut changed = false;
+        for fd in defs {
+            if fd.type_params.is_empty() {
+                continue;
+            }
+            let params: Vec<String> = fd.type_params.iter().map(|tp| tp.name.clone()).collect();
+            let mut found = map.get(&fd.name).cloned().unwrap_or_default();
+            let before = found.len();
+            for stmt in &fd.body {
+                scan_stmt_schema_forwards(stmt, &params, &declared, &map, &mut found);
+            }
+            if found.len() != before {
+                map.insert(fd.name.clone(), found);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    map
+}
+
+/// Traversal twin of [`scan_stmt_schema_params`] for the transitive rule —
+/// the two must mirror each other's statement coverage exactly.
+fn scan_stmt_schema_forwards(
+    stmt: &Statement,
+    params: &[String],
+    declared: &std::collections::HashMap<String, Vec<String>>,
+    schema_map: &std::collections::HashMap<String, Vec<String>>,
+    out: &mut Vec<String>,
+) {
+    match stmt {
+        Statement::Expr(e) => scan_expr_schema_forwards(e, params, declared, schema_map, out),
+        Statement::Assignment(a) => {
+            scan_expr_schema_forwards(&a.value, params, declared, schema_map, out)
+        }
+        Statement::UnmoldForward(u) => {
+            scan_expr_schema_forwards(&u.source, params, declared, schema_map, out)
+        }
+        Statement::UnmoldBackward(u) => {
+            scan_expr_schema_forwards(&u.source, params, declared, schema_map, out)
+        }
+        Statement::ErrorCeiling(ec) => {
+            for st in &ec.handler_body {
+                scan_stmt_schema_forwards(st, params, declared, schema_map, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Traversal twin of [`scan_expr_schema_params`] for the transitive rule —
+/// the two must mirror each other's expression coverage exactly. The only
+/// semantic difference is the `MoldInst` head: instead of the built-in
+/// `HostCall`/`Uncage` Out slots it inspects calls to user generics that
+/// already carry schema params, and records every enclosing type parameter
+/// forwarded into one of those slots.
+fn scan_expr_schema_forwards(
+    expr: &Expr,
+    params: &[String],
+    declared: &std::collections::HashMap<String, Vec<String>>,
+    schema_map: &std::collections::HashMap<String, Vec<String>>,
+    out: &mut Vec<String>,
+) {
+    match expr {
+        Expr::MoldInst(name, type_args, fields, _) => {
+            if let (Some(callee_schema), Some(callee_declared)) =
+                (schema_map.get(name), declared.get(name))
+            {
+                for schema_param in callee_schema {
+                    if let Some(idx) = callee_declared.iter().position(|n| n == schema_param)
+                        && let Some(Expr::Ident(arg_name, _)) = type_args.get(idx)
+                        && params.iter().any(|p| p == arg_name)
+                        && !out.iter().any(|n| n == arg_name)
+                    {
+                        out.push(arg_name.clone());
+                    }
+                }
+            }
+            for arg in type_args {
+                scan_expr_schema_forwards(arg, params, declared, schema_map, out);
+            }
+            for field in fields {
+                scan_expr_schema_forwards(&field.value, params, declared, schema_map, out);
+            }
+        }
+        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+            for field in fields {
+                scan_expr_schema_forwards(&field.value, params, declared, schema_map, out);
+            }
+        }
+        Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+            for item in items {
+                scan_expr_schema_forwards(item, params, declared, schema_map, out);
+            }
+        }
+        Expr::BinaryOp(lhs, _, rhs, _) => {
+            scan_expr_schema_forwards(lhs, params, declared, schema_map, out);
+            scan_expr_schema_forwards(rhs, params, declared, schema_map, out);
+        }
+        Expr::UnaryOp(_, inner, _)
+        | Expr::Unmold(inner, _)
+        | Expr::Throw(inner, _)
+        | Expr::FieldAccess(inner, _, _)
+        | Expr::Lambda(_, inner, _) => {
+            scan_expr_schema_forwards(inner, params, declared, schema_map, out)
+        }
+        Expr::FuncCall(callee, args, _) => {
+            scan_expr_schema_forwards(callee, params, declared, schema_map, out);
+            for arg in args {
+                scan_expr_schema_forwards(arg, params, declared, schema_map, out);
+            }
+        }
+        Expr::MethodCall(obj, _, args, _) => {
+            scan_expr_schema_forwards(obj, params, declared, schema_map, out);
+            for arg in args {
+                scan_expr_schema_forwards(arg, params, declared, schema_map, out);
+            }
+        }
+        Expr::CondBranch(arms, _) => {
+            for arm in arms {
+                if let Some(cond) = &arm.condition {
+                    scan_expr_schema_forwards(cond, params, declared, schema_map, out);
+                }
+                for st in &arm.body {
+                    scan_stmt_schema_forwards(st, params, declared, schema_map, out);
+                }
+            }
+        }
+        Expr::Block(stmts, _) => {
+            for st in stmts {
+                scan_stmt_schema_forwards(st, params, declared, schema_map, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Final-review #3 (F62B-021 follow-up): a type parameter nested inside a

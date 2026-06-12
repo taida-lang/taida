@@ -924,7 +924,10 @@ mod tests {
         //   1,335,699 -> 1,336,307.
         // 2026-06-12 final-review #2 (core.c): CageBuilder subject PACK
         //   tag + steps elem tag: +411. 1,336,307 -> 1,336,718.
-        const EXPECTED_TOTAL_LEN: usize = 1_336_718;
+        // 2026-06-12 F62B-038 #6 (core.c): cage-builder check is-pack
+        //   guard + detected-type-name report: +524.
+        //   1,336,718 -> 1,337,242.
+        const EXPECTED_TOTAL_LEN: usize = 1_337_242;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1686,7 +1689,10 @@ mod tests {
         // 426,011 -> 428,824.
         // Final-review #2: builder tag fixes (before the marker):
         // 428,824 -> 429,235.
-        const F1_LEN: usize = 429_235;
+        // F62B-038 #6: the cage-builder check gains the is-pack guard +
+        // the detected-type-name report (before the marker): +524.
+        // 429,235 -> 429,759.
+        const F1_LEN: usize = 429_759;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this

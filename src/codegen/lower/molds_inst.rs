@@ -134,7 +134,16 @@ impl Lowering {
         if let Expr::Ident(name, span) = out
             && let Some(hidden) = self.current_schema_params.get(name).cloned()
         {
-            return self.lower_expr(func, &Expr::Ident(hidden, span.clone()));
+            // F62B-038 #10: synthetic node — do not reuse the Out slot's
+            // node id in the node-id-keyed TypedExprTable.
+            return self.lower_expr(
+                func,
+                &Expr::Ident(
+                    hidden,
+                    span.clone()
+                        .with_node_id(crate::parser::SYNTHETIC_NODE_ID_BASE),
+                ),
+            );
         }
         let desc = self.resolve_json_schema_descriptor(out)?;
         let var = func.alloc_var();
@@ -2992,8 +3001,15 @@ impl Lowering {
                 }
                 let builder = self.lower_expr(func, &type_args[0])?;
                 let method = self.lower_expr(func, &type_args[1])?;
-                let empty_args_expr =
-                    crate::parser::Expr::ListLit(Vec::new(), type_args[1].span().clone());
+                // F62B-038 #10: synthetic node — do not reuse the method
+                // argument's node id in the node-id-keyed TypedExprTable.
+                let empty_args_expr = crate::parser::Expr::ListLit(
+                    Vec::new(),
+                    type_args[1]
+                        .span()
+                        .clone()
+                        .with_node_id(crate::parser::SYNTHETIC_NODE_ID_BASE),
+                );
                 let args = self.lower_expr(func, &empty_args_expr)?;
                 let args_schema_desc = self.resolve_wire_schema_descriptor(&empty_args_expr)?;
                 let args_schema = func.alloc_var();
@@ -3518,15 +3534,31 @@ impl Lowering {
                                     // the type argument is itself an abstract
                                     // type parameter (recursive generic call);
                                     // otherwise resolve the schema now.
+                                    // F62B-038 #10: both branches synthesise a
+                                    // new node — give it a synthetic node id
+                                    // instead of reusing the source type_arg's
+                                    // (TypedExprTable is keyed by node id
+                                    // alone, so a cloned id would resolve to
+                                    // the type argument's recorded type).
                                     let schema_expr = if let Expr::Ident(arg_name, sp) = type_arg
                                         && let Some(hidden) =
                                             self.current_schema_params.get(arg_name)
                                     {
-                                        Expr::Ident(hidden.clone(), sp.clone())
+                                        Expr::Ident(
+                                            hidden.clone(),
+                                            sp.clone().with_node_id(
+                                                crate::parser::SYNTHETIC_NODE_ID_BASE,
+                                            ),
+                                        )
                                     } else {
                                         let desc =
                                             self.resolve_json_schema_descriptor(type_arg)?;
-                                        Expr::StringLit(desc, type_arg.span().clone())
+                                        Expr::StringLit(
+                                            desc,
+                                            type_arg.span().clone().with_node_id(
+                                                crate::parser::SYNTHETIC_NODE_ID_BASE,
+                                            ),
+                                        )
                                     };
                                     arg_exprs.push(schema_expr);
                                 }
@@ -3538,7 +3570,11 @@ impl Lowering {
                                 );
                                 crate::parser::reassign_expr_node_ids(
                                     &mut callee,
-                                    &mut crate::parser::NodeIdAllocator::new(),
+                                    // F62B-038 #10: synthetic ids — a fresh
+                                    // allocator restarts at 1 and collides
+                                    // with real parser nodes in the
+                                    // node-id-keyed TypedExprTable.
+                                    &mut crate::parser::NodeIdAllocator::synthetic(),
                                 );
                                 return self.lower_func_call(func, &callee, &arg_exprs);
                             }
@@ -3557,7 +3593,10 @@ impl Lowering {
                         );
                         crate::parser::reassign_expr_node_ids(
                             &mut callee,
-                            &mut crate::parser::NodeIdAllocator::new(),
+                            // F62B-038 #10: synthetic ids — a fresh
+                            // allocator restarts at 1 and collides with real
+                            // parser nodes in the node-id-keyed TypedExprTable.
+                            &mut crate::parser::NodeIdAllocator::synthetic(),
                         );
                         return self.lower_func_call(func, &callee, type_args);
                     }
@@ -3664,7 +3703,10 @@ impl Lowering {
                         let mut rewritten = rewrite_expr_ident_aliases(default_expr, &alias_map);
                         crate::parser::reassign_expr_node_ids(
                             &mut rewritten,
-                            &mut crate::parser::NodeIdAllocator::new(),
+                            // F62B-038 #10: synthetic ids — a fresh
+                            // allocator restarts at 1 and collides with real
+                            // parser nodes in the node-id-keyed TypedExprTable.
+                            &mut crate::parser::NodeIdAllocator::synthetic(),
                         );
                         self.lower_expr(func, &rewritten)?
                     } else {

@@ -193,6 +193,8 @@ rows <= queryAll[@[Str]](base, "select * from posts")
 
 Out スキーマは呼び出しごとの compile-time 値なので、この形の関数は**全ての呼び出しで明示的型引数** (`queryAll[T](...)`) が必要です。推論形の呼び出しは型エラーで拒否されます。
 
+型変数は別の汎用関数へそのまま転送できます (`outer[T] db: CageBuilder  sql: Str = queryAll[T](db, sql) => ...`)。転送はホップ数によらず推移的に追跡され、転送元の関数自体も「明示的型引数が必要な関数」になります。
+
 HostCall の wire 値では、`Bytes` は標準 base64 の `Str` として運ばれます。
 `WebRequest` / `WebResponse` は handler JSON と同じく body を `bodyBase64`
 で運び、`query` / `headers` は `name` / `value` の出現順リストを維持します。

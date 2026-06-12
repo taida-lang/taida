@@ -38,6 +38,12 @@ extern int64_t taida_pack_set_hash(int64_t pack_ptr, int64_t index, int64_t hash
 extern int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag);
 extern int64_t taida_pack_set(int64_t pack_ptr, int64_t index, int64_t value);
 extern int64_t taida_pack_get(int64_t pack_ptr, int64_t field_hash);
+/* F62B-038 #6: positive type detection for the cage-builder guard. */
+extern int64_t taida_is_buchi_pack(int64_t val);
+extern int64_t taida_is_list(int64_t val);
+extern int64_t taida_is_string_value(int64_t val);
+extern int64_t taida_is_hashmap(int64_t val);
+extern int64_t taida_is_set(int64_t val);
 extern int64_t taida_json_encode(int64_t value);
 extern int64_t taida_json_encode_wire(int64_t value, int64_t schema);
 extern int64_t taida_json_schema_cast(int64_t raw_ptr, int64_t schema_ptr);
@@ -1311,8 +1317,61 @@ static int64_t taida_cage_builder_steps_copy(int64_t builder, int64_t extra_step
 }
 
 static int taida_cage_builder_ok(int64_t builder) {
-    return taida_pack_get(builder, abi_hash_cstr("__cage_subject")) != 0
+    /* F62B-038 #6: the taida_is_buchi_pack guard is load-bearing — a
+       non-pack value (Unknown-typed checker bypass of E1517) must not
+       reach taida_pack_get's raw pointer walk over linear memory. */
+    return taida_is_buchi_pack(builder)
+        && taida_pack_get(builder, abi_hash_cstr("__cage_subject")) != 0
         && taida_pack_get(builder, abi_hash_cstr("__cage_steps")) != 0;
+}
+
+/* F62B-038 #6: a non-builder argument reaching the chain runtime fails
+   the way the interpreter does — "Runtime error: <mold> requires a
+   CageBuilder ..., got <Type>" on stderr, exit 1 — instead of the old
+   asymmetry (InCage silently poisoned the builder; the report only
+   surfaced at Uncage as an Async rejection). Termination mirrors the
+   core runtime's non-mold-unmold gorilla: fd_write + proc_exit, or a
+   trap on the edge profile (no proc_exit import available there). */
+static const char *abi_cage_type_name(int64_t v) {
+    if (taida_is_buchi_pack(v)) return "BuchiPack";
+    if (taida_is_list(v)) return "List";
+    if (taida_is_string_value(v)) return "Str";
+    if (taida_is_hashmap(v)) return "HashMap";
+    if (taida_is_set(v)) return "Set";
+    /* Bool / Float are indistinguishable from Int at the value level
+       (unboxed scalars) — the scalar fallback matches the native
+       runtime's taida_runtime_detect_tag. */
+    return "Int";
+}
+
+static void abi_cage_builder_panic(const char *mold, int64_t builder) {
+    extern int fd_write(int fd, const void *iovs, int iovs_len, int *nwritten)
+        __attribute__((import_module("wasi_snapshot_preview1"), import_name("fd_write")));
+    const char *parts[5];
+    parts[0] = "Runtime error: ";
+    parts[1] = mold;
+    parts[2] = " requires a CageBuilder as its first argument "
+               "(start the chain with `Cage[subject]()`), got ";
+    parts[3] = abi_cage_type_name(builder);
+    parts[4] = "\n";
+    for (int i = 0; i < 5; i++) {
+        int len = 0;
+        while (parts[i][len]) len++;
+        struct { const char *buf; int len; } iov = { parts[i], len };
+        int nwritten;
+        fd_write(2, &iov, 1, &nwritten);
+    }
+#ifdef TAIDA_WASM_PROFILE_EDGE
+    /* The edge profile runs as an exported handler under a host that
+       provides no WASI proc_exit; a trap surfaces to the host as a
+       WebAssembly.RuntimeError (same contract as taida_throw's
+       unhandled path and the non-mold-unmold gorilla). */
+    __builtin_trap();
+#else
+    extern void proc_exit(int code)
+        __attribute__((import_module("wasi_snapshot_preview1"), import_name("proc_exit")));
+    proc_exit(1);
+#endif
 }
 
 int64_t taida_cage_builder_new(int64_t subject) {
@@ -1321,7 +1380,8 @@ int64_t taida_cage_builder_new(int64_t subject) {
 
 int64_t taida_cage_builder_push(int64_t builder, int64_t step) {
     if (!taida_cage_builder_ok(builder)) {
-        return taida_cage_builder_pack(0, taida_list_new());
+        abi_cage_builder_panic("InCage", builder);
+        return 0; /* unreachable */
     }
     int64_t subject = taida_pack_get(builder, abi_hash_cstr("__cage_subject"));
     return taida_cage_builder_pack(subject, taida_cage_builder_steps_copy(builder, step));
@@ -1329,8 +1389,8 @@ int64_t taida_cage_builder_push(int64_t builder, int64_t step) {
 
 int64_t taida_cage_builder_fire(int64_t builder, int64_t final_step, int64_t out_schema) {
     if (!taida_cage_builder_ok(builder)) {
-        return taida_async_err(abi_host_error(
-            "Uncage requires a CageBuilder as its first argument (start the chain with `Cage[subject]()`)"));
+        abi_cage_builder_panic("Uncage", builder);
+        return 0; /* unreachable */
     }
     int64_t subject = taida_pack_get(builder, abi_hash_cstr("__cage_subject"));
     int64_t steps = taida_cage_builder_steps_copy(builder, final_step);

@@ -912,6 +912,24 @@ impl TypeChecker {
         // into the next program.
         self.empty_literal_hints.clear();
         self.schema_passing_generic_funcs.clear();
+        // F62B-038 #11: schema-passing is transitive over explicit generic
+        // calls (`outer[T] = inner[T](..)`), so the per-function sets are a
+        // whole-program fixpoint, not a per-definition scan. Built up front
+        // from the shared closure also used by codegen lowering — the
+        // checker's call-form enforcement and the lowering's hidden schema
+        // params must never disagree.
+        {
+            let fd_refs: Vec<&FuncDef> = program
+                .statements
+                .iter()
+                .filter_map(|s| match s {
+                    Statement::FuncDef(fd) => Some(fd),
+                    _ => None,
+                })
+                .collect();
+            self.schema_passing_generic_funcs =
+                crate::parser::close_schema_passing_type_params(&fd_refs);
+        }
         for stmt in &program.statements {
             match stmt {
                 Statement::EnumDef(ed) => {

@@ -227,11 +227,11 @@ impl TypeChecker {
                 span: fd.span.clone(),
             });
         }
-        let needed = crate::parser::fn_schema_passing_type_params(fd);
-        if !needed.is_empty() {
-            self.schema_passing_generic_funcs
-                .insert(fd.name.clone(), needed);
-        }
+        // F62B-038 #11: the schema-param set itself is built once per
+        // program in `check_program` via the transitive closure
+        // (`close_schema_passing_type_params`) — a per-definition insert
+        // here would overwrite a closure entry with its direct-only
+        // subset. This hook now only enforces the composite-Out rule.
     }
 
     /// F62B-024: `InCage[builder, method, args]()` — validates the builder /

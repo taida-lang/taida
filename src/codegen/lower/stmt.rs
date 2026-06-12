@@ -44,6 +44,25 @@ impl Lowering {
         let mut module = IrModule::new();
         module.module_key = Some(self.current_module_key().to_string());
 
+        // F62B-038 #11: schema-passing is transitive over explicit generic
+        // calls (`outer[T] = inner[T](..)`) — the hidden-schema-param sets
+        // are a whole-program fixpoint, built from the same shared closure
+        // the checker uses for call-form enforcement (the two must never
+        // disagree). A per-definition scan here missed the forwarding-only
+        // generics and lowering failed with "Unknown schema type 'T'".
+        {
+            let fd_refs: Vec<&crate::parser::FuncDef> = program
+                .statements
+                .iter()
+                .filter_map(|s| match s {
+                    Statement::FuncDef(fd) => Some(fd),
+                    _ => None,
+                })
+                .collect();
+            self.generic_schema_params
+                .extend(crate::parser::close_schema_passing_type_params(&fd_refs));
+        }
+
         // 1st pass: 関数定義、型定義、エクスポート/インポートを収集
         for stmt in &program.statements {
             match stmt {
@@ -61,11 +80,6 @@ impl Lowering {
                                 .map(|tp| tp.name.clone())
                                 .collect(),
                         );
-                        let schema_params = crate::parser::fn_schema_passing_type_params(func_def);
-                        if !schema_params.is_empty() {
-                            self.generic_schema_params
-                                .insert(func_def.name.clone(), schema_params);
-                        }
                     }
                     // Track return types for type inference in binary ops
                     if let Some(ref rt) = func_def.return_type {

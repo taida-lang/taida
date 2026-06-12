@@ -1414,6 +1414,25 @@ impl Interpreter {
                             arg_exprs.push(field.value.clone());
                         }
                         if all_positional && (func.type_params_count > 0 || !fields.is_empty()) {
+                            // F62B-038 #9: for a NON-generic function the
+                            // bracket is the legacy positional call
+                            // (`fn[arg1, arg2]()`), so combining it with
+                            // `()` arguments (`fn[1](2)`) is ambiguous.
+                            // The checker rejects this statically; without
+                            // this guard the unchecked-eval path would
+                            // silently drop the bracket values and run
+                            // `fn(2)`.
+                            if func.type_params_count == 0 && !type_args.is_empty() {
+                                return Err(RuntimeError {
+                                    message: format!(
+                                        "Non-generic function '{}' cannot take both \
+                                         bracket values and call arguments. \
+                                         Call it as {}(arg1, arg2) or with the \
+                                         positional bracket form {}[arg1, arg2]().",
+                                        name, name, name
+                                    ),
+                                });
+                            }
                             return self.call_function(&func, &arg_exprs);
                         }
                         let bracket_hint = if func.type_params_count > 0 {

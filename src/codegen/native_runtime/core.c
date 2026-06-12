@@ -6104,12 +6104,19 @@ static taida_val taida_cage_builder_steps_copy(taida_val builder, taida_val extr
 }
 
 static int taida_cage_builder_check(taida_val builder, const char *mold) {
-    if (taida_pack_get(builder, taida_str_hash((taida_val)(intptr_t)"__cage_subject")) == 0
+    /* F62B-038 #6: a non-builder first argument — reachable only when an
+       Unknown-typed value bypasses the static E1517 check — fails the way
+       the interpreter does: "Runtime error: ..., got <Type>" on stderr,
+       exit 1. The taida_is_buchi_pack guard is load-bearing: a non-pack
+       value used to reach taida_pack_get's raw pointer walk and segfault
+       before this check could report anything. */
+    if (!taida_is_buchi_pack(builder)
+        || taida_pack_get(builder, taida_str_hash((taida_val)(intptr_t)"__cage_subject")) == 0
         || taida_pack_get(builder, taida_str_hash((taida_val)(intptr_t)"__cage_steps")) == 0) {
-        char msg[160];
+        char msg[224];
         snprintf(msg, sizeof(msg),
-                 "%s requires a CageBuilder as its first argument (start the chain with `Cage[subject]()`)",
-                 mold);
+                 "%s requires a CageBuilder as its first argument (start the chain with `Cage[subject]()`), got %s",
+                 mold, taida_tag_name(taida_runtime_detect_tag(builder)));
         taida_runtime_panic(msg);
         return 0;
     }
