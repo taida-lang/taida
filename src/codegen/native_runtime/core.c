@@ -11457,6 +11457,18 @@ taida_val taida_generic_unmold(taida_val ptr) {
         }
     }
 
+    // F62B-034: custom mold `unmold` hook — stored as a closure under
+    // `__unmold` at construction (the interpreter's convention). Runs the
+    // hook instead of falling back to the `__value` (filling) channel.
+    // The hook's single `_` parameter is ignored, so a zero argument
+    // satisfies the callback shape (same convention as Result predicates).
+    if (hash0 == (taida_val)HASH___TYPE) {
+        taida_val unmold_fn = taida_pack_get(ptr, taida_str_hash((taida_val)(intptr_t)"__unmold"));
+        if (unmold_fn) {
+            return taida_invoke_callback1(unmold_fn, 0);
+        }
+    }
+
     // Custom mold default unmold:
     // pack with first field __type and a __value field.
     if (hash0 == (taida_val)HASH___TYPE &&

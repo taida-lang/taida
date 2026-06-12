@@ -261,8 +261,8 @@ const CUSTOM_MOLD: &str = concat!(
 );
 
 /// The custom unmold hook runs through `>=>` on interp and JS.
-/// (Native extracts the filling channel without running the hook —
-/// tracked separately as a pre-existing parity gap.)
+/// (Native/wasm run it too — the hook compiles into an `__unmold`
+/// closure on the instance pack; see the cage-chain-era fix.)
 #[test]
 fn custom_mold_unmold_hook_runs_interp_and_js() {
     let interp = run_interp("f62b026_cm_interp", CUSTOM_MOLD);

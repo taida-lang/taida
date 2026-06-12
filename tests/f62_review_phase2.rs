@@ -260,3 +260,43 @@ fn single_line_arm_body_supports_pipe_continuations() {
     assert!(stages.status.success(), "stderr={}", stderr_text(&stages));
     assert_eq!(stdout_text(&stages), "6\n");
 }
+
+/// F62B-034: the custom mold unmold hook runs on native (it used to fall
+/// back to the filling/__value channel — 7 instead of 70).
+#[test]
+fn custom_mold_unmold_hook_runs_on_native() {
+    let dir = unique_temp_dir("f62rp2_native_hook");
+    let src = dir.join("main.td");
+    write_file(
+        &src,
+        concat!(
+            "Mold[T] => Tenfold[T] = @(\n",
+            "  unmold _ = filling * 10 => :T\n",
+            ")\n",
+            "w <= Tenfold[7]()\n",
+            "w >=> x\n",
+            "stdout(x.toString())\n",
+        ),
+    );
+    let bin = dir.join("main_bin");
+    let build = Command::new(taida_bin())
+        .arg("build")
+        .arg(&src)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("native build");
+    assert!(
+        build.status.success(),
+        "native build must succeed\nstderr={}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(&bin).output().expect("run native");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(run.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "70\n",
+        "native must run the unmold hook"
+    );
+}

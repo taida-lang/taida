@@ -266,7 +266,9 @@ mod tests {
         //   compat audit narrowed the rule to machinery-less plain packs
         //   (no __type) — bare values stay identity: +2,011.
         //   495,406 -> 497,417.
-        const EXPECTED_TOTAL_LEN: usize = 497_417;
+        // 2026-06-12 F62B-034 (01_core): custom mold `__unmold` hook
+        //   invocation in generic_unmold: +565. 497,417 -> 497,982.
+        const EXPECTED_TOTAL_LEN: usize = 497_982;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

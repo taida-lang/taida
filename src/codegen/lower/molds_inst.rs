@@ -3706,6 +3706,43 @@ impl Lowering {
                 materialized_fields.push(("__value".to_string(), filling_var));
                 materialized_fields.push(("filling".to_string(), filling_var));
 
+                // F62B-034: a custom `unmold` hook compiles into a closure
+                // captured over the instance's field values and rides the
+                // pack as `__unmold` (the interpreter's convention), so the
+                // generic unmold can run it dynamically — before this, the
+                // hook never ran natively and `>=>` fell back to the
+                // `__value` (filling) channel.
+                if let Some(unmold_def) = mold_def
+                    .fields
+                    .iter()
+                    .find(|f| f.is_method && f.name == "unmold")
+                    .and_then(|f| f.method_def.clone())
+                {
+                    let data_names: Vec<String> = bind_order.clone();
+                    let capture_prefix =
+                        format!("__moldinst_{}_{}_", type_name, self.lambda_counter);
+                    let capture_names: Vec<String> = data_names
+                        .iter()
+                        .map(|n| format!("{capture_prefix}{n}"))
+                        .collect();
+                    for (name, cap_name) in data_names.iter().zip(capture_names.iter()) {
+                        let v = bound_vars
+                            .get(name)
+                            .copied()
+                            .unwrap_or_else(|| zero_var(func));
+                        func.push(IrInst::DefVar(cap_name.clone(), v));
+                    }
+                    let closure_var = self.lower_type_method_closure(
+                        func,
+                        type_name,
+                        "unmold",
+                        &unmold_def,
+                        &capture_names,
+                        &data_names,
+                    )?;
+                    materialized_fields.push(("__unmold".to_string(), closure_var));
+                }
+
                 for field_def in non_method_fields.iter().filter(|f| f.name != "filling") {
                     if let Some(v) = bound_vars.get(&field_def.name).copied() {
                         materialized_fields.push((field_def.name.clone(), v));

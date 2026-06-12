@@ -919,7 +919,10 @@ mod tests {
         // 2026-06-12 F62B-024 (core.c): CageBuilder chain helpers
         //   (taida_cage_builder_new/push/fire) next to the host abi:
         //   +2,813. 1,332,886 -> 1,335,699.
-        const EXPECTED_TOTAL_LEN: usize = 1_335_699;
+        // 2026-06-12 F62B-034 (core.c): custom mold `__unmold` hook
+        //   invocation in taida_generic_unmold: +608.
+        //   1,335,699 -> 1,336,307.
+        const EXPECTED_TOTAL_LEN: usize = 1_336_307;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1759,7 +1762,10 @@ mod tests {
             // F62B-024: CageBuilder chain helpers land next to the host
             // descriptor stubs (before the marker): F1 426,011 -> 428,824;
             // F2 unchanged.
-            F1_LEN + 226_461,
+            // F62B-034: the custom-mold `__unmold` hook invocation lands in
+            // taida_generic_unmold (after the marker): +608.
+            // F2 226,461 -> 227,069.
+            F1_LEN + 227_069,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

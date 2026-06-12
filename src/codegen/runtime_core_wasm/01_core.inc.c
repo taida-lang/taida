@@ -1110,6 +1110,7 @@ static int64_t _wasm_async_to_string(int64_t async_ptr);    /* PR-4: forward dec
 #define WASM_HASH___PREDICATE 0x15592af3c2291540LL  /* FNV-1a("__predicate") */
 #define WASM_HASH_TODO_SOL    0x824fa3195cf2e6c1LL  /* FNV-1a("sol") */
 #define WASM_HASH_TODO_UNM    0x4cadac193e198b15LL  /* FNV-1a("unm") */
+#define WASM_HASH___UNMOLD    0x21bf22ae3b75f82cLL  /* FNV-1a("__unmold") */
 
 /* ── Div/Mod mold — W-5: now returns Lax (matching native backend) ── */
 
@@ -1341,6 +1342,14 @@ int64_t taida_generic_unmold(int64_t val) {
                 WSTR("TypeError"),
                 WSTR("Cannot unmold Molten directly. Molten can only be used inside Cage."));
             return taida_throw(error);
+        }
+        /* F62B-034: custom mold `unmold` hook — a closure stored under
+           `__unmold` at construction. Runs instead of the `__value`
+           (filling) fallback; the hook's `_` parameter is ignored so a
+           zero argument satisfies the callback shape. */
+        if (taida_pack_has_hash(val, WASM_HASH___UNMOLD)) {
+            int64_t unmold_fn = taida_pack_get(val, WASM_HASH___UNMOLD);
+            if (unmold_fn) return _wasm_invoke_callback1(unmold_fn, 0);
         }
         /* Custom mold: pack with __type and __value fields */
         if (taida_pack_has_hash(val, WASM_HASH___VALUE))
