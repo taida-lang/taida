@@ -789,49 +789,11 @@ impl Interpreter {
         }
     }
 
-    /// Return true if `expr` contains an `Expr::Ident(name, _)`
-    /// whose name appears in `bound_names`. Used to decide whether a
-    /// pipeline step explicitly consumes a pipeline-scope binding, in
-    /// which case auto-injection of the pipeline `current` as an extra
-    /// argument is suppressed.
+    /// Shared `=> name` binding-reference rule — single definition in
+    /// `crate::parser::ast` (review C-6/C-9: lambda-param shadowing and
+    /// full statement coverage live there).
     pub(crate) fn expr_references_any(expr: &Expr, bound_names: &[String]) -> bool {
-        fn walk(e: &Expr, names: &[String]) -> bool {
-            match e {
-                Expr::Ident(n, _) => names.iter().any(|bn| bn == n),
-                Expr::BinaryOp(l, _, r, _) => walk(l, names) || walk(r, names),
-                Expr::UnaryOp(_, inner, _) => walk(inner, names),
-                Expr::FuncCall(callee, args, _) => {
-                    walk(callee, names) || args.iter().any(|a| walk(a, names))
-                }
-                Expr::MethodCall(obj, _, args, _) => {
-                    walk(obj, names) || args.iter().any(|a| walk(a, names))
-                }
-                Expr::FieldAccess(obj, _, _) => walk(obj, names),
-                Expr::BuchiPack(fields, _) => fields.iter().any(|f| walk(&f.value, names)),
-                Expr::ListLit(items, _) => items.iter().any(|x| walk(x, names)),
-                Expr::Pipeline(steps, _) => steps.iter().any(|s| walk(s, names)),
-                Expr::MoldInst(_, type_args, fields, _) => {
-                    type_args.iter().any(|a| walk(a, names))
-                        || fields.iter().any(|f| walk(&f.value, names))
-                }
-                Expr::Unmold(inner, _) => walk(inner, names),
-                Expr::Lambda(_, body, _) => walk(body, names),
-                Expr::TypeInst(_, fields, _) => fields.iter().any(|f| walk(&f.value, names)),
-                Expr::Throw(inner, _) => walk(inner, names),
-                Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
-                    arm.condition.as_ref().is_some_and(|c| walk(c, names))
-                        || arm.body.iter().any(|s| {
-                            if let Statement::Expr(e) = s {
-                                walk(e, names)
-                            } else {
-                                false
-                            }
-                        })
-                }),
-                _ => false,
-            }
-        }
-        walk(expr, bound_names)
+        expr_references_any_name(expr, bound_names)
     }
 
     /// Decide whether an intermediate pipeline step
@@ -1264,7 +1226,20 @@ impl Interpreter {
                         // The user explicitly references one of the
                         // pipeline-scope bindings inside this step. Evaluate
                         // the step as-written without auto-injecting
-                        // `current` as an extra argument.
+                        // `current` as an extra argument. A `_` here has
+                        // nothing to inject (review C-4) — reject instead
+                        // of leaking a raw placeholder into evaluation.
+                        if expr_count_placeholders(expr) > 0 {
+                            if bound_any {
+                                self.env.pop_scope();
+                            }
+                            return Err(RuntimeError {
+                                message: "[E1543] A pipeline stage that references a `=> name` \
+                                          binding is evaluated as written — `_` has no injection \
+                                          value there. Use the bound name instead of `_`."
+                                    .to_string(),
+                            });
+                        }
                         current = match self.eval_expr(expr)? {
                             Signal::Value(v) => v,
                             other => {

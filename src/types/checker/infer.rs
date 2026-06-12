@@ -1635,7 +1635,18 @@ impl TypeChecker {
                     {
                         // The stage explicitly consumes a pipeline-scope
                         // binding — it is evaluated as written, without
-                        // receiving the piped value.
+                        // receiving the piped value. A `_` inside such a
+                        // stage has nothing to inject (review C-4): reject
+                        // it here so every backend agrees.
+                        if expr_count_placeholders(pipe_expr) > 0 {
+                            self.errors.push(TypeError {
+                                message: "[E1543] A pipeline stage that references a `=> name` \
+                                          binding is evaluated as written — `_` has no injection \
+                                          value there. Use the bound name instead of `_`."
+                                    .to_string(),
+                                span: pipe_expr.span().clone(),
+                            });
+                        }
                         result_type = self.infer_expr_type(pipe_expr);
                         continue;
                     }
@@ -1757,6 +1768,18 @@ impl TypeChecker {
                             })
                             .unwrap_or(Type::Unknown)
                     }
+                    // Review N-2 (F62B-009 follow-up): Stat's pack fields are
+                    // part of the documented contract (os.md §1.5) — typing
+                    // them lets `nowMs() - st.modified` infer without an
+                    // explicit annotation.
+                    "Stat" => Type::Generic(
+                        "Lax".to_string(),
+                        vec![Type::BuchiPack(vec![
+                            ("size".to_string(), Type::Int),
+                            ("modified".to_string(), Type::Int),
+                            ("isDir".to_string(), Type::Bool),
+                        ])],
+                    ),
                     // JSON[raw, Schema]() returns Lax[Schema].
                     "JSON" => {
                         // [E1541] An undefined schema name used to slip

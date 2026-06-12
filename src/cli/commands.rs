@@ -684,6 +684,23 @@ pub(crate) fn run_lsp(args: &[String]) {
 }
 
 pub(crate) fn repl(no_check: bool) {
+    // F62B-027 (review C-1): the REPL evaluates on the same large-stack
+    // thread as `run_source` — MAX_CALL_DEPTH 8192 does not fit the
+    // default 8 MiB main stack, and a REPL input like `deep(8000)` used
+    // to hard-crash with a Rust stack overflow instead of the depth
+    // diagnostic. The reservation is virtual address space.
+    let handle = std::thread::Builder::new()
+        .name("taida-repl-eval".to_string())
+        .stack_size(512 * 1024 * 1024)
+        .spawn(move || repl_loop(no_check))
+        .expect("spawn taida repl thread");
+    match handle.join() {
+        Ok(()) => {}
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+fn repl_loop(no_check: bool) {
     let mut interpreter = Interpreter::new();
 
     loop {

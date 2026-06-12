@@ -109,19 +109,42 @@ fn detect_cycles(
         query::QueryResult::Cycles(c) => c,
         _ => return Vec::new(),
     };
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut out = Vec::new();
+    let mut sets: Vec<std::collections::BTreeSet<String>> = Vec::new();
     for cycle in &cycles {
-        let user_cycle: Vec<String> = cycle
+        let distinct: std::collections::BTreeSet<String> = cycle
             .iter()
             .filter(|lbl| func_defs.contains_key(lbl.as_str()))
             .cloned()
             .collect();
-        let distinct: std::collections::BTreeSet<String> = user_cycle.into_iter().collect();
         if distinct.len() < 2 {
             continue;
         }
-        let members: Vec<String> = distinct.into_iter().collect();
+        sets.push(distinct);
+    }
+    // Review C-2: `find_cycles` enumerates DFS back-edge cycles, not SCCs —
+    // overlapping cycles (`a↔b` and `a↔c`) arrive as separate sets. Merging
+    // them into separate dispatchers would leave the dispatchers calling
+    // each other through plain wrapper calls, growing the stack per
+    // iteration. Union every overlapping pair until a fixpoint so each
+    // strongly-connected family becomes exactly one dispatcher.
+    let mut merged = true;
+    while merged {
+        merged = false;
+        'outer: for i in 0..sets.len() {
+            for j in (i + 1)..sets.len() {
+                if !sets[i].is_disjoint(&sets[j]) {
+                    let absorbed = sets.remove(j);
+                    sets[i].extend(absorbed);
+                    merged = true;
+                    break 'outer;
+                }
+            }
+        }
+    }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for set in sets {
+        let members: Vec<String> = set.into_iter().collect();
         if seen.insert(members.join("|")) {
             out.push(members);
         }
@@ -476,9 +499,8 @@ fn merge_one_cycle(statements: &mut Vec<Statement>, member_names: &[String]) {
         span: layout.members[0].span.clone(),
     };
 
-    // Replace each member with a thin wrapper; insert the dispatcher right
-    // before the first member.
-    let mut inserted_dispatcher = false;
+    // Replace each member with a thin wrapper; the dispatcher is inserted
+    // before the first member after this loop.
     for stmt in statements.iter_mut() {
         let Statement::FuncDef(fd) = stmt else {
             continue;
@@ -511,13 +533,6 @@ fn merge_one_cycle(statements: &mut Vec<Statement>, member_names: &[String]) {
         ))];
         let mut wrapper = fd.clone();
         wrapper.body = wrapper_body;
-        if !inserted_dispatcher {
-            inserted_dispatcher = true;
-            // Splice the dispatcher in front of this wrapper by turning the
-            // member into the dispatcher and re-appending the wrapper after
-            // the loop is too invasive — instead collect indices first.
-            // (Handled below by index splice.)
-        }
         *fd = wrapper;
     }
 

@@ -369,6 +369,7 @@ impl Default for Lowering {
 mod abi;
 mod core;
 mod expr;
+pub(crate) use expr::rewrite_idents;
 mod imports;
 mod infer;
 mod json;

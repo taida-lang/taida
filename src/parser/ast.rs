@@ -932,8 +932,18 @@ pub fn expr_count_placeholders(expr: &Expr) -> usize {
 /// explicitly consumes a `=> name` bind-and-forward binding, in which
 /// case the stage is evaluated as written instead of receiving the
 /// piped value. The interpreter, type checker, and code generators all
-/// follow this rule.
+/// consume this single definition (review C-6).
+///
+/// Scoping rules (review C-9):
+/// - A lambda whose parameter shadows a searched name hides that name
+///   for the lambda's subtree — `(_ x: Int = x + 1)` does not reference
+///   a pipeline binding `x`.
+/// - Cond-arm bodies and blocks walk every statement form (bindings,
+///   unmolds, nested expressions), not just bare expression statements.
 pub fn expr_references_any_name(expr: &Expr, bound_names: &[String]) -> bool {
+    if bound_names.is_empty() {
+        return false;
+    }
     match expr {
         Expr::Ident(n, _) => bound_names.iter().any(|bn| bn == n),
         Expr::BinaryOp(l, _, r, _) => {
@@ -953,15 +963,12 @@ pub fn expr_references_any_name(expr: &Expr, bound_names: &[String]) -> bool {
                     .any(|a| expr_references_any_name(a, bound_names))
         }
         Expr::FieldAccess(obj, _, _) => expr_references_any_name(obj, bound_names),
-        Expr::BuchiPack(fields, _) => fields
+        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => fields
             .iter()
             .any(|f| expr_references_any_name(&f.value, bound_names)),
-        Expr::ListLit(items, _) => items
+        Expr::ListLit(items, _) | Expr::Pipeline(items, _) => items
             .iter()
             .any(|x| expr_references_any_name(x, bound_names)),
-        Expr::Pipeline(steps, _) => steps
-            .iter()
-            .any(|s| expr_references_any_name(s, bound_names)),
         Expr::MoldInst(_, type_args, fields, _) => {
             type_args
                 .iter()
@@ -970,58 +977,82 @@ pub fn expr_references_any_name(expr: &Expr, bound_names: &[String]) -> bool {
                     .iter()
                     .any(|f| expr_references_any_name(&f.value, bound_names))
         }
-        Expr::Unmold(inner, _) => expr_references_any_name(inner, bound_names),
-        Expr::Lambda(_, body, _) => expr_references_any_name(body, bound_names),
-        Expr::TypeInst(_, fields, _) => fields
+        Expr::Unmold(inner, _) | Expr::Throw(inner, _) => {
+            expr_references_any_name(inner, bound_names)
+        }
+        Expr::Lambda(params, body, _) => {
+            // Parameter defaults evaluate in the outer scope.
+            if params.iter().any(|p| {
+                p.default_value
+                    .as_ref()
+                    .is_some_and(|d| expr_references_any_name(d, bound_names))
+            }) {
+                return true;
+            }
+            // Params shadow searched names for the body subtree.
+            let visible: Vec<String> = bound_names
+                .iter()
+                .filter(|bn| !params.iter().any(|p| &&p.name == bn))
+                .cloned()
+                .collect();
+            expr_references_any_name(body, &visible)
+        }
+        Expr::Block(stmts, _) => stmts
             .iter()
-            .any(|f| expr_references_any_name(&f.value, bound_names)),
-        Expr::Throw(inner, _) => expr_references_any_name(inner, bound_names),
+            .any(|st| statement_references_any_name(st, bound_names)),
         Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
             arm.condition
                 .as_ref()
                 .is_some_and(|c| expr_references_any_name(c, bound_names))
-                || arm.body.iter().any(|s| {
-                    if let Statement::Expr(e) = s {
-                        expr_references_any_name(e, bound_names)
-                    } else {
-                        false
-                    }
-                })
+                || arm
+                    .body
+                    .iter()
+                    .any(|s| statement_references_any_name(s, bound_names))
         }),
         _ => false,
     }
 }
 
+/// Statement-level companion of [`expr_references_any_name`].
+fn statement_references_any_name(stmt: &Statement, bound_names: &[String]) -> bool {
+    match stmt {
+        Statement::Expr(e) => expr_references_any_name(e, bound_names),
+        Statement::Assignment(a) => expr_references_any_name(&a.value, bound_names),
+        Statement::UnmoldForward(u) => expr_references_any_name(&u.source, bound_names),
+        Statement::UnmoldBackward(u) => expr_references_any_name(&u.source, bound_names),
+        Statement::FuncDef(fd) => fd
+            .body
+            .iter()
+            .any(|s| statement_references_any_name(s, bound_names)),
+        Statement::ErrorCeiling(ec) => ec
+            .handler_body
+            .iter()
+            .any(|s| statement_references_any_name(s, bound_names)),
+        _ => false,
+    }
+}
+
 /// Statement-level companion of [`expr_count_placeholders`].
+///
+/// Review C-8: counts exactly the statement forms the pipeline
+/// placeholder REWRITE reaches (expression statements, assignments,
+/// unmold bindings) so the "stage has one `_`" decision and the
+/// injection can never disagree. A `_` buried in a nested definition or
+/// error-ceiling handler inside a stage is not an injection position —
+/// it is not counted here and surfaces as the standard pipe-external
+/// `_` error at evaluation.
 pub fn statement_count_placeholders(stmt: &Statement) -> usize {
     match stmt {
         Statement::Expr(expr) => expr_count_placeholders(expr),
         Statement::Assignment(assign) => expr_count_placeholders(&assign.value),
-        Statement::FuncDef(func) => func.body.iter().map(statement_count_placeholders).sum(),
-        Statement::ErrorCeiling(ceiling) => ceiling
-            .handler_body
-            .iter()
-            .map(statement_count_placeholders)
-            .sum(),
         Statement::UnmoldForward(unmold) => expr_count_placeholders(&unmold.source),
         Statement::UnmoldBackward(unmold) => expr_count_placeholders(&unmold.source),
-        Statement::ClassLikeDef(def) => def
-            .fields
-            .iter()
-            .map(|field| {
-                field
-                    .default_value
-                    .as_ref()
-                    .map(expr_count_placeholders)
-                    .unwrap_or(0)
-                    + field
-                        .method_def
-                        .as_ref()
-                        .map(|func| func.body.iter().map(statement_count_placeholders).sum())
-                        .unwrap_or(0)
-            })
-            .sum(),
-        Statement::EnumDef(_) | Statement::Import(_) | Statement::Export(_) => 0,
+        Statement::FuncDef(_)
+        | Statement::ErrorCeiling(_)
+        | Statement::ClassLikeDef(_)
+        | Statement::EnumDef(_)
+        | Statement::Import(_)
+        | Statement::Export(_) => 0,
     }
 }
 

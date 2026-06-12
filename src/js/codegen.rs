@@ -4477,27 +4477,47 @@ impl JsCodegen {
         // consume them skip the classic `__p` auto-injection.
         let last_idx = exprs.len().saturating_sub(1);
         let mut bound_names: Vec<String> = Vec::new();
+        // Review C-5 (the JS sibling of F57B-007): each `=> name` bind gets a
+        // fresh synthetic const — re-binding the same name in one pipeline
+        // emitted two `const name = __p;` declarations in the same IIFE
+        // (SyntaxError). Stages that consume a binding are rewritten to read
+        // the synthetic.
+        let mut bind_renames: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
 
         for (step_idx, expr) in exprs[1..].iter().enumerate() {
             let i = step_idx + 1; // absolute index in exprs
-            // Intermediate `=> name` bind-and-forward: emit `const name = __p;`
-            // and leave `__p` unchanged. Skip when `name` is a function / type /
-            // mold / builtin that should be called with the current value.
+            // Intermediate `=> name` bind-and-forward: emit a synthetic const
+            // and leave `__p` unchanged. Skip when `name` is a function /
+            // type / mold / builtin that should be called with the current value.
             if i < last_idx
                 && let Expr::Ident(name, _) = expr
                 && !self.is_js_pipeline_callable_ident(name)
             {
+                let synthetic = format!("__pb_{}_{}", i, name);
                 self.write_indent();
-                self.write(&format!("const {} = __p;\n", name));
+                self.write(&format!("const {} = __p;\n", synthetic));
                 bound_names.push(name.clone());
+                bind_renames.insert(name.clone(), synthetic);
                 continue;
             }
             // Step that explicitly references a bound name → no auto-inject.
             // Emit the step expression directly and assign its result to `__p`.
             if !bound_names.is_empty() && expr_references_any_name(expr, &bound_names) {
+                // Review C-4: `_` has no injection value in an as-written
+                // stage — reject for cross-backend agreement.
+                if expr_count_placeholders(expr) > 0 {
+                    return Err(JsError {
+                        message: "[E1543] A pipeline stage that references a `=> name` binding \
+                                  is evaluated as written — `_` has no injection value there. \
+                                  Use the bound name instead of `_`."
+                            .to_string(),
+                    });
+                }
                 self.write_indent();
                 self.write("__p = ");
-                self.gen_expr(expr)?;
+                let renamed = crate::codegen::lower::rewrite_idents(expr, &bind_renames);
+                self.gen_expr(&renamed)?;
                 self.write(";\n");
                 continue;
             }
@@ -4625,48 +4645,10 @@ impl JsCodegen {
     }
 }
 
-/// True if `expr` references any name in `bound_names`
-/// anywhere in its subtree. Used by `gen_pipeline` to decide whether a
-/// pipeline step should skip the classic `__p` auto-injection because the
-/// user explicitly consumed a pipeline-scope binding.
+/// Shared `=> name` binding-reference rule — single definition in
+/// `crate::parser::ast` (review C-6/C-9).
 fn expr_references_any_name(expr: &Expr, bound_names: &[String]) -> bool {
-    fn walk(e: &Expr, names: &[String]) -> bool {
-        match e {
-            Expr::Ident(n, _) => names.iter().any(|bn| bn == n),
-            Expr::BinaryOp(l, _, r, _) => walk(l, names) || walk(r, names),
-            Expr::UnaryOp(_, inner, _) => walk(inner, names),
-            Expr::FuncCall(callee, args, _) => {
-                walk(callee, names) || args.iter().any(|a| walk(a, names))
-            }
-            Expr::MethodCall(obj, _, args, _) => {
-                walk(obj, names) || args.iter().any(|a| walk(a, names))
-            }
-            Expr::FieldAccess(obj, _, _) => walk(obj, names),
-            Expr::BuchiPack(fields, _) => fields.iter().any(|f| walk(&f.value, names)),
-            Expr::ListLit(items, _) => items.iter().any(|x| walk(x, names)),
-            Expr::Pipeline(steps, _) => steps.iter().any(|s| walk(s, names)),
-            Expr::MoldInst(_, type_args, fields, _) => {
-                type_args.iter().any(|a| walk(a, names))
-                    || fields.iter().any(|f| walk(&f.value, names))
-            }
-            Expr::Unmold(inner, _) => walk(inner, names),
-            Expr::Lambda(_, body, _) => walk(body, names),
-            Expr::TypeInst(_, fields, _) => fields.iter().any(|f| walk(&f.value, names)),
-            Expr::Throw(inner, _) => walk(inner, names),
-            Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
-                arm.condition.as_ref().is_some_and(|c| walk(c, names))
-                    || arm.body.iter().any(|s| {
-                        if let Statement::Expr(e) = s {
-                            walk(e, names)
-                        } else {
-                            false
-                        }
-                    })
-            }),
-            _ => false,
-        }
-    }
-    walk(expr, bound_names)
+    crate::parser::expr_references_any_name(expr, bound_names)
 }
 
 fn js_rewrite_placeholder(expr: &Expr, replacement: &str, span: &crate::lexer::Span) -> Expr {

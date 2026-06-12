@@ -796,10 +796,13 @@ fn check_mutual_recursion_native_impl(program: &Program, file: &str) -> Vec<Veri
     // F62B-002: tail-only cycles in the mergeable subset are lowered to a
     // single self-tail-recursive dispatcher by `graph::mutual_tco` — those
     // run fine on the C-lowering backends and are exempt from the reject.
-    let mergeable: std::collections::HashSet<String> =
+    // Overlapping raw cycles are unioned into one dispatcher family
+    // (review C-2), so a raw DFS cycle is exempt when its members are a
+    // subset of any mergeable family.
+    let mergeable_families: Vec<std::collections::HashSet<String>> =
         crate::graph::mutual_tco::mergeable_tail_cycles(program)
             .into_iter()
-            .map(|members| members.join("|"))
+            .map(|members| members.into_iter().collect())
             .collect();
 
     let mut findings = Vec::new();
@@ -822,8 +825,12 @@ fn check_mutual_recursion_native_impl(program: &Program, file: &str) -> Vec<Veri
         let mut sorted: Vec<String> = distinct.iter().map(|s| s.to_string()).collect();
         sorted.sort();
         let key = sorted.join("|");
-        if mergeable.contains(&key) {
-            // Tail-only mergeable cycle — handled by the dispatcher merge.
+        if mergeable_families
+            .iter()
+            .any(|family| distinct.iter().all(|m| family.contains(*m)))
+        {
+            // Tail-only mergeable cycle (possibly part of a unioned
+            // family) — handled by the dispatcher merge.
             continue;
         }
         if !seen_cycles.insert(key) {

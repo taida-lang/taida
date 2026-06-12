@@ -1709,6 +1709,16 @@ impl Lowering {
             // written (no auto-inject), with each bound name rewritten to its
             // synthetic so the binding — not an outer same-named variable — is read.
             if !bound_names.is_empty() && native_expr_references_any_name(expr, &bound_names) {
+                // Review C-4: `_` has no injection value in an as-written
+                // stage — reject for cross-backend agreement.
+                if expr_count_placeholders(expr) > 0 {
+                    return Err(LowerError {
+                        message: "[E1543] A pipeline stage that references a `=> name` binding \
+                                  is evaluated as written — `_` has no injection value there. \
+                                  Use the bound name instead of `_`."
+                            .to_string(),
+                    });
+                }
                 let rewritten = rewrite_idents(expr, &bind_renames);
                 current = self.lower_expr(func, &rewritten)?;
                 continue;
@@ -2024,6 +2034,23 @@ impl Lowering {
                 doc_comments: assign.doc_comments.clone(),
                 span: assign.span.clone(),
             }),
+            // Review C-8: unmold bindings rewrite their source like the
+            // interpreter's statement rewriter — the shared placeholder
+            // count includes them, so the rewrite must reach them too.
+            Statement::UnmoldForward(u) => {
+                Statement::UnmoldForward(crate::parser::UnmoldForwardStmt {
+                    source: self.rewrite_placeholder(&u.source, replacement, span),
+                    target: u.target.clone(),
+                    span: u.span.clone(),
+                })
+            }
+            Statement::UnmoldBackward(u) => {
+                Statement::UnmoldBackward(crate::parser::UnmoldBackwardStmt {
+                    target: u.target.clone(),
+                    source: self.rewrite_placeholder(&u.source, replacement, span),
+                    span: u.span.clone(),
+                })
+            }
             other => other.clone(),
         }
     }
@@ -2707,7 +2734,10 @@ impl Lowering {
 /// the parser cannot place a pipeline-bound-name reference in those positions
 /// mid-pipeline, so they are left as-is. If that ever changes, the gate and this
 /// rewriter must grow together. Literals and other leaves are returned unchanged.
-fn rewrite_idents(expr: &Expr, renames: &std::collections::HashMap<String, String>) -> Expr {
+pub(crate) fn rewrite_idents(
+    expr: &Expr,
+    renames: &std::collections::HashMap<String, String>,
+) -> Expr {
     if renames.is_empty() {
         return expr.clone();
     }
@@ -2821,43 +2851,8 @@ fn rewrite_idents(expr: &Expr, renames: &std::collections::HashMap<String, Strin
 /// True if `expr` references any name in `bound_names`
 /// anywhere in its subtree. Used by `lower_pipeline` to decide whether a
 /// pipeline step should skip the classic `prev_result` auto-injection
-/// because the user explicitly consumed a pipeline-scope binding.
+/// Shared `=> name` binding-reference rule — single definition in
+/// `crate::parser::ast` (review C-6/C-9).
 fn native_expr_references_any_name(expr: &Expr, bound_names: &[String]) -> bool {
-    fn walk(e: &Expr, names: &[String]) -> bool {
-        match e {
-            Expr::Ident(n, _) => names.iter().any(|bn| bn == n),
-            Expr::BinaryOp(l, _, r, _) => walk(l, names) || walk(r, names),
-            Expr::UnaryOp(_, inner, _) => walk(inner, names),
-            Expr::FuncCall(callee, args, _) => {
-                walk(callee, names) || args.iter().any(|a| walk(a, names))
-            }
-            Expr::MethodCall(obj, _, args, _) => {
-                walk(obj, names) || args.iter().any(|a| walk(a, names))
-            }
-            Expr::FieldAccess(obj, _, _) => walk(obj, names),
-            Expr::BuchiPack(fields, _) => fields.iter().any(|f| walk(&f.value, names)),
-            Expr::ListLit(items, _) => items.iter().any(|x| walk(x, names)),
-            Expr::Pipeline(steps, _) => steps.iter().any(|s| walk(s, names)),
-            Expr::MoldInst(_, type_args, fields, _) => {
-                type_args.iter().any(|a| walk(a, names))
-                    || fields.iter().any(|f| walk(&f.value, names))
-            }
-            Expr::Unmold(inner, _) => walk(inner, names),
-            Expr::Lambda(_, body, _) => walk(body, names),
-            Expr::TypeInst(_, fields, _) => fields.iter().any(|f| walk(&f.value, names)),
-            Expr::Throw(inner, _) => walk(inner, names),
-            Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
-                arm.condition.as_ref().is_some_and(|c| walk(c, names))
-                    || arm.body.iter().any(|s| {
-                        if let Statement::Expr(e) = s {
-                            walk(e, names)
-                        } else {
-                            false
-                        }
-                    })
-            }),
-            _ => false,
-        }
-    }
-    walk(expr, bound_names)
+    crate::parser::expr_references_any_name(expr, bound_names)
 }
