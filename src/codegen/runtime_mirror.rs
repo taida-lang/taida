@@ -397,6 +397,9 @@ const DIVERGENT_ASYNC: &[&str] = &[
 /// Deliberately divergent: native writes through libc stdio; WASM goes
 /// through `fd_write`-style imports with its own buffering.
 const DIVERGENT_IO_DEBUG: &[&str] = &[
+    // F62B-030: process termination — native calls exit(), the wasm
+    // profiles go through WASI proc_exit (edge traps).
+    "taida_exit",
     "taida_debug_bool",
     "taida_debug_float",
     "taida_debug_int",
@@ -674,6 +677,7 @@ const DIVERGENT_MOLD_CONV: &[&str] = &[
     "taida_monadic_to_string",
     "taida_slice_mold",
     "taida_str_char_at",
+    "taida_str_chars",
     "taida_str_mold_any",
     "taida_str_mold_bool",
     "taida_str_mold_float",
@@ -786,11 +790,16 @@ const DIVERGENT_MISC: &[&str] = &[
     "taida_str_ends_with",
     "taida_str_eq",
     "taida_str_get",
+    "taida_str_gt",
+    "taida_str_gte",
+    "taida_str_lt",
     "taida_str_hash",
     "taida_str_index_of",
     "taida_str_last_index_of",
     "taida_str_length",
     "taida_str_match_regex",
+    "taida_utf8_decode_mold",
+    "taida_utf8_encode_mold",
     "taida_str_neq",
     "taida_str_pad",
     "taida_str_release",

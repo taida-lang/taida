@@ -56,6 +56,10 @@ pub struct JsCodegen {
     /// by `is_js_pipeline_callable_ident` to distinguish a callable
     /// intermediate pipeline step from a bind-and-forward target.
     user_funcs: std::collections::HashSet<String>,
+    /// F62B-021: generic user functions — their mold-syntax bracket carries
+    /// TYPE arguments (erased on JS), so `genfn[T](args)` emits a plain
+    /// positional call with the `()` values.
+    generic_funcs: std::collections::HashSet<String>,
     /// User-defined functions declared with `=> :Float` return type.
     /// Used for compile-time Float-origin propagation so that
     /// `stdout(triple(4.0))` renders `12.0` instead of `12` (JS `Number`
@@ -306,6 +310,7 @@ impl JsCodegen {
             shadowed_net_builtins: std::collections::HashSet::new(),
             type_parents: std::collections::HashMap::new(),
             user_funcs: std::collections::HashSet::new(),
+            generic_funcs: std::collections::HashSet::new(),
             float_return_funcs: std::collections::HashSet::new(),
             // C21B-seed-04 re-fix: start with a single top-level scope.
             // gen_func_def pushes/pops nested scopes for function bodies.
@@ -829,6 +834,9 @@ impl JsCodegen {
         for stmt in &program.statements {
             if let Statement::FuncDef(fd) = stmt {
                 self.user_funcs.insert(fd.name.clone());
+                if !fd.type_params.is_empty() {
+                    self.generic_funcs.insert(fd.name.clone());
+                }
                 if matches!(&fd.return_type, Some(TypeExpr::Named(n)) if n == "Float") {
                     self.float_return_funcs.insert(fd.name.clone());
                 }
@@ -1217,6 +1225,51 @@ impl JsCodegen {
         Ok(())
     }
 
+    /// F62B-022: emit `{ <stmts>; return <last value>; }` for a
+    /// block-bodied lambda. The block discipline (let-bindings + final
+    /// result expression or tail binding) is enforced by the parser.
+    fn gen_block_body(&mut self, stmts: &[Statement]) -> Result<(), JsError> {
+        self.write("{\n");
+        self.indent += 1;
+        let last_idx = stmts.len().saturating_sub(1);
+        for (i, stmt) in stmts.iter().enumerate() {
+            if i == last_idx {
+                match stmt {
+                    Statement::Expr(e) => {
+                        self.write_indent();
+                        self.write("return ");
+                        self.gen_expr(e)?;
+                        self.write(";\n");
+                    }
+                    Statement::Assignment(a) => {
+                        self.gen_statement(stmt)?;
+                        self.write_indent();
+                        self.write(&format!("return {};\n", a.target));
+                    }
+                    Statement::UnmoldForward(u) => {
+                        self.gen_statement(stmt)?;
+                        self.write_indent();
+                        self.write(&format!("return {};\n", u.target));
+                    }
+                    Statement::UnmoldBackward(u) => {
+                        self.gen_statement(stmt)?;
+                        self.write_indent();
+                        self.write(&format!("return {};\n", u.target));
+                    }
+                    _ => {
+                        self.gen_statement(stmt)?;
+                    }
+                }
+            } else {
+                self.gen_statement(stmt)?;
+            }
+        }
+        self.indent -= 1;
+        self.write_indent();
+        self.write("}");
+        Ok(())
+    }
+
     fn gen_statement(&mut self, stmt: &Statement) -> Result<(), JsError> {
         match stmt {
             Statement::Expr(expr) => {
@@ -1285,6 +1338,16 @@ impl JsCodegen {
                 crate::parser::ClassLikeKind::BuchiPack => self.gen_type_def(cl),
                 crate::parser::ClassLikeKind::Mold { .. } => self.gen_mold_def(cl),
                 crate::parser::ClassLikeKind::Inheritance { .. } => self.gen_inheritance_def(cl),
+                crate::parser::ClassLikeKind::Alias { .. } => {
+                    // Checker-only; a sentinel keeps the name importable /
+                    // exportable like other type definitions.
+                    self.write_indent();
+                    self.write(&format!(
+                        "const {} = {{ __type: \"TypeDef\", __name: \"{}\" }};\n",
+                        cl.name, cl.name
+                    ));
+                    Ok(())
+                }
             },
             Statement::ErrorCeiling(ec) => {
                 // Standalone ErrorCeiling (when not handled by gen_statement_sequence)
@@ -3106,6 +3169,8 @@ impl JsCodegen {
                             "jsonPretty" => self.write("__taida_jsonPretty"),
                             "nowMs" => self.write("__taida_nowMs"),
                             "sleep" => self.write("__taida_sleep"),
+                            // F62B-030: exit(code) terminates the process.
+                            "exit" => self.write("__taida_exit"),
                             // D28B-015: `strOf(span, raw)` lowercase function-form
                             // delegates to the existing `__taida_net_StrOf`
                             // runtime helper (always present in `RUNTIME_JS`).
@@ -3216,6 +3281,8 @@ impl JsCodegen {
                             "jsonPretty" => self.write("__taida_jsonPretty"),
                             "nowMs" => self.write("__taida_nowMs"),
                             "sleep" => self.write("__taida_sleep"),
+                            // F62B-030: exit(code) terminates the process.
+                            "exit" => self.write("__taida_exit"),
                             // D28B-015: `strOf(span, raw)` lowercase function-form
                             // delegates to the existing `__taida_net_StrOf`
                             // runtime helper (always present in `RUNTIME_JS`).
@@ -3424,6 +3491,24 @@ impl JsCodegen {
             }
             Expr::MoldInst(name, type_args, fields, span) => {
                 // B5: MoldInst → function call with type args
+
+                // Final-review #4: the host-capability surface has no JS
+                // backend implementation — the generic fallback emitted
+                // calls to undefined runtime symbols (`HostCapability is
+                // not defined`) or fed the 2-arg `Cage_mold` a builder.
+                // Reject at build time with the support matrix named.
+                if matches!(
+                    name.as_str(),
+                    "HostCapability" | "HostStep" | "HostCall" | "InCage" | "Uncage"
+                ) || (name == "Cage" && type_args.len() == 1)
+                {
+                    return Err(JsError {
+                        message: format!(
+                            "{} is not available on the JS backend — host capability calls run on the interpreter (fixtures), native, and wasm targets.",
+                            name
+                        ),
+                    });
+                }
 
                 // Append-consume site (shared shape analysis keyed by
                 // node_id): emit the consuming runtime variant. Sites
@@ -4176,6 +4261,46 @@ impl JsCodegen {
                     self.write(")");
                     return Ok(());
                 }
+                // F62B-021: explicit type arguments on a user function —
+                // `genfn[T1, T2](args)` / `genfn[T]()`. Types erase on JS;
+                // emit a plain positional call with the `()` values. For
+                // GENERIC functions the bracket always carries types.
+                if self.user_funcs.contains(name.as_str())
+                    && (self.generic_funcs.contains(name.as_str()) || !fields.is_empty())
+                {
+                    let all_positional = fields.iter().all(|f| {
+                        f.name.starts_with('_') && f.name[1..].chars().all(|c| c.is_ascii_digit())
+                    });
+                    if all_positional {
+                        // F62B-041 (JS leg of the combined-form guard): for
+                        // a NON-generic function the bracket is the legacy
+                        // positional call (`fn[arg1, arg2]()`), so combining
+                        // it with `()` arguments (`fn[1](2)`) is ambiguous.
+                        // The checker rejects this statically; without this
+                        // guard an unchecked build silently dropped the
+                        // bracket values and emitted `fn(2)`.
+                        if !self.generic_funcs.contains(name.as_str()) && !type_args.is_empty() {
+                            return Err(JsError {
+                                message: format!(
+                                    "Non-generic function '{}' cannot take both \
+                                     bracket values and call arguments. \
+                                     Call it as {}(arg1, arg2) or with the \
+                                     positional bracket form {}[arg1, arg2]().",
+                                    name, name, name
+                                ),
+                            });
+                        }
+                        self.write(&format!("{}(", name));
+                        for (i, field) in fields.iter().enumerate() {
+                            if i > 0 {
+                                self.write(", ");
+                            }
+                            self.gen_expr(&field.value)?;
+                        }
+                        self.write(")");
+                        return Ok(());
+                    }
+                }
                 self.write("__taida_solidify(");
                 self.write(&format!("{}(", name));
                 for (i, arg) in type_args.iter().enumerate() {
@@ -4225,9 +4350,23 @@ impl JsCodegen {
                     }
                 }
                 self.write(&format!("(({}) => ", param_names.join(", ")));
-                self.gen_expr(body)?;
+                if let Expr::Block(stmts, _) = body.as_ref() {
+                    // F62B-022: block-bodied lambda — braces with the last
+                    // statement's value returned.
+                    self.gen_block_body(stmts)?;
+                } else {
+                    self.gen_expr(body)?;
+                }
                 self.write(")");
                 self.shadowed_net_builtins = prev_shadowed_net;
+                Ok(())
+            }
+            // F62B-022: a standalone expression block evaluates its
+            // statements in an IIFE and yields the last value.
+            Expr::Block(stmts, _) => {
+                self.write("(() => ");
+                self.gen_block_body(stmts)?;
+                self.write(")()");
                 Ok(())
             }
             Expr::Throw(inner, _) => {
@@ -4414,301 +4553,91 @@ impl JsCodegen {
         // consume them skip the classic `__p` auto-injection.
         let last_idx = exprs.len().saturating_sub(1);
         let mut bound_names: Vec<String> = Vec::new();
+        // Review C-5 (the JS sibling of F57B-007): each `=> name` bind gets a
+        // fresh synthetic const — re-binding the same name in one pipeline
+        // emitted two `const name = __p;` declarations in the same IIFE
+        // (SyntaxError). Stages that consume a binding are rewritten to read
+        // the synthetic.
+        let mut bind_renames: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
 
         for (step_idx, expr) in exprs[1..].iter().enumerate() {
             let i = step_idx + 1; // absolute index in exprs
-            // Intermediate `=> name` bind-and-forward: emit `const name = __p;`
-            // and leave `__p` unchanged. Skip when `name` is a function / type /
-            // mold / builtin that should be called with the current value.
+            // Intermediate `=> name` bind-and-forward: emit a synthetic const
+            // and leave `__p` unchanged. Skip when `name` is a function /
+            // type / mold / builtin that should be called with the current value.
             if i < last_idx
                 && let Expr::Ident(name, _) = expr
                 && !self.is_js_pipeline_callable_ident(name)
             {
+                let synthetic = format!("__pb_{}_{}", i, name);
                 self.write_indent();
-                self.write(&format!("const {} = __p;\n", name));
+                self.write(&format!("const {} = __p;\n", synthetic));
                 bound_names.push(name.clone());
+                bind_renames.insert(name.clone(), synthetic);
                 continue;
             }
             // Step that explicitly references a bound name → no auto-inject.
             // Emit the step expression directly and assign its result to `__p`.
             if !bound_names.is_empty() && expr_references_any_name(expr, &bound_names) {
+                // Review C-4: `_` has no injection value in an as-written
+                // stage — reject for cross-backend agreement.
+                if expr_count_placeholders(expr) > 0 {
+                    return Err(JsError {
+                        message: "[E1543] A pipeline stage that references a `=> name` binding \
+                                  is evaluated as written — `_` has no injection value there. \
+                                  Use the bound name instead of `_`."
+                            .to_string(),
+                    });
+                }
                 self.write_indent();
                 self.write("__p = ");
-                self.gen_expr(expr)?;
+                let renamed = crate::codegen::lower::rewrite_idents(expr, &bind_renames);
+                self.gen_expr(&renamed)?;
+                self.write(";\n");
+                continue;
+            }
+            // F62B-025: pipeline application closes over exactly two rules
+            // (mirror of the interpreter's `eval_pipeline_step`).
+            //
+            // Rule 1 — the stage contains `_` (one at most, E1543): rewrite
+            // the placeholder to `__p` and emit the stage as a normal
+            // expression (the main `gen_expr` paths handle molds, method
+            // calls, OS mappings, and solidify).
+            //
+            // Rule 2 — no `_`: emit the stage as written and apply the piped
+            // value through `__taida_pipe_apply` (throws on non-function
+            // values; the checker rejects statically known cases as E1544).
+            // Bare identifiers keep their dedicated builtin-name mapping
+            // below. The legacy implicit first-argument injection is gone.
+            let placeholder_count = expr_count_placeholders(expr);
+            if placeholder_count > 1 {
+                return Err(JsError {
+                    message: format!(
+                        "[E1543] A pipeline stage can contain at most one `_` (found {}).",
+                        placeholder_count
+                    ),
+                });
+            }
+            if placeholder_count == 1 {
+                // Rewrite `_` to a per-stage const snapshot of `__p`, not to
+                // `__p` itself: `__p` is a mutable accumulator, so a closure
+                // produced by the stage (positional injection like
+                // `5 => addThree(, _, 3)`) would otherwise capture the live
+                // binding instead of the stage-time value.
+                let snapshot = format!("__pv_{}", i);
+                self.write_indent();
+                self.write(&format!("const {} = __p;\n", snapshot));
+                self.write_indent();
+                self.write("__p = ");
+                let rewritten = js_rewrite_placeholder(expr, &snapshot, expr.span());
+                self.gen_expr(&rewritten)?;
                 self.write(";\n");
                 continue;
             }
             self.write_indent();
             self.write("__p = ");
             match expr {
-                Expr::FuncCall(callee, args, _) => {
-                    let has_placeholder = args.iter().any(js_expr_has_placeholder);
-                    if let Expr::Ident(name, _) = callee.as_ref() {
-                        match name.as_str() {
-                            "debug" => self.write("__taida_debug"),
-                            "typeof" => self.write("__taida_typeof"),
-                            "assert" => self.write("__taida_assert"),
-                            "throw" => self.write("__taida_throw"),
-                            "stdout" => self.write("__taida_stdout"),
-                            "stderr" => self.write("__taida_stderr"),
-                            "stdin" => self.write("__taida_stdin"),
-                            // C20-2: stdinLine is the UTF-8-aware Async[Lax[Str]] successor
-                            "stdinLine" => self.write("__taida_stdinLine"),
-                            "jsonEncode" => self.write("__taida_jsonEncode"),
-                            "jsonPretty" => self.write("__taida_jsonPretty"),
-                            "nowMs" => self.write("__taida_nowMs"),
-                            "sleep" => self.write("__taida_sleep"),
-                            // D28B-015: `strOf(span, raw)` lowercase function-form
-                            // delegates to the existing `__taida_net_StrOf`
-                            // runtime helper (always present in `RUNTIME_JS`).
-                            "strOf" => self.write("__taida_net_StrOf"),
-                            "readBytes" => self.write("__taida_os_readBytes"),
-                            "readBytesAt" => self.write("__taida_os_readBytesAt"),
-                            "writeFile" => self.write("__taida_os_writeFile"),
-                            "writeBytes" => self.write("__taida_os_writeBytes"),
-                            "appendFile" => self.write("__taida_os_appendFile"),
-                            "remove" => self.write("__taida_os_remove"),
-                            "createDir" => self.write("__taida_os_createDir"),
-                            "rename" => self.write("__taida_os_rename"),
-                            "run" => self.write("__taida_os_run"),
-                            "execShell" => self.write("__taida_os_execShell"),
-                            // C19: interactive TTY-passthrough variants
-                            "runInteractive" => self.write("__taida_os_runInteractive"),
-                            "execShellInteractive" => self.write("__taida_os_execShellInteractive"),
-                            "allEnv" => self.write("__taida_os_allEnv"),
-                            "argv" => self.write("__taida_os_argv"),
-                            "tcpConnect" => self.write("__taida_os_tcpConnect"),
-                            "tcpListen" => self.write("__taida_os_tcpListen"),
-                            "tcpAccept" => self.write("__taida_os_tcpAccept"),
-                            "socketSend" => self.write("__taida_os_socketSend"),
-                            "socketSendAll" => self.write("__taida_os_socketSendAll"),
-                            "socketRecv" => self.write("__taida_os_socketRecv"),
-                            "socketSendBytes" => self.write("__taida_os_socketSendBytes"),
-                            "socketRecvBytes" => self.write("__taida_os_socketRecvBytes"),
-                            "socketClose" => self.write("__taida_os_socketClose"),
-                            "listenerClose" => self.write("__taida_os_listenerClose"),
-                            "udpBind" => self.write("__taida_os_udpBind"),
-                            "udpSendTo" => self.write("__taida_os_udpSendTo"),
-                            "udpRecvFrom" => self.write("__taida_os_udpRecvFrom"),
-                            "udpClose" => self.write("__taida_os_udpClose"),
-                            "socketRecvExact" => self.write("__taida_os_socketRecvExact"),
-                            "dnsResolve" => self.write("__taida_os_dnsResolve"),
-                            "poolCreate" => self.write("__taida_os_poolCreate"),
-                            "poolAcquire" => self.write("__taida_os_poolAcquire"),
-                            "poolRelease" => self.write("__taida_os_poolRelease"),
-                            "poolClose" => self.write("__taida_os_poolClose"),
-                            "poolHealth" => self.write("__taida_os_poolHealth"),
-                            // C12-6a: Regex(pattern, flags?) prelude constructor
-                            "Regex" => self.write("__taida_regex"),
-                            // taida-lang/net HTTP v1 (only when imported)
-                            _ if self.try_write_net_builtin(name, "") => {}
-                            _ => self.write(name),
-                        }
-                    } else {
-                        self.gen_expr(callee)?;
-                    }
-                    self.write("(");
-                    if !has_placeholder {
-                        self.write("__p");
-                        if !args.is_empty() {
-                            self.write(", ");
-                        }
-                    }
-                    for (i, arg) in args.iter().enumerate() {
-                        if i > 0 {
-                            self.write(", ");
-                        }
-                        if js_expr_has_placeholder(arg) {
-                            let rewritten = js_rewrite_placeholder(arg, "__p", arg.span());
-                            self.gen_expr(&rewritten)?;
-                        } else {
-                            self.gen_expr(arg)?;
-                        }
-                    }
-                    self.write(")");
-                }
-                Expr::MethodCall(obj, method, args, _) => {
-                    // Pipeline method call: replace _ placeholder in obj with __p
-                    {
-                        if is_removed_list_method(method) {
-                            self.write("__taida_list_method_removed(");
-                            self.write(&format!("{:?}", method));
-                            self.write(")");
-                            return Ok(());
-                        }
-                        if method == "fold" || method == "reduce" {
-                            self.write(if method == "fold" { "Fold(" } else { "Reduce(" });
-                            if matches!(obj.as_ref(), Expr::Placeholder(_)) {
-                                self.write("__p");
-                            } else {
-                                self.gen_expr(obj)?;
-                            }
-                            for arg in args.iter() {
-                                self.write(", ");
-                                if matches!(arg, Expr::Placeholder(_)) {
-                                    self.write("__p");
-                                } else {
-                                    self.gen_expr(arg)?;
-                                }
-                            }
-                            self.write(")");
-                            return Ok(());
-                        }
-                        let js_method = match method.as_str() {
-                            "length" => "length_",
-                            other => other,
-                        };
-                        if js_expr_has_placeholder(obj) {
-                            let rewritten = js_rewrite_placeholder(obj, "__p", obj.span());
-                            self.gen_expr(&rewritten)?;
-                            self.write(&format!(".{}(", js_method));
-                        } else {
-                            self.gen_expr(obj)?;
-                            self.write(&format!(".{}(", js_method));
-                        }
-                        for (i, arg) in args.iter().enumerate() {
-                            if i > 0 {
-                                self.write(", ");
-                            }
-                            if js_expr_has_placeholder(arg) {
-                                let rewritten = js_rewrite_placeholder(arg, "__p", arg.span());
-                                self.gen_expr(&rewritten)?;
-                            } else {
-                                self.gen_expr(arg)?;
-                            }
-                        }
-                        self.write(")");
-                    }
-                }
-                Expr::MoldInst(name, type_args, fields, _) => {
-                    // B11-5b: If[cond, then, else]() in pipeline
-                    // → ((_) => (cond ? then : else))(__p)
-                    // The IIFE binds `_` so gen_expr emits it as the parameter name,
-                    // achieving correct short-circuit and placeholder substitution.
-                    if name == "If" && type_args.len() >= 3 {
-                        self.write("((_) => (");
-                        self.gen_expr(&type_args[0])?;
-                        self.write(" ? ");
-                        self.gen_expr(&type_args[1])?;
-                        self.write(" : ");
-                        self.gen_expr(&type_args[2])?;
-                        self.write("))(__p)");
-                    }
-                    // B11-6c: TypeIs in pipeline — bind _ to __p via IIFE
-                    else if name == "TypeIs" && type_args.len() >= 2 {
-                        self.write("((_) => ");
-                        // Reuse main TypeIs codegen by constructing a temporary MoldInst
-                        let temp = Expr::MoldInst(
-                            name.clone(),
-                            type_args.clone(),
-                            fields.clone(),
-                            type_args[0].span().clone(),
-                        );
-                        self.gen_expr(&temp)?;
-                        self.write(")(__p)");
-                    }
-                    // B11-6c: TypeExtends in pipeline — no placeholder needed, compile-time
-                    else if name == "TypeExtends" && type_args.len() >= 2 {
-                        let temp = Expr::MoldInst(
-                            name.clone(),
-                            type_args.clone(),
-                            fields.clone(),
-                            type_args[0].span().clone(),
-                        );
-                        self.gen_expr(&temp)?;
-                    }
-                    // JSNew in pipeline: JSNew[ClassName](__p, ...) or JSNew[ClassName](...)
-                    else if name == "JSNew" {
-                        if let Some(Expr::Ident(class_name, _)) = type_args.first() {
-                            self.write(&format!("new {}(", class_name));
-                            // Pipeline value __p as first arg, followed by fields
-                            let has_placeholder =
-                                fields.iter().any(|f| js_expr_has_placeholder(&f.value));
-                            if has_placeholder {
-                                for (i, field) in fields.iter().enumerate() {
-                                    if i > 0 {
-                                        self.write(", ");
-                                    }
-                                    if js_expr_has_placeholder(&field.value) {
-                                        let rewritten = js_rewrite_placeholder(
-                                            &field.value,
-                                            "__p",
-                                            field.value.span(),
-                                        );
-                                        self.gen_expr(&rewritten)?;
-                                    } else {
-                                        self.gen_expr(&field.value)?;
-                                    }
-                                }
-                            } else if fields.is_empty() {
-                                self.write("__p");
-                            } else {
-                                self.write("__p");
-                                for field in fields {
-                                    self.write(", ");
-                                    self.gen_expr(&field.value)?;
-                                }
-                            }
-                            self.write(")");
-                        }
-                    } else {
-                        // Pipeline MoldInst: replace _ placeholders in type_args with __p
-                        // OS molds need to be mapped to runtime function names
-                        let js_name = match name.as_str() {
-                            "Read" => "__taida_os_read",
-                            "ListDir" => "__taida_os_listdir",
-                            "Stat" => "__taida_os_stat",
-                            "Exists" => "__taida_os_exists",
-                            "EnvVar" => "__taida_os_envvar",
-                            _ => name.as_str(),
-                        };
-                        self.write("__taida_solidify(");
-                        self.write(&format!("{}(", js_name));
-                        let has_placeholder = type_args.iter().any(js_expr_has_placeholder);
-                        if has_placeholder {
-                            for (i, arg) in type_args.iter().enumerate() {
-                                if i > 0 {
-                                    self.write(", ");
-                                }
-                                if js_expr_has_placeholder(arg) {
-                                    let rewritten = js_rewrite_placeholder(arg, "__p", arg.span());
-                                    self.gen_expr(&rewritten)?;
-                                } else {
-                                    self.gen_expr(arg)?;
-                                }
-                            }
-                        } else {
-                            // No placeholder — insert __p as first type arg
-                            self.write("__p");
-                            for arg in type_args {
-                                self.write(", ");
-                                self.gen_expr(arg)?;
-                            }
-                        }
-                        if !fields.is_empty() {
-                            self.write(", { ");
-                            for (i, field) in fields.iter().enumerate() {
-                                if i > 0 {
-                                    self.write(", ");
-                                }
-                                self.write(&format!("{}: ", field.name));
-                                if js_expr_has_placeholder(&field.value) {
-                                    let rewritten = js_rewrite_placeholder(
-                                        &field.value,
-                                        "__p",
-                                        field.value.span(),
-                                    );
-                                    self.gen_expr(&rewritten)?;
-                                } else {
-                                    self.gen_expr(&field.value)?;
-                                }
-                            }
-                            self.write(" }");
-                        }
-                        self.write(")");
-                        self.write(")");
-                    }
-                }
                 Expr::Ident(name, _) => match name.as_str() {
                     "debug" => self.write("__taida_debug(__p)"),
                     "typeof" => self.write("__taida_typeof(__p)"),
@@ -4770,15 +4699,14 @@ impl JsCodegen {
                         self.write(&format!("{}(__p)", emitted));
                     }
                 },
-                // C12B-020: `expr => _` is a no-op transform that discards
-                // the pipeline value while keeping the preceding expression's
-                // side effect. Keep `__p` unchanged instead of emitting
-                // `__p = _;` which is a ReferenceError.
-                Expr::Placeholder(_) => {
-                    self.write("__p");
-                }
                 _ => {
+                    // Rule 2: evaluate the stage as written and apply the
+                    // piped value to the resulting function (partial
+                    // application `add(, 3)`, a lambda, or a call returning
+                    // a function). Non-function values throw E1544.
+                    self.write("__taida_pipe_apply(");
                     self.gen_expr(expr)?;
+                    self.write(", __p)");
                 }
             }
             self.write(";\n");
@@ -4793,89 +4721,10 @@ impl JsCodegen {
     }
 }
 
-/// True if `expr` references any name in `bound_names`
-/// anywhere in its subtree. Used by `gen_pipeline` to decide whether a
-/// pipeline step should skip the classic `__p` auto-injection because the
-/// user explicitly consumed a pipeline-scope binding.
+/// Shared `=> name` binding-reference rule — single definition in
+/// `crate::parser::ast` (review C-6/C-9).
 fn expr_references_any_name(expr: &Expr, bound_names: &[String]) -> bool {
-    fn walk(e: &Expr, names: &[String]) -> bool {
-        match e {
-            Expr::Ident(n, _) => names.iter().any(|bn| bn == n),
-            Expr::BinaryOp(l, _, r, _) => walk(l, names) || walk(r, names),
-            Expr::UnaryOp(_, inner, _) => walk(inner, names),
-            Expr::FuncCall(callee, args, _) => {
-                walk(callee, names) || args.iter().any(|a| walk(a, names))
-            }
-            Expr::MethodCall(obj, _, args, _) => {
-                walk(obj, names) || args.iter().any(|a| walk(a, names))
-            }
-            Expr::FieldAccess(obj, _, _) => walk(obj, names),
-            Expr::BuchiPack(fields, _) => fields.iter().any(|f| walk(&f.value, names)),
-            Expr::ListLit(items, _) => items.iter().any(|x| walk(x, names)),
-            Expr::Pipeline(steps, _) => steps.iter().any(|s| walk(s, names)),
-            Expr::MoldInst(_, type_args, fields, _) => {
-                type_args.iter().any(|a| walk(a, names))
-                    || fields.iter().any(|f| walk(&f.value, names))
-            }
-            Expr::Unmold(inner, _) => walk(inner, names),
-            Expr::Lambda(_, body, _) => walk(body, names),
-            Expr::TypeInst(_, fields, _) => fields.iter().any(|f| walk(&f.value, names)),
-            Expr::Throw(inner, _) => walk(inner, names),
-            Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
-                arm.condition.as_ref().is_some_and(|c| walk(c, names))
-                    || arm.body.iter().any(|s| {
-                        if let Statement::Expr(e) = s {
-                            walk(e, names)
-                        } else {
-                            false
-                        }
-                    })
-            }),
-            _ => false,
-        }
-    }
-    walk(expr, bound_names)
-}
-
-fn js_expr_has_placeholder(expr: &Expr) -> bool {
-    match expr {
-        Expr::Placeholder(_) => true,
-        Expr::BinaryOp(lhs, _, rhs, _) => {
-            js_expr_has_placeholder(lhs) || js_expr_has_placeholder(rhs)
-        }
-        Expr::UnaryOp(_, inner, _) => js_expr_has_placeholder(inner),
-        Expr::FuncCall(callee, args, _) => {
-            js_expr_has_placeholder(callee) || args.iter().any(js_expr_has_placeholder)
-        }
-        Expr::MethodCall(obj, _, args, _) => {
-            js_expr_has_placeholder(obj) || args.iter().any(js_expr_has_placeholder)
-        }
-        Expr::FieldAccess(obj, _, _) => js_expr_has_placeholder(obj),
-        Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
-            items.iter().any(js_expr_has_placeholder)
-        }
-        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => fields
-            .iter()
-            .any(|field| js_expr_has_placeholder(&field.value)),
-        Expr::MoldInst(_, type_args, fields, _) => {
-            type_args.iter().any(js_expr_has_placeholder)
-                || fields
-                    .iter()
-                    .any(|field| js_expr_has_placeholder(&field.value))
-        }
-        Expr::Unmold(inner, _) | Expr::Lambda(_, inner, _) | Expr::Throw(inner, _) => {
-            js_expr_has_placeholder(inner)
-        }
-        Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
-            arm.condition.as_ref().is_some_and(js_expr_has_placeholder)
-                || arm
-                    .body
-                    .iter()
-                    .filter_map(|stmt| stmt.yielded_expr())
-                    .any(js_expr_has_placeholder)
-        }),
-        _ => false,
-    }
+    crate::parser::expr_references_any_name(expr, bound_names)
 }
 
 fn js_rewrite_placeholder(expr: &Expr, replacement: &str, span: &crate::lexer::Span) -> Expr {

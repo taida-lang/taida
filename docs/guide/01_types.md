@@ -181,7 +181,14 @@ names <= @["Asuka", "Rei"]
 empty: @[Int] <= @[]
 ```
 
-空リスト束縛では要素型を必ず型注釈で示してください。`empty <= @[]` のように省略すると要素型が確定せず、後続の要素操作で型エラー（`[E0401]`）の原因になります。
+空リスト束縛では要素型を型注釈で示してください。`empty <= @[]` のように単独で省略すると要素型が確定せず、型エラーになります。なお、期待型が文脈から分かる位置 — 注釈付き束縛の内側（ぶちパックリテラルのフィールド等）、型コンストラクタの引数、注釈付き関数引数 — では期待型が空リストまで伝搬するため、注釈は不要です。
+
+```taida fragment
+WebRequest = @(path: Str, query: @[@(name: Str, value: Str)])
+
+// query の期待型が @[] へ流れるので、このまま型が確定します
+req: WebRequest <= @(path <= "/x", query <= @[])
+```
 
 **デフォルト値**: `@[]` (空リスト)
 
@@ -402,8 +409,8 @@ stdout(msg)                  // "HTTP Error 404"
 `Lax[Str]` を返すので、通常は `getOrDefault` で unwrap します:
 
 ```taida
-ToRadix[255, 16]().getOrDefault("") >=> hex   // "ff"
-ToRadix[26, 2]().getOrDefault("") >=> bin     // "11010"
+hex <= ToRadix[255, 16]().getOrDefault("")   // "ff"
+bin <= ToRadix[26, 2]().getOrDefault("")     // "11010"
 ```
 
 精度指定など `ToRadix` でカバーできないフォーマットは専用の関数を別途
@@ -467,6 +474,22 @@ createPilot name: Str age: Int =
 :Int => :Str      // Int から Str への関数
 :Int :Int => :Int  // Int, Int から Int への関数
 ```
+
+### 型エイリアス
+
+リスト型に名前を付けられます。`Name = @[要素型]` の形式で、注釈位置で透過的に展開されます。長いリスト型を繰り返し書く場面（特に空リストの型確定）で有効です。
+
+```taida fragment
+Pairs = @[@(name: Str, value: Str)]
+
+// 空リストの型を一発で確定できます
+emptyPairs: Pairs <= @[]
+
+// 引数・戻り型注釈でも使えます
+countPairs ps: Pairs = ps.length() => :Int
+```
+
+エイリアスは型検査専用で、実行時の実体（コンストラクタ）を持ちません。名前の衝突は他の型定義と同じく拒否されます。右辺が `@(` で始まる場合は従来どおりぶちパック型定義です。
 
 ---
 

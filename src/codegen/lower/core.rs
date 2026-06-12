@@ -17,6 +17,8 @@ impl Lowering {
         stdlib_runtime_funcs.insert("stdin".to_string(), "taida_io_stdin".to_string());
         // C20-2: UTF-8-aware Async[Lax[Str]] line editor (linenoise-backed)
         stdlib_runtime_funcs.insert("stdinLine".to_string(), "taida_io_stdin_line".to_string());
+        // F62B-030: exit(code) terminates with the given code.
+        stdlib_runtime_funcs.insert("exit".to_string(), "taida_exit".to_string());
         // Prelude JSON functions (output-direction only)
         stdlib_runtime_funcs.insert("jsonEncode".to_string(), "taida_json_encode".to_string());
         stdlib_runtime_funcs.insert("jsonPretty".to_string(), "taida_json_pretty".to_string());
@@ -127,6 +129,9 @@ impl Lowering {
         stdlib_runtime_funcs.insert("Regex".to_string(), "taida_regex_new".to_string());
         Self {
             user_funcs: std::collections::HashSet::new(),
+            generic_fn_type_params: std::collections::HashMap::new(),
+            generic_schema_params: std::collections::HashMap::new(),
+            current_schema_params: std::collections::HashMap::new(),
             func_param_defs: std::collections::HashMap::new(),
             type_fields: std::collections::HashMap::new(),
             type_field_types: std::collections::HashMap::new(),
@@ -173,6 +178,7 @@ impl Lowering {
             module_inits_needed: Vec::new(),
             module_key: None,
             is_library_module: false,
+            entry_mode: false,
             imported_type_symbols: std::collections::HashSet::new(),
             source_dir: None,
             imported_func_links: std::collections::HashMap::new(),
@@ -205,6 +211,31 @@ impl Lowering {
         self.typed_expr_table = table;
     }
 
+    /// F62B-040: receive the checker's schema-passing metadata —
+    /// `name -> (declared type params, schema params)` for every callable
+    /// the checker knows to be schema-passing, local and imported alike
+    /// (imported ones under their local aliases). Each module is lowered
+    /// by its own `Lowering` instance, so an imported generic's metadata
+    /// cannot be observed from the exporting module's pass; this hand-off
+    /// is what lets explicit calls to imported schema-passing generics
+    /// append the hidden schema arguments (the callee is lowered with
+    /// them — missing them is an ABI arity mismatch) and lets the
+    /// transitive closure seed from imported callees. Local definitions
+    /// registered by the 1st pass take precedence over these entries.
+    pub fn set_schema_passing_metadata(
+        &mut self,
+        metadata: std::collections::HashMap<String, (Vec<String>, Vec<String>)>,
+    ) {
+        for (name, (declared, schema)) in metadata {
+            self.generic_fn_type_params
+                .entry(name.clone())
+                .or_insert(declared);
+            if !schema.is_empty() {
+                self.generic_schema_params.entry(name).or_insert(schema);
+            }
+        }
+    }
+
     /// Set the addon backend for this lowering run. Called by the
     /// driver immediately after `Lowering::new()` for non-native targets
     /// so that `lower_addon_import` can surface the correct backend-policy
@@ -220,6 +251,15 @@ impl Lowering {
 
     pub fn set_module_key(&mut self, key: String) {
         self.module_key = Some(key);
+    }
+
+    /// F62B-013: mark this lowering as the build entry. An entry file keeps
+    /// its `_taida_main` (top-level statements run) even when it carries
+    /// `<<<` exports — the interpreter already behaves this way, and the
+    /// runtimes (`_start` / native main) reference `_taida_main`
+    /// unconditionally. Dependency lowering never sets this.
+    pub fn set_entry_mode(&mut self, entry: bool) {
+        self.entry_mode = entry;
     }
 
     pub fn module_key_for_path(path: &std::path::Path) -> String {
@@ -262,6 +302,22 @@ impl Lowering {
 
     pub(super) fn fallback_module_key(path: &str) -> String {
         format!("m{:016x}", simple_hash(path))
+    }
+
+    /// F62B-011: lambda / partial-application symbols are namespaced per
+    /// module. Each imported module is lowered by a fresh `Lowering` whose
+    /// `lambda_counter` restarts at 0, and the wasm module merge drops
+    /// same-named functions — without the module key a module's lambda
+    /// silently resolves to another module's lambda body.
+    pub(crate) fn peek_lambda_symbol(&self, kind: &str) -> String {
+        let key = self.module_key.as_deref().unwrap_or("main");
+        format!("_taida_{}_{}_{}", kind, key, self.lambda_counter)
+    }
+
+    pub(crate) fn next_lambda_symbol(&mut self, kind: &str) -> String {
+        let name = self.peek_lambda_symbol(kind);
+        self.lambda_counter += 1;
+        name
     }
 
     /// Register the IR var holding the return-tag

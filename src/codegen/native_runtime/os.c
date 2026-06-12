@@ -385,7 +385,7 @@ static taida_val taida_os_stat_lax_error(const char *kind) {
     return taida_lax_empty_error(taida_os_stat_default_pack(), error);
 }
 
-// ── Stat[path]() → Lax[@(size: Int, modified: Str, isDir: Bool)] ──
+// ── Stat[path]() → Lax[@(size: Int, modified: Int, isDir: Bool)] ──
 taida_val taida_os_stat(taida_val path_ptr) {
     const char *path = (const char*)path_ptr;
 
@@ -399,23 +399,21 @@ taida_val taida_os_stat(taida_val path_ptr) {
     taida_val is_dir_hash = 0x641d9cfa1a584ee4ULL;    // FNV-1a("isDir")
     taida_val default_pack = taida_os_stat_default_pack();
 
-    // Format modified time as RFC3339/UTC
-    struct tm tm_buf;
-    struct tm *tm_utc = gmtime_r(&st.st_mtime, &tm_buf);
-    char time_buf[32];
-    if (tm_utc) {
-        strftime(time_buf, sizeof(time_buf), "%Y-%m-%dT%H:%M:%SZ", tm_utc);
-    } else {
-        // R-11: memcpy for fixed-length literal (no format parsing overhead)
-        memcpy(time_buf, "1970-01-01T00:00:00Z", 21); /* 20 chars + '\0' */
-    }
-    char *time_str = taida_str_new_copy(time_buf);
+    /* F62B-009: epoch milliseconds (Int), per the documented field type.
+       st_mtim carries nanosecond precision on Linux. */
+#ifdef __APPLE__
+    int64_t modified_ms =
+        (int64_t)st.st_mtimespec.tv_sec * 1000 + st.st_mtimespec.tv_nsec / 1000000;
+#else
+    int64_t modified_ms =
+        (int64_t)st.st_mtim.tv_sec * 1000 + st.st_mtim.tv_nsec / 1000000;
+#endif
 
     taida_val stat_pack = taida_pack_new(3);
     taida_pack_set_hash(stat_pack, 0, (taida_val)size_hash);
     taida_pack_set(stat_pack, 0, (taida_val)st.st_size);
     taida_pack_set_hash(stat_pack, 1, (taida_val)modified_hash);
-    taida_pack_set(stat_pack, 1, (taida_val)time_str);
+    taida_pack_set(stat_pack, 1, (taida_val)modified_ms);
     taida_pack_set_hash(stat_pack, 2, (taida_val)is_dir_hash);
     taida_pack_set(stat_pack, 2, S_ISDIR(st.st_mode) ? 1 : 0);
 

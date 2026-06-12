@@ -415,6 +415,13 @@ impl TypeChecker {
             Expr::CondBranch(_, _) => {
                 let _ = self.infer_expr_type_recording_only_e1605(expr);
             }
+            Expr::Block(stmts, _) => {
+                for stmt in stmts {
+                    if let Some(e) = stmt.yielded_expr() {
+                        self.check_comparison_errors_in_expr(e);
+                    }
+                }
+            }
             Expr::Lambda(params, body, _) => {
                 self.push_scope();
                 for param in params {
@@ -1021,21 +1028,35 @@ impl TypeChecker {
                 // `expr >=> target` -- target gets the unmolded (inner) value
                 let source_ty = self.infer_expr_type(&uf.source);
                 self.reject_sealed_carrier_unmold(&source_ty, &uf.span);
-                let target_ty = self.unmold_type(&source_ty);
-                self.define_var_with_span(&uf.target, target_ty.clone(), Some(&uf.span));
-                if target_ty == Type::Molten
+                self.reject_bare_unmold_source(&uf.source, &source_ty, &uf.span);
+                let inferred_target = self.unmold_type(&source_ty);
+                let target_ty = self.apply_unmold_target_annotation(
+                    &uf.target,
+                    uf.type_annotation.as_ref(),
+                    inferred_target.clone(),
+                    &uf.span,
+                );
+                self.define_var_with_span(&uf.target, target_ty, Some(&uf.span));
+                if inferred_target == Type::Molten
                     && let Some(branch) = self.gorillax_value_branch_for_expr(&uf.source)
                 {
                     self.define_branch_info(&uf.target, BranchInfo::Molten(branch));
                 }
             }
             Statement::UnmoldBackward(ub) => {
-                // `target <=< expr`
+                // `target <=< expr` / `target: Type <=< expr`
                 let source_ty = self.infer_expr_type(&ub.source);
                 self.reject_sealed_carrier_unmold(&source_ty, &ub.span);
-                let target_ty = self.unmold_type(&source_ty);
-                self.define_var_with_span(&ub.target, target_ty.clone(), Some(&ub.span));
-                if target_ty == Type::Molten
+                self.reject_bare_unmold_source(&ub.source, &source_ty, &ub.span);
+                let inferred_target = self.unmold_type(&source_ty);
+                let target_ty = self.apply_unmold_target_annotation(
+                    &ub.target,
+                    ub.type_annotation.as_ref(),
+                    inferred_target.clone(),
+                    &ub.span,
+                );
+                self.define_var_with_span(&ub.target, target_ty, Some(&ub.span));
+                if inferred_target == Type::Molten
                     && let Some(branch) = self.gorillax_value_branch_for_expr(&ub.source)
                 {
                     self.define_branch_info(&ub.target, BranchInfo::Molten(branch));
@@ -1071,6 +1092,104 @@ impl TypeChecker {
             // statement kinds (e.g., future AST variants) will need explicit arms
             // added here when introduced.
             _ => {}
+        }
+    }
+
+    /// Resolve an optional `: Type` annotation on an unmold-binding target
+    /// (`name: T <=< expr` / `expr >=> name: T`) against the inferred unmolded
+    /// type. Mirrors the typed-assignment rules: mismatch is an error unless
+    /// the inference came back `Unknown` (e.g. unresolved cross-module types,
+    /// where the annotation is exactly the intended escape hatch), and the
+    /// annotated type wins as the binding type.
+    fn apply_unmold_target_annotation(
+        &mut self,
+        target: &str,
+        annotation: Option<&TypeExpr>,
+        inferred: Type,
+        span: &Span,
+    ) -> Type {
+        let Some(type_ann) = annotation else {
+            return inferred;
+        };
+        let expected = self.registry.resolve_type(type_ann);
+        if !self.registry.is_subtype_of(&inferred, &expected) && inferred != Type::Unknown {
+            self.errors.push(TypeError {
+                message: format!(
+                    "Type mismatch in unmold binding to '{target}': expected {expected}, got {inferred}"
+                ),
+                span: span.clone(),
+            });
+        }
+        expected
+    }
+
+    /// F62B-026 [E1545]: `>=>` / `<=<` / `.unmold()` on a source that is
+    /// statically a bare value (a scalar, list, plain pack type, or enum) is
+    /// rejected — a bare value has nothing to take out, so the old identity
+    /// pass-through was an implicit conversion. Mold-call forms are exempt
+    /// regardless of their result type: every value mold returns its bare
+    /// result and `Mold[...]() >=> x` is the documented binding idiom.
+    pub(super) fn reject_bare_unmold_source(
+        &mut self,
+        source: &Expr,
+        source_ty: &Type,
+        span: &Span,
+    ) {
+        if Self::unmold_source_form_is_mold_like(source) {
+            return;
+        }
+        if !self.type_is_definitely_bare(source_ty) {
+            return;
+        }
+        self.errors.push(TypeError {
+            message: format!(
+                "[E1545] Cannot unmold {source_ty}: `>=>` / `<=<` / `.unmold()` take a mold value \
+                 (Lax, Gorillax, RelaxedGorillax, Result, Async, Stream, or a custom mold). \
+                 A bare value has nothing to take out — bind it with `<=` instead."
+            ),
+            span: span.clone(),
+        });
+    }
+
+    /// Syntactic mold-call exemption for [E1545]. A pipeline is mold-like
+    /// when its final stage is; a cond-branch is exempted conservatively
+    /// (its arms are unified elsewhere and may mix mold calls).
+    fn unmold_source_form_is_mold_like(source: &Expr) -> bool {
+        match source {
+            Expr::MoldInst(_, _, _, _) | Expr::TypeInst(_, _, _) => true,
+            Expr::Pipeline(steps, _) => steps
+                .last()
+                .map(Self::unmold_source_form_is_mold_like)
+                .unwrap_or(false),
+            Expr::CondBranch(_, _) => true,
+            _ => false,
+        }
+    }
+
+    /// A type is "definitely bare" when no mold machinery can be attached
+    /// to a value of that type: scalars, lists, structural packs, pack
+    /// type-defs, and enums. Unknown / unresolved / generic carriers stay
+    /// permissive.
+    fn type_is_definitely_bare(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Int | Type::Float | Type::Num | Type::Str | Type::Bytes | Type::Bool => true,
+            Type::List(_) => true,
+            Type::BuchiPack(_) => true,
+            // Phase-2 review High-2: containers and function values are
+            // bare too — without these, `hashMap(...) >=> leaked` slipped
+            // through the static rule into the runtime identity path.
+            Type::Function(_, _) => true,
+            Type::Generic(name, _) if name == "HashMap" || name == "Set" => true,
+            Type::Named(name) => {
+                // A registered pack type-def or enum is a data value. A
+                // registered mold (or anything unresolved) is not flagged.
+                !self.registry.mold_defs.contains_key(name)
+                    && (self.registry.enum_defs.contains_key(name)
+                        || (self.registry.type_defs.contains_key(name)
+                            && !self.registry.error_types.contains_key(name)
+                            && name != "Error"))
+            }
+            _ => false,
         }
     }
 
@@ -1243,6 +1362,49 @@ impl TypeChecker {
     // pushes long boolean expressions next to the pattern and hurts
     // readability without changing semantics.
     #[allow(clippy::collapsible_match)]
+    /// Phase-2 review High-1: shared ordering operand rule for the
+    /// `Lte` / `Between` molds — `<=` is the binding operator, so
+    /// "less-or-equal" is a mold, but it obeys the same operand rules as
+    /// `<` / `>` / `>=` (numeric pairs, Str pairs, same-Enum pairs).
+    /// Without this the mold forms accepted cross-Enum operands the
+    /// operator forms reject, and the backends disagreed on the result.
+    pub(super) fn validate_ordering_mold_pair(
+        &mut self,
+        mold: &str,
+        left_type: &Type,
+        right_type: &Type,
+        span: &Span,
+    ) {
+        if left_type == &Type::Unknown
+            || right_type == &Type::Unknown
+            || Self::contains_unknown(left_type)
+            || Self::contains_unknown(right_type)
+        {
+            return;
+        }
+        let left_is_numeric_ext = left_type.is_numeric()
+            || matches!(left_type, Type::Named(n) if self.type_param_is_numeric(n));
+        let right_is_numeric_ext = right_type.is_numeric()
+            || matches!(right_type, Type::Named(n) if self.type_param_is_numeric(n));
+        let both_str = matches!(left_type, Type::Str) && matches!(right_type, Type::Str);
+        let same_enum = match (left_type, right_type) {
+            (Type::Named(a), Type::Named(b)) => a == b && self.registry.is_enum_type(a),
+            _ => false,
+        };
+        let valid = (left_is_numeric_ext && right_is_numeric_ext) || both_str || same_enum;
+        if !valid {
+            self.push_e1605_once(
+                span,
+                format!(
+                    "[E1605] Cannot compare {} with {} in `{}[...]()`. \
+                     Hint: Ordering comparison requires numeric, string, or same-Enum operands. \
+                     For Enum↔Int comparisons use `Ordinal[<enum>]()` to obtain the Int first.",
+                    left_type, right_type, mold
+                ),
+            );
+        }
+    }
+
     pub(super) fn emit_comparison_mismatch_if_needed(
         &mut self,
         left_type: &Type,
@@ -1462,6 +1624,13 @@ impl TypeChecker {
                 }
             }
             Expr::FieldAccess(x, _, _) => self.scan_expr_forward_refs(x, later_funcs, defined),
+            Expr::Block(stmts, _) => {
+                for st in stmts {
+                    if let Some(e) = st.yielded_expr() {
+                        self.scan_expr_forward_refs(e, later_funcs, defined);
+                    }
+                }
+            }
             Expr::CondBranch(arms, _) => {
                 for arm in arms {
                     if let Some(c) = &arm.condition {

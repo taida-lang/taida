@@ -477,13 +477,20 @@ static void _wc_json_schema_fail(const char *message) {
 }
 
 static int64_t _wc_json_bytes_from_raw(const unsigned char *src, int len) {
-    int64_t list = taida_list_new();
-    taida_list_set_elem_tag(list, 0);
+    /* Bytes use the shared [TAIDBYT, len, byte...] layout (one int64_t per
+       byte) so decoded values are real Bytes for every consumer
+       (Utf8Decode / get / length / sha256 / display) — the list-shaped
+       value this used to build was only readable by code that confused
+       Bytes with @[Int]. */
     if (len < 0) len = 0;
+    int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)((2 + (int64_t)len) * 8));
+    if (!bytes) return 0;
+    bytes[0] = TAIDA_WASM_BYTES_MAGIC;
+    bytes[1] = len;
     for (int i = 0; i < len; i++) {
-        list = taida_list_push(list, src ? (int64_t)src[i] : 0);
+        bytes[2 + i] = src ? (int64_t)src[i] : 0;
     }
-    return list;
+    return (int64_t)(intptr_t)bytes;
 }
 
 static int _wc_b64_value(char c) {
@@ -647,27 +654,18 @@ static int64_t _wc_json_default_value_for_desc(const char *desc) {
         }
         case 'b': return 0;
         case 'y': return _wc_json_bytes_from_raw((const unsigned char *)"", 0);
+        /* F62B-015: defaults are built through the MISSING-value path
+           (NULL jval) — a synthesized WC_JSON_NULL would now trip the
+           present-but-wrong-kind validation and fail every cast whose
+           default is computed after schema application. */
         case 'Q': {
-            wc_json_val null_val;
-            null_val.type = WC_JSON_NULL;
-            null_val.str_val = (char *)0; null_val.arr = (wc_json_array *)0; null_val.obj = (wc_json_obj *)0;
-            null_val.int_val = 0; null_val.float_val = 0.0;
-            return _wc_json_apply_web_request(&null_val);
+            return _wc_json_apply_web_request((wc_json_val *)0);
         }
         case 'R': {
-            wc_json_val null_val;
-            null_val.type = WC_JSON_NULL;
-            null_val.str_val = (char *)0; null_val.arr = (wc_json_array *)0; null_val.obj = (wc_json_obj *)0;
-            null_val.int_val = 0; null_val.float_val = 0.0;
-            return _wc_json_apply_web_response(&null_val);
+            return _wc_json_apply_web_response((wc_json_val *)0);
         }
         case 'T': {
-            wc_json_val null_val;
-            null_val.type = WC_JSON_NULL;
-            null_val.str_val = (char *)0; null_val.arr = (wc_json_array *)0;
-            null_val.obj = (wc_json_obj *)0;
-            null_val.int_val = 0; null_val.float_val = 0.0;
-            return _wc_json_apply_schema(&null_val, &desc);
+            return _wc_json_apply_schema((wc_json_val *)0, &desc);
         }
         case 'L': {
             return taida_list_new();
@@ -750,6 +748,12 @@ static int64_t _wc_json_to_bool(wc_json_val *jv) {
 }
 
 /* ── Apply schema descriptor to JSON value ── */
+/* F62B-015: schema casting validates JSON kinds like the interpreter
+   (json_to_typed_value_checked). A missing field (NULL jval — object-field
+   misses are normalised to NULL in the 'T' arm, including explicit JSON
+   null) takes the type default and stays a successful cast; a PRESENT
+   value of the wrong JSON kind marks the whole cast failed so the mold
+   returns Lax.has_value=false instead of silently coercing. */
 static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
     if (!desc || !*desc || !**desc) return 0;
     const char *d = *desc;
@@ -757,25 +761,37 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
     switch (d[0]) {
         case 'i': {
             *desc = d + 1;
-            if (!jval || jval->type == WC_JSON_NULL) return 0;
-            return _wc_json_to_int(jval);
+            if (!jval) return 0;
+            if (jval->type == WC_JSON_INT) return jval->int_val;
+            if (jval->type == WC_JSON_FLOAT
+                && jval->float_val == (double)(int64_t)jval->float_val) {
+                return (int64_t)jval->float_val;
+            }
+            _wc_json_schema_fail("JSON schema decode failed: expected an integer");
+            return 0;
         }
         case 'f': {
             *desc = d + 1;
-            if (!jval || jval->type == WC_JSON_NULL) return _d2l(0.0);
-            return _wc_json_to_float(jval);
+            if (!jval) return _d2l(0.0);
+            if (jval->type == WC_JSON_INT || jval->type == WC_JSON_FLOAT) {
+                return _wc_json_to_float(jval);
+            }
+            _wc_json_schema_fail("JSON schema decode failed: expected a number");
+            return _d2l(0.0);
         }
         case 's': {
             *desc = d + 1;
-            if (!jval || jval->type == WC_JSON_NULL) {
-                return taida_str_alloc(0);
-            }
-            return _wc_json_to_str(jval);
+            if (!jval) return taida_str_alloc(0);
+            if (jval->type == WC_JSON_STRING) return _wc_json_to_str(jval);
+            _wc_json_schema_fail("JSON schema decode failed: expected a string");
+            return taida_str_alloc(0);
         }
         case 'b': {
             *desc = d + 1;
-            if (!jval || jval->type == WC_JSON_NULL) return 0;
-            return _wc_json_to_bool(jval);
+            if (!jval) return 0;
+            if (jval->type == WC_JSON_BOOL) return jval->int_val ? 1 : 0;
+            _wc_json_schema_fail("JSON schema decode failed: expected a boolean");
+            return 0;
         }
         case 'y': {
             *desc = d + 1;
@@ -820,6 +836,13 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
 
             int64_t pack = taida_pack_new(field_count + 1);
 
+            /* A present non-object (including explicit null) cannot cast to
+               a record schema; a NULL jval (missing nested field) builds
+               the all-defaults pack and stays successful. */
+            if (jval && jval->type != WC_JSON_OBJECT) {
+                _wc_json_schema_fail("JSON schema decode failed: expected an object");
+            }
+
             int idx = 0;
             while (*d && *d != '}') {
                 char fname[256];
@@ -834,6 +857,11 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
                 wc_json_val *field_jval = (wc_json_val *)0;
                 if (jval && jval->type == WC_JSON_OBJECT) {
                     field_jval = _wc_json_obj_get(jval->obj, fname);
+                }
+                /* Explicit JSON null is field absence (null-exclusion
+                   philosophy): take the field default without failing. */
+                if (field_jval && field_jval->type == WC_JSON_NULL) {
+                    field_jval = (wc_json_val *)0;
                 }
 
                 int64_t field_val = _wc_json_apply_schema(field_jval, &d);
@@ -863,6 +891,11 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
 
             int64_t list = taida_list_new();
 
+            /* Present non-array (including explicit null) is a failed cast;
+               a missing field stays the empty-list default. */
+            if (jval && jval->type != WC_JSON_ARRAY) {
+                _wc_json_schema_fail("JSON schema decode failed: expected an array");
+            }
             if (jval && jval->type == WC_JSON_ARRAY && jval->arr) {
                 for (int i = 0; i < jval->arr->count; i++) {
                     const char *elem_desc = inner_desc;
@@ -1133,6 +1166,21 @@ static void _wc_jb_append_indent(_wc_json_buf *jb, int indent, int depth) {
 /* Forward declare */
 static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, int depth, int type_hint);
 
+/* F62B-019: map a container element's recorded kind (WASM_TAG_* | aux) to
+   the serializer's type_hint (0 none / 1 Int / 2 Float / 3 Str / 4 Bool) so
+   list elements are rendered by their recorded kind instead of the pointer
+   heuristics (a Split[] result's Str elements rendered as "{}" / raw ints
+   without this). Pack/list/unknown kinds keep the structural walk. */
+static int _wc_elem_hint_from_ekind(uint32_t ekind) {
+    switch (ekind & 0xFFu) {
+        case 0: return 1;  /* WASM_TAG_INT */
+        case 1: return 2;  /* WASM_TAG_FLOAT */
+        case 2: return 4;  /* WASM_TAG_BOOL */
+        case 3: return 3;  /* WASM_TAG_STR */
+        default: return 0;
+    }
+}
+
 /* Helper: check whether a wasm value is a Gorillax / RelaxedGorillax
    (fc=4, hash0=HASH_HAS_VALUE, hash2=HASH___ERROR). Mirrors
    `_wasm_is_gorillax` in 01_core.inc.c but staying local to 04 to avoid
@@ -1223,19 +1271,26 @@ static void _wc_json_serialize_pack_fields(_wc_json_buf *jb, int64_t *pack, int6
            them so jsonEncode matches the interpreter. */
         if (!is_monadic && fname[0] == '_' && fname[1] == '_') continue;
 
-        int64_t ftype = taida_lookup_field_type(field_hash, 0);
-        /* `_wasm_lookup_field_type` returns -1 (not 0) for unregistered
-           hashes; normalise to 0 so downstream "unset" checks work. */
-        if (ftype < 0) ftype = 0;
-        /* Pull per-slot tag when the global registry has no type — not
-           monadic-specific: every pack literal stamps per-field tags,
-           and a FLOAT payload is unrecoverable from the value alone
-           (native twin). */
-        if (ftype == 0) {
-            int64_t slot_tag = pack[1 + i * 3 + 1];
-            if (slot_tag == WASM_TAG_STR) ftype = 3;
-            else if (slot_tag == WASM_TAG_BOOL) ftype = 4;
-            else if (slot_tag == WASM_TAG_FLOAT) ftype = 2;
+        /* F62B-019: the per-slot tag wins over the global field-name
+           registry. The registry keys on the FIELD NAME hash alone, so two
+           pack types sharing a name with different types (`tags: Str` on a
+           D1 row vs `tags: @[Str]` on the response shape) corrupted each
+           other — a registry hit of Str stringified the list pointer. The
+           registry survives only for slots whose tag is INT(0), which is
+           indistinguishable from "untagged". */
+        int64_t slot_tag = pack[1 + i * 3 + 1];
+        int64_t ftype;
+        if (slot_tag == WASM_TAG_STR) ftype = 3;
+        else if (slot_tag == WASM_TAG_BOOL) ftype = 4;
+        else if (slot_tag == WASM_TAG_FLOAT) ftype = 2;
+        else if (slot_tag == WASM_TAG_PACK || slot_tag == 5 /* LIST */
+                 || slot_tag == 6 /* CLOSURE */) {
+            ftype = 0; /* structural walk */
+        } else {
+            ftype = taida_lookup_field_type(field_hash, 0);
+            /* `_wasm_lookup_field_type` returns -1 (not 0) for unregistered
+               hashes; normalise to 0 so downstream "unset" checks work. */
+            if (ftype < 0) ftype = 0;
         }
         /* Lax payload force (see sibling comment above). Applies to
            `__value` and `__default` in Lax packs so both render with
@@ -1381,7 +1436,7 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
         for (int64_t i = 0; i < list_len; i++) {
             if (i > 0) _wc_jb_append_char(jb, ',');
             if (indent > 0) _wc_jb_append_indent(jb, indent, depth + 1);
-            _wc_json_serialize_typed(jb, list[4 + i], indent, depth + 1, 0);
+            _wc_json_serialize_typed(jb, list[4 + i], indent, depth + 1, _wc_elem_hint_from_ekind(_wasm_elem_kind_at(list, i)));
         }
         if (indent > 0 && list_len > 0) _wc_jb_append_indent(jb, indent, depth);
         _wc_jb_append_char(jb, ']');
@@ -1406,7 +1461,7 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
         for (int64_t i = 0; i < list_len; i++) {
             if (i > 0) _wc_jb_append_char(jb, ',');
             if (indent > 0) _wc_jb_append_indent(jb, indent, depth + 1);
-            _wc_json_serialize_typed(jb, list[4 + i], indent, depth + 1, 0);
+            _wc_json_serialize_typed(jb, list[4 + i], indent, depth + 1, _wc_elem_hint_from_ekind(_wasm_elem_kind_at(list, i)));
         }
         if (indent > 0 && list_len > 0) _wc_jb_append_indent(jb, indent, depth);
         _wc_jb_append_char(jb, ']');
@@ -1464,6 +1519,15 @@ static char *_wc_wire_schema_copy(const char *d, int len) {
 }
 
 static int _wc_wire_bytes_len(int64_t value) {
+    /* Real Bytes ([TAIDBYT, len, byte...]) take priority; the string and
+       list arms survive as wire-compat fallbacks for Str bodies and
+       legacy @[Int] payloads. */
+    if (_looks_like_bytes(value)) {
+        int64_t len = ((int64_t *)(intptr_t)value)[1];
+        if (len < 0) return 0;
+        if (len > 0x1000000) return 0x1000000;
+        return (int)len;
+    }
     if (_wc_looks_like_string(value)) return _wf_strlen((const char *)(intptr_t)value);
     if (!_wc_looks_like_list(value)) return 0;
     int64_t *list = (int64_t *)(intptr_t)value;
@@ -1474,6 +1538,9 @@ static int _wc_wire_bytes_len(int64_t value) {
 }
 
 static unsigned char _wc_wire_bytes_at(int64_t value, int idx) {
+    if (_looks_like_bytes(value)) {
+        return (unsigned char)(((int64_t *)(intptr_t)value)[2 + idx] & 0xff);
+    }
     if (_wc_looks_like_string(value)) {
         const unsigned char *s = (const unsigned char *)(intptr_t)value;
         return s ? s[idx] : 0;

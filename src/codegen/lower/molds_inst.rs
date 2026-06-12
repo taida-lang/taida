@@ -110,6 +110,47 @@ impl Lowering {
     }
 
     /// モールド型インスタンス化: `Async[val]()`, `AsyncReject[err]()` etc.
+    /// F62B-020: pick the `>=` runtime entry for an operand pair the same
+    /// way the `<` / `>` operator lowering dispatches kinds.
+    fn ordering_gte_runtime_fn(&self, lhs: &Expr, rhs: &Expr) -> &'static str {
+        if self.expr_is_string_full(lhs) || self.expr_is_string_full(rhs) {
+            "taida_str_gte"
+        } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+            "taida_float_gte"
+        } else {
+            "taida_int_gte"
+        }
+    }
+
+    /// F62B-021: lower a host-call Out slot into its schema operand. A
+    /// concrete type resolves to a constant descriptor string; a type
+    /// parameter of the enclosing schema-passing generic reads the hidden
+    /// `__taida_schema_{T}` parameter instead (dictionary passing).
+    fn lower_out_schema_operand(
+        &mut self,
+        func: &mut IrFunction,
+        out: &Expr,
+    ) -> Result<IrVar, LowerError> {
+        if let Expr::Ident(name, span) = out
+            && let Some(hidden) = self.current_schema_params.get(name).cloned()
+        {
+            // F62B-038 #10: synthetic node — do not reuse the Out slot's
+            // node id in the node-id-keyed TypedExprTable.
+            return self.lower_expr(
+                func,
+                &Expr::Ident(
+                    hidden,
+                    span.clone()
+                        .with_node_id(crate::parser::SYNTHETIC_NODE_ID_BASE),
+                ),
+            );
+        }
+        let desc = self.resolve_json_schema_descriptor(out)?;
+        let var = func.alloc_var();
+        func.push(IrInst::ConstStr(var, desc));
+        Ok(var)
+    }
+
     pub(crate) fn lower_mold_inst(
         &mut self,
         func: &mut IrFunction,
@@ -224,6 +265,118 @@ impl Lowering {
                     result,
                     runtime_fn.to_string(),
                     vec![s, old, new_str],
+                ));
+                Ok(result)
+            }
+            // F62B-020: ordering comparison molds. `a <= b` ≡ `b >= a`, so
+            // both lower onto the existing gte runtime family with swapped
+            // operands (Float NaN semantics included), kind-dispatched the
+            // same way the `<` / `>` operators are.
+            "Lte" => {
+                if type_args.len() < 2 {
+                    return Err(LowerError {
+                        message: "Lte requires 2 arguments: Lte[a, b]()".into(),
+                    });
+                }
+                let a = self.lower_expr(func, &type_args[0])?;
+                let b = self.lower_expr(func, &type_args[1])?;
+                let runtime_fn = self.ordering_gte_runtime_fn(&type_args[0], &type_args[1]);
+                let result = func.alloc_var();
+                func.push(IrInst::Call(result, runtime_fn.to_string(), vec![b, a]));
+                Ok(result)
+            }
+            "Between" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message: "Between requires 3 arguments: Between[x, lo, hi]()".into(),
+                    });
+                }
+                let x = self.lower_expr(func, &type_args[0])?;
+                let lo = self.lower_expr(func, &type_args[1])?;
+                let hi = self.lower_expr(func, &type_args[2])?;
+                let lo_fn = self.ordering_gte_runtime_fn(&type_args[1], &type_args[0]);
+                let hi_fn = self.ordering_gte_runtime_fn(&type_args[0], &type_args[2]);
+                // lo <= x  ≡  x >= lo
+                let lo_ok = func.alloc_var();
+                func.push(IrInst::Call(lo_ok, lo_fn.to_string(), vec![x, lo]));
+                // x <= hi  ≡  hi >= x
+                let hi_ok = func.alloc_var();
+                func.push(IrInst::Call(hi_ok, hi_fn.to_string(), vec![hi, x]));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_bool_and".to_string(),
+                    vec![lo_ok, hi_ok],
+                ));
+                Ok(result)
+            }
+            // F62B-003: search / replace / pad molds, dispatching to the same
+            // runtime symbols as the string-method forms so the two surfaces
+            // can never disagree. Previously these were "unsupported mold
+            // type" on the C-lowering backends (and an unresolved pack on the
+            // interpreter).
+            "IndexOf" | "LastIndexOf" | "Contains" => {
+                if type_args.len() < 2 {
+                    return Err(LowerError {
+                        message: format!(
+                            "{} requires 2 arguments: {}[str, needle]()",
+                            type_name, type_name
+                        ),
+                    });
+                }
+                let subject = self.lower_expr(func, &type_args[0])?;
+                let needle = self.lower_expr(func, &type_args[1])?;
+                let runtime_fn = match type_name {
+                    "IndexOf" => "taida_polymorphic_index_of",
+                    "LastIndexOf" => "taida_polymorphic_last_index_of",
+                    _ => "taida_polymorphic_contains",
+                };
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    runtime_fn.to_string(),
+                    vec![subject, needle],
+                ));
+                Ok(result)
+            }
+            "ReplaceAll" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message: "ReplaceAll requires 3 arguments: ReplaceAll[str, old, new]()"
+                            .into(),
+                    });
+                }
+                let s = self.lower_expr(func, &type_args[0])?;
+                let old = self.lower_expr(func, &type_args[1])?;
+                let new_str = self.lower_expr(func, &type_args[2])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_str_replace".to_string(),
+                    vec![s, old, new_str],
+                ));
+                Ok(result)
+            }
+            "PadLeft" | "PadRight" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message: format!(
+                            "{} requires 3 arguments: {}[str, len, char]()",
+                            type_name, type_name
+                        ),
+                    });
+                }
+                let s = self.lower_expr(func, &type_args[0])?;
+                let target_len = self.lower_expr(func, &type_args[1])?;
+                let pad_char = self.lower_expr(func, &type_args[2])?;
+                let pad_end_flag = func.alloc_var();
+                let is_end = if type_name == "PadRight" { 1i64 } else { 0i64 };
+                func.push(IrInst::ConstInt(pad_end_flag, is_end));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_str_pad".to_string(),
+                    vec![s, target_len, pad_char, pad_end_flag],
                 ));
                 Ok(result)
             }
@@ -2807,6 +2960,75 @@ impl Lowering {
                 ));
                 Ok(result)
             }
+            "InCage" => {
+                // F62B-024: push one step onto the builder. The step is the
+                // exact `taida_abi_host_step` descriptor `HostStep[...]()`
+                // produces (the per-step wire schema resolves statically
+                // from the args expression, like the direct form).
+                if type_args.len() != 3 {
+                    return Err(LowerError {
+                        message: "InCage requires 3 arguments: InCage[builder, method, args]()"
+                            .into(),
+                    });
+                }
+                let builder = self.lower_expr(func, &type_args[0])?;
+                let method = self.lower_expr(func, &type_args[1])?;
+                let args = self.lower_expr(func, &type_args[2])?;
+                let args_schema_desc = self.resolve_wire_schema_descriptor(&type_args[2])?;
+                let args_schema = func.alloc_var();
+                func.push(IrInst::ConstStr(args_schema, args_schema_desc));
+                let step = func.alloc_var();
+                func.push(IrInst::Call(
+                    step,
+                    "taida_abi_host_step".to_string(),
+                    vec![method, args, args_schema],
+                ));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_cage_builder_push".to_string(),
+                    vec![builder, step],
+                ));
+                Ok(result)
+            }
+            "Uncage" => {
+                // F62B-024: final chain step (arg-less) + fire the host cage.
+                if type_args.len() != 3 {
+                    return Err(LowerError {
+                        message: "Uncage requires 3 arguments: Uncage[builder, method, Out]()"
+                            .into(),
+                    });
+                }
+                let builder = self.lower_expr(func, &type_args[0])?;
+                let method = self.lower_expr(func, &type_args[1])?;
+                // F62B-038 #10: synthetic node — do not reuse the method
+                // argument's node id in the node-id-keyed TypedExprTable.
+                let empty_args_expr = crate::parser::Expr::ListLit(
+                    Vec::new(),
+                    type_args[1]
+                        .span()
+                        .clone()
+                        .with_node_id(crate::parser::SYNTHETIC_NODE_ID_BASE),
+                );
+                let args = self.lower_expr(func, &empty_args_expr)?;
+                let args_schema_desc = self.resolve_wire_schema_descriptor(&empty_args_expr)?;
+                let args_schema = func.alloc_var();
+                func.push(IrInst::ConstStr(args_schema, args_schema_desc));
+                let final_step = func.alloc_var();
+                func.push(IrInst::Call(
+                    final_step,
+                    "taida_abi_host_step".to_string(),
+                    vec![method, args, args_schema],
+                ));
+                let out_schema = self.lower_out_schema_operand(func, &type_args[2])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_cage_builder_fire".to_string(),
+                    vec![builder, final_step, out_schema],
+                ));
+                Ok(result)
+            }
             "HostStep" => {
                 if type_args.len() != 2 {
                     return Err(LowerError {
@@ -2833,9 +3055,7 @@ impl Lowering {
                     });
                 }
                 let steps = self.lower_expr(func, &type_args[0])?;
-                let schema_desc = self.resolve_json_schema_descriptor(&type_args[1])?;
-                let schema = func.alloc_var();
-                func.push(IrInst::ConstStr(schema, schema_desc));
+                let schema = self.lower_out_schema_operand(func, &type_args[1])?;
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
@@ -2845,9 +3065,20 @@ impl Lowering {
                 Ok(result)
             }
             "Cage" => {
+                // F62B-024: 1-arg form opens a CageBuilder chain.
+                if type_args.len() == 1 {
+                    let subject = self.lower_expr(func, &type_args[0])?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_cage_builder_new".to_string(),
+                        vec![subject],
+                    ));
+                    return Ok(result);
+                }
                 if type_args.len() < 2 {
                     return Err(LowerError {
-                        message: "Cage requires 2 type arguments: Cage[subject, runner]".into(),
+                        message: "Cage requires a subject: Cage[subject]() for a builder chain, or Cage[subject, runner]() for a direct call".into(),
                     });
                 }
                 if matches!(&type_args[1], Expr::MoldInst(name, _, _, _) if name == "HostCall") {
@@ -3257,7 +3488,116 @@ impl Lowering {
                     // named fields are rejected because functions have no
                     // named-field ABI.
                     if self.user_funcs.contains(type_name) {
-                        if !fields.is_empty() {
+                        let is_generic = self.generic_fn_type_params.contains_key(type_name);
+                        if is_generic || !fields.is_empty() {
+                            // F62B-021: explicit type arguments —
+                            // `genfn[T1, T2](args)`. The `[]` carries type
+                            // arguments (erased except for schema-passing
+                            // type params, whose resolved schema descriptors
+                            // are appended as hidden string arguments) and
+                            // `()` carries the positional value arguments.
+                            let mut arg_exprs = Vec::with_capacity(fields.len());
+                            let mut all_positional = true;
+                            for field in fields {
+                                let is_positional = field.name.starts_with('_')
+                                    && field.name[1..].chars().all(|c| c.is_ascii_digit());
+                                if !is_positional {
+                                    all_positional = false;
+                                    break;
+                                }
+                                arg_exprs.push(field.value.clone());
+                            }
+                            if all_positional
+                                && let Some(needed) =
+                                    self.generic_schema_params.get(type_name).cloned()
+                            {
+                                let declared = self
+                                    .generic_fn_type_params
+                                    .get(type_name)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                for type_param in needed {
+                                    let Some(idx) =
+                                        declared.iter().position(|n| n == &type_param)
+                                    else {
+                                        continue;
+                                    };
+                                    let Some(type_arg) = type_args.get(idx) else {
+                                        return Err(LowerError {
+                                            message: format!(
+                                                "explicit-type-argument call '{}' is missing the type argument for '{}'",
+                                                type_name, type_param
+                                            ),
+                                        });
+                                    };
+                                    // Forward an enclosing hidden param when
+                                    // the type argument is itself an abstract
+                                    // type parameter (recursive generic call);
+                                    // otherwise resolve the schema now.
+                                    // F62B-038 #10: both branches synthesise a
+                                    // new node — give it a synthetic node id
+                                    // instead of reusing the source type_arg's
+                                    // (TypedExprTable is keyed by node id
+                                    // alone, so a cloned id would resolve to
+                                    // the type argument's recorded type).
+                                    let schema_expr = if let Expr::Ident(arg_name, sp) = type_arg
+                                        && let Some(hidden) =
+                                            self.current_schema_params.get(arg_name)
+                                    {
+                                        Expr::Ident(
+                                            hidden.clone(),
+                                            sp.clone().with_node_id(
+                                                crate::parser::SYNTHETIC_NODE_ID_BASE,
+                                            ),
+                                        )
+                                    } else {
+                                        let desc =
+                                            self.resolve_json_schema_descriptor(type_arg)?;
+                                        Expr::StringLit(
+                                            desc,
+                                            type_arg.span().clone().with_node_id(
+                                                crate::parser::SYNTHETIC_NODE_ID_BASE,
+                                            ),
+                                        )
+                                    };
+                                    arg_exprs.push(schema_expr);
+                                }
+                            }
+                            if all_positional {
+                                // F62B-041 (the lowering twin of the
+                                // interpreter's combined-form guard): for a
+                                // NON-generic function the bracket is the
+                                // legacy positional call (`fn[arg1, arg2]()`),
+                                // so combining it with `()` arguments
+                                // (`fn[1](2)`) is ambiguous. The checker
+                                // rejects this statically; without this guard
+                                // an unchecked build silently dropped the
+                                // bracket values and lowered `fn(2)`.
+                                if !is_generic && !type_args.is_empty() {
+                                    return Err(LowerError {
+                                        message: format!(
+                                            "Non-generic function '{}' cannot take both \
+                                             bracket values and call arguments. \
+                                             Call it as {}(arg1, arg2) or with the \
+                                             positional bracket form {}[arg1, arg2]().",
+                                            type_name, type_name, type_name
+                                        ),
+                                    });
+                                }
+                                let mut callee = Expr::Ident(
+                                    type_name.to_string(),
+                                    crate::lexer::Span::new(0, 0, 0, 0),
+                                );
+                                crate::parser::reassign_expr_node_ids(
+                                    &mut callee,
+                                    // F62B-038 #10: synthetic ids — a fresh
+                                    // allocator restarts at 1 and collides
+                                    // with real parser nodes in the
+                                    // node-id-keyed TypedExprTable.
+                                    &mut crate::parser::NodeIdAllocator::synthetic(),
+                                );
+                                return self.lower_func_call(func, &callee, &arg_exprs);
+                            }
                             return Err(LowerError {
                                 message: format!(
                                     "User-defined function '{}' called via mold syntax \
@@ -3273,7 +3613,10 @@ impl Lowering {
                         );
                         crate::parser::reassign_expr_node_ids(
                             &mut callee,
-                            &mut crate::parser::NodeIdAllocator::new(),
+                            // F62B-038 #10: synthetic ids — a fresh
+                            // allocator restarts at 1 and collides with real
+                            // parser nodes in the node-id-keyed TypedExprTable.
+                            &mut crate::parser::NodeIdAllocator::synthetic(),
                         );
                         return self.lower_func_call(func, &callee, type_args);
                     }
@@ -3380,7 +3723,10 @@ impl Lowering {
                         let mut rewritten = rewrite_expr_ident_aliases(default_expr, &alias_map);
                         crate::parser::reassign_expr_node_ids(
                             &mut rewritten,
-                            &mut crate::parser::NodeIdAllocator::new(),
+                            // F62B-038 #10: synthetic ids — a fresh
+                            // allocator restarts at 1 and collides with real
+                            // parser nodes in the node-id-keyed TypedExprTable.
+                            &mut crate::parser::NodeIdAllocator::synthetic(),
                         );
                         self.lower_expr(func, &rewritten)?
                     } else {
@@ -3421,6 +3767,43 @@ impl Lowering {
                 materialized_fields.push(("__type".to_string(), type_var));
                 materialized_fields.push(("__value".to_string(), filling_var));
                 materialized_fields.push(("filling".to_string(), filling_var));
+
+                // F62B-034: a custom `unmold` hook compiles into a closure
+                // captured over the instance's field values and rides the
+                // pack as `__unmold` (the interpreter's convention), so the
+                // generic unmold can run it dynamically — before this, the
+                // hook never ran natively and `>=>` fell back to the
+                // `__value` (filling) channel.
+                if let Some(unmold_def) = mold_def
+                    .fields
+                    .iter()
+                    .find(|f| f.is_method && f.name == "unmold")
+                    .and_then(|f| f.method_def.clone())
+                {
+                    let data_names: Vec<String> = bind_order.clone();
+                    let capture_prefix =
+                        format!("__moldinst_{}_{}_", type_name, self.lambda_counter);
+                    let capture_names: Vec<String> = data_names
+                        .iter()
+                        .map(|n| format!("{capture_prefix}{n}"))
+                        .collect();
+                    for (name, cap_name) in data_names.iter().zip(capture_names.iter()) {
+                        let v = bound_vars
+                            .get(name)
+                            .copied()
+                            .unwrap_or_else(|| zero_var(func));
+                        func.push(IrInst::DefVar(cap_name.clone(), v));
+                    }
+                    let closure_var = self.lower_type_method_closure(
+                        func,
+                        type_name,
+                        "unmold",
+                        &unmold_def,
+                        &capture_names,
+                        &data_names,
+                    )?;
+                    materialized_fields.push(("__unmold".to_string(), closure_var));
+                }
 
                 for field_def in non_method_fields.iter().filter(|f| f.name != "filling") {
                     if let Some(v) = bound_vars.get(&field_def.name).copied() {
@@ -3481,6 +3864,7 @@ fn rewrite_expr_ident_aliases(
         Expr::IntLit(v, s) => Expr::IntLit(*v, s.clone()),
         Expr::FloatLit(v, s) => Expr::FloatLit(*v, s.clone()),
         Expr::StringLit(v, s) => Expr::StringLit(v.clone(), s.clone()),
+        Expr::Block(stmts, s) => Expr::Block(stmts.clone(), s.clone()),
         Expr::TemplateLit(v, s) => Expr::TemplateLit(v.clone(), s.clone()),
         Expr::BoolLit(v, s) => Expr::BoolLit(*v, s.clone()),
         Expr::Gorilla(s) => Expr::Gorilla(s.clone()),

@@ -175,12 +175,64 @@ impl TypeChecker {
             }
         }
 
+        // F62B-023 (a): push the expected type down into literal trees
+        // before plain inference runs, so empty `@[]` literals in hinted
+        // positions type as the expected list (instead of `@[?]` residue
+        // that fails the binding check and trips [E1529]).
+        self.seed_empty_literal_hints(expr, expected);
+
         let inferred = self.infer_expr_type(expr);
         let hinted = Self::fill_unknowns_from_expected(&inferred, expected);
         if hinted != inferred {
             self.typed_expr_table.record(expr, hinted.clone());
         }
         hinted
+    }
+
+    /// F62B-023 (a): bidirectional hints for empty list literals. Descends
+    /// an expression tree alongside the expected type and records the
+    /// expected list type for every empty `@[]` literal that has one, keyed
+    /// by AST node id. Only literal structure is walked (packs, type
+    /// constructors, lists), so homogeneity checks and the rest of
+    /// inference run unchanged on the single plain pass that follows.
+    pub(super) fn seed_empty_literal_hints(&mut self, expr: &Expr, expected: &Type) {
+        let expected = self.expand_expected_structural(expected);
+        match (expr, &expected) {
+            (Expr::ListLit(items, _), Type::List(elem)) => {
+                if items.is_empty() {
+                    self.empty_literal_hints
+                        .insert(expr.node_id(), Type::List(elem.clone()));
+                } else {
+                    for item in items {
+                        self.seed_empty_literal_hints(item, elem);
+                    }
+                }
+            }
+            (
+                Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _),
+                Type::BuchiPack(expected_fields),
+            ) => {
+                for f in fields {
+                    if let Some((_, expected_ty)) =
+                        expected_fields.iter().find(|(n, _)| n == &f.name)
+                    {
+                        self.seed_empty_literal_hints(&f.value, expected_ty);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Expand a `Type::Named` pack type to its structural form so literal
+    /// hints can descend through it. Non-pack names pass through.
+    fn expand_expected_structural(&self, expected: &Type) -> Type {
+        if let Type::Named(name) = expected
+            && let Some(fields) = self.registry.get_type_fields(name)
+        {
+            return Type::BuchiPack(fields.to_vec());
+        }
+        expected.clone()
     }
 
     fn infer_named_function_with_hint(
@@ -319,13 +371,47 @@ impl TypeChecker {
             Expr::Placeholder(span) => {
                 if !self.in_pipeline {
                     self.errors.push(TypeError {
-                        message: "[E1502] `_` is only valid inside a pipeline placeholder position. \
-                                  Hint: Use `_` in an expression after `=>`, such as `value => f(_)`."
+                        message: "[E1502] `_` is the pipe injection position and is only valid \
+                                  inside a pipeline stage (`value => f(_)`). \
+                                  Hint: For partial application use an empty slot: `f(5, )`."
                             .to_string(),
                         span: span.clone(),
                     });
                 }
-                Type::Unknown
+                // F62B-025 rule 1: `_` is the piped value — carry the previous
+                // stage's result type so argument / operand validation sees it.
+                self.pipeline_placeholder_type
+                    .clone()
+                    .unwrap_or(Type::Unknown)
+            }
+            // F62B-022: expression block (block-bodied lambda body):
+            // let-bindings followed by a result expression, typed in its
+            // own scope; the block's type is the last statement's yield.
+            Expr::Block(stmts, _) => {
+                self.push_scope();
+                let mut block_ty = Type::Unknown;
+                for stmt in stmts {
+                    self.check_statement(stmt);
+                    // Phase-2 review M-1: a tail unmold binding yields the
+                    // BOUND value (the unmolded result), not the source —
+                    // `Lax[n]() >=> x` as the block tail yields `x: Int`,
+                    // not `Lax[Int]`. The bound target was just defined by
+                    // check_statement, so look it up like arm_result_type.
+                    block_ty = match stmt {
+                        Statement::UnmoldForward(u) => {
+                            self.lookup_var(&u.target).unwrap_or(Type::Unknown)
+                        }
+                        Statement::UnmoldBackward(u) => {
+                            self.lookup_var(&u.target).unwrap_or(Type::Unknown)
+                        }
+                        _ => stmt
+                            .yielded_expr()
+                            .map(|e| self.infer_expr_type(e))
+                            .unwrap_or(Type::Unknown),
+                    };
+                }
+                self.pop_scope();
+                block_ty
             }
             Expr::Hole(span) => {
                 self.errors.push(TypeError {
@@ -340,6 +426,25 @@ impl TypeChecker {
             Expr::TypeLiteral(_, _, _) => Type::Str,
 
             Expr::Ident(name, span) => {
+                // Final-review #1 (F62B-021 follow-up): a schema-passing
+                // generic carries hidden schema parameters that only
+                // explicit-type-argument call sites supply — a value
+                // reference (binding, argument, pipeline stage) would call
+                // it without schemas (undefined behavior on the compiled
+                // backends). Direct calls never reach this arm: the
+                // explicit form is a MoldInst and the call path matches the
+                // callee by name.
+                if self.schema_passing_generic_funcs.contains_key(name) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1510] Generic function '{}' passes type parameter(s) into a host-call Out slot \
+                             and cannot be used as a value — call it directly with explicit type arguments: `{}[...](...)`.",
+                            name, name
+                        ),
+                        span: span.clone(),
+                    });
+                    return Type::Unknown;
+                }
                 // Look up variable in scope
                 if let Some(ty) = self.lookup_var(name) {
                     ty
@@ -377,7 +482,13 @@ impl TypeChecker {
 
             Expr::ListLit(items, span) => {
                 if items.is_empty() {
-                    Type::List(Box::new(Type::Unknown))
+                    // F62B-023 (a): an empty literal in a hinted position
+                    // takes the expected list type seeded beforehand.
+                    if let Some(hint) = self.empty_literal_hints.get(&expr.node_id()) {
+                        hint.clone()
+                    } else {
+                        Type::List(Box::new(Type::Unknown))
+                    }
                 } else {
                     let first_type = self.infer_expr_type(&items[0]);
                     // リスト要素の同質性チェック (E0401)
@@ -641,29 +752,17 @@ impl TypeChecker {
             }
 
             Expr::FuncCall(func, args, span) => {
-                // A placeholder-free call that is itself a pipeline stage
-                // receives the piped value as an implicit first argument
-                // at runtime (`data => f()` runs as `f(data)`). Take
-                // (consume) the stage state here so calls nested inside
-                // the arguments don't see it; when the injection applies,
-                // keep the previous stage's result type so arity and
-                // argument-type validation below can cover the injected
-                // value.
-                let pipeline_stage_type = std::mem::take(&mut self.pipeline_stage_injected_type);
-                let injected_first_arg: Option<Type> = if args.iter().any(expr_contains_placeholder)
-                {
-                    None
-                } else {
-                    pipeline_stage_type
-                };
                 // C-5c: Reject old `_` partial application syntax in function call args.
                 // Pipeline context (`data => f(_)`) is allowed — `_` refers to pipe value.
                 if !self.in_pipeline {
                     for arg in args.iter() {
                         if let Expr::Placeholder(ph_span) = arg {
                             self.errors.push(TypeError {
-                                message: "[E1502] Use empty slot syntax `f(5, )` instead of `f(5, _)` for partial application. \
-                                     Hint: Remove the `_` and leave the argument position empty.".to_string(),
+                                message:
+                                    "[E1502] `_` is the pipe injection position and is only valid \
+                                     inside a pipeline stage (`value => f(_)`). \
+                                     Hint: For partial application use an empty slot: `f(5, )`."
+                                        .to_string(),
                                 span: ph_span.clone(),
                             });
                         }
@@ -716,6 +815,27 @@ impl TypeChecker {
                     self.validate_http_serve_protocol_capability(name, args);
 
                     if let Some(fd) = self.generic_func_defs.get(name).cloned() {
+                        // F62B-021: a generic whose body passes a type
+                        // parameter into a host-call Out slot has no schema
+                        // to send unless the call names the types.
+                        if let Some(needed) = self.schema_passing_generic_funcs.get(name) {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1510] Generic function '{}' passes type parameter(s) {} into a host-call Out slot \
+                                     and requires explicit type arguments at every call site: `{}[{}](...)`.",
+                                    name,
+                                    needed.join(", "),
+                                    name,
+                                    fd.type_params
+                                        .iter()
+                                        .map(|tp| tp.name.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                                span: span.clone(),
+                            });
+                            return Type::Unknown;
+                        }
                         let param_patterns: Vec<Type> = fd
                             .params
                             .iter()
@@ -736,25 +856,13 @@ impl TypeChecker {
                             fd.type_params.iter().map(|tp| tp.name.clone()).collect();
                         let mut bindings = HashMap::<String, Type>::new();
 
-                        // POST-STABLE-006: a placeholder/hole-free pipeline
-                        // stage call receives the piped value as an implicit
-                        // first argument, so count it toward the effective
-                        // arity (`data => f(a, b)` runs as `f(data, a, b)`).
-                        let injects_pipe = injected_first_arg.is_some() && hole_count == 0;
-                        let effective_args = args.len() + usize::from(injects_pipe);
-                        if effective_args > fd.params.len() {
-                            let pipe_note = if injects_pipe {
-                                " (the piped value counts as the first argument)"
-                            } else {
-                                ""
-                            };
+                        if args.len() > fd.params.len() {
                             self.errors.push(TypeError {
                                 message: format!(
-                                    "[E1301] Function '{}' takes at most {} argument(s), got {}.{} Hint: Remove extra arguments or update the function signature.",
+                                    "[E1301] Function '{}' takes at most {} argument(s), got {}. Hint: Remove extra arguments or update the function signature.",
                                     name,
                                     fd.params.len(),
-                                    effective_args,
-                                    pipe_note
+                                    args.len()
                                 ),
                                 span: span.clone(),
                             });
@@ -772,41 +880,11 @@ impl TypeChecker {
                             });
                         }
 
-                        // POST-STABLE-006 type-shift follow-up: a placeholder/
-                        // hole-free pipeline stage injects the piped value as
-                        // param 0. Bind it to pattern 0 first (preserving the
-                        // generic binding order: injected, then written) and
-                        // shift the written-arg checks to patterns 1.. so each
-                        // written value is checked against the slot it fills.
-                        let generic_injects = injected_first_arg.is_some() && hole_count == 0;
-                        if generic_injects
-                            && let Some(injected_ty) = &injected_first_arg
-                            && *injected_ty != Type::Unknown
-                            && let Some(pattern) = param_patterns.first()
-                            && !self.bind_generic_type_pattern(
-                                pattern,
-                                injected_ty,
-                                &generic_names,
-                                &mut bindings,
-                            )
-                        {
-                            let expected_ty =
-                                self.substitute_generic_type(pattern, &generic_names, &bindings);
-                            self.errors.push(TypeError {
-                                message: format!(
-                                    "[E1506] Argument 1 of '{}' has type {}, expected {} (the piped value is the first argument). \
-                                     Hint: Pass a value of the correct type, or use an explicit conversion.",
-                                    name, injected_ty, expected_ty
-                                ),
-                                span: span.clone(),
-                            });
-                        }
-                        let written_base = usize::from(generic_injects);
                         for (i, arg) in args.iter().enumerate() {
-                            if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                            if matches!(arg, Expr::Hole(_)) {
                                 continue;
                             }
-                            let Some(pattern) = param_patterns.get(i + written_base) else {
+                            let Some(pattern) = param_patterns.get(i) else {
                                 continue;
                             };
                             let expected_hint =
@@ -833,7 +911,7 @@ impl TypeChecker {
                                     message: format!(
                                         "[E1506] Argument {} of '{}' has type {}, expected {}. \
                                          Hint: Pass a value of the correct type, or use an explicit conversion.",
-                                        i + written_base + 1,
+                                        i + 1,
                                         name,
                                         actual_ty,
                                         expected_ty
@@ -876,34 +954,12 @@ impl TypeChecker {
 
                     // First check func_types (registered function return types)
                     if let Some(ret_ty) = self.func_types.get(name).cloned() {
-                        // POST-STABLE-006 (+ type-shift follow-up): crypto runs
-                        // its own injection-aware arity and argument-type checks
-                        // (`validate_crypto*`), so the general pipeline-injection
-                        // handling below — both the effective-arity count and the
-                        // injected-first-arg type check — excludes it.
-                        let is_crypto = self.crypto_sha256_funcs.contains(name)
-                            || self.crypto_funcs.contains_key(name);
-                        // A placeholder/hole-free pipeline stage injects the
-                        // piped value as param 0, so written args fill slots
-                        // 1.. and the injected value fills slot 0.
-                        let reg_injects =
-                            injected_first_arg.is_some() && hole_count == 0 && !is_crypto;
                         if let Some(expected) = self.func_param_counts.get(name).copied() {
-                            // POST-STABLE-006: count the implicit pipeline first
-                            // argument toward the effective arity, the same way
-                            // `validate_crypto*` already does.
-                            let injects_pipe = reg_injects;
-                            let effective_args = args.len() + usize::from(injects_pipe);
-                            if effective_args > expected {
-                                let pipe_note = if injects_pipe {
-                                    " (the piped value counts as the first argument)"
-                                } else {
-                                    ""
-                                };
+                            if args.len() > expected {
                                 self.errors.push(TypeError {
                                     message: format!(
-                                        "[E1301] Function '{}' takes at most {} argument(s), got {}.{} Hint: Remove extra arguments or update the function signature.",
-                                        name, expected, effective_args, pipe_note
+                                        "[E1301] Function '{}' takes at most {} argument(s), got {}. Hint: Remove extra arguments or update the function signature.",
+                                        name, expected, args.len()
                                     ),
                                     span: span.clone(),
                                 });
@@ -921,42 +977,20 @@ impl TypeChecker {
                             }
                         }
                         if self.crypto_sha256_funcs.contains(name) {
-                            let injected = injected_first_arg.clone();
-                            self.validate_crypto_sha256_call(name, args, span, injected.as_ref());
+                            self.validate_crypto_sha256_call(name, args, span);
                         } else if let Some(kind) = self.crypto_funcs.get(name).copied() {
-                            let injected = injected_first_arg.clone();
-                            self.validate_crypto_call(name, kind, args, span, injected.as_ref());
+                            self.validate_crypto_call(name, kind, args, span);
                         }
                         // E1506: Check argument types against registered parameter types
                         if let Some(param_types) = self.func_param_types.get(name).cloned() {
-                            // POST-STABLE-006 type-shift follow-up: when a
-                            // pipeline injects param 0, validate the injected
-                            // value against param 0 and shift the written-arg
-                            // checks to params 1.. so each written value is
-                            // checked against the slot it actually fills.
-                            if reg_injects
-                                && let Some(injected_ty) = &injected_first_arg
-                                && *injected_ty != Type::Unknown
-                                && let Some(expected_ty) = param_types.first()
-                                && *expected_ty != Type::Unknown
-                                && !self.registry.is_subtype_of(injected_ty, expected_ty)
-                            {
-                                self.errors.push(TypeError {
-                                    message: format!(
-                                        "[E1506] Argument 1 of '{}' has type {}, expected {} (the piped value is the first argument). \
-                                         Hint: Pass a value of the correct type, or use an explicit conversion.",
-                                        name, injected_ty, expected_ty
-                                    ),
-                                    span: span.clone(),
-                                });
-                            }
-                            let written_base = usize::from(reg_injects);
                             for (i, arg) in args.iter().enumerate() {
-                                // Skip holes (partial application) and placeholders
-                                if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                                // Skip holes (partial application); a `_`
+                                // placeholder infers to the piped value's type
+                                // and participates in the checks below.
+                                if matches!(arg, Expr::Hole(_)) {
                                     continue;
                                 }
-                                if let Some(expected_ty) = param_types.get(i + written_base) {
+                                if let Some(expected_ty) = param_types.get(i) {
                                     if *expected_ty == Type::Unknown {
                                         continue;
                                     }
@@ -975,7 +1009,7 @@ impl TypeChecker {
                                             message: format!(
                                                 "[E1506] Argument {} of '{}' has type {}, expected {}. \
                                                  Hint: Add annotations or simplify the function body so inference can resolve the argument type.",
-                                                i + written_base + 1,
+                                                i + 1,
                                                 name,
                                                 actual_ty,
                                                 expected_ty
@@ -989,7 +1023,7 @@ impl TypeChecker {
                                             message: format!(
                                                 "[E1506] Argument {} of '{}' has type {}, expected {}. \
                                                  Hint: Pass a value of the correct type, or use an explicit conversion.",
-                                                i + written_base + 1, name, actual_ty, expected_ty
+                                                i + 1, name, actual_ty, expected_ty
                                             ),
                                             span: span.clone(),
                                         });
@@ -1460,6 +1494,14 @@ impl TypeChecker {
 
             Expr::MethodCall(obj, method, args, span) => {
                 let obj_type = self.infer_expr_type(obj);
+                // Phase-2 review High-2: `.unmold()` is the method spelling
+                // of `>=>` / `<=<` — the bare-source rule applies to it too.
+                // Receivers whose own method tables define `unmold` (Lax,
+                // Async, custom molds, ...) are not definitely-bare and
+                // pass through to normal method resolution.
+                if method == "unmold" && args.is_empty() {
+                    self.reject_bare_unmold_source(obj, &obj_type, span);
+                }
                 // F56: a sealed carrier exposes *no* observable methods — the
                 // interpreter rejects every `.method()` on a `Moltenized`/`Secret`
                 // (see `interpreter/methods.rs`), so reject them at compile time
@@ -1672,17 +1714,32 @@ impl TypeChecker {
                 // known function / type / mold / builtin, we register it as
                 // a local binding carrying the current step's type rather
                 // than reporting `[E1542] Undefined variable`.
+                //
+                // F62B-025: every other stage closes over exactly two rules.
+                // Rule 1 — the stage contains `_` (one at most, E1543): the
+                // piped value is injected at the placeholder; `_` carries the
+                // previous stage's type via `pipeline_placeholder_type`.
+                // Rule 2 — no `_`: the stage is evaluated as written; a
+                // function-typed result receives the piped value (the stage
+                // types as the function's return type), a concrete
+                // non-function result is a pipe into a non-function value
+                // (E1544). The legacy implicit first-argument injection is
+                // gone.
                 let old_in_pipeline = self.in_pipeline;
                 let last_idx = exprs.len().saturating_sub(1);
                 // A fresh scope holds any intermediate bind-and-forward bindings.
                 self.push_scope();
+                let mut bound_names: Vec<String> = Vec::new();
                 let mut result_type = Type::Unknown;
                 for (i, pipe_expr) in exprs.iter().enumerate() {
                     if i > 0 {
                         self.in_pipeline = true;
                     }
-                    if i > 0
-                        && i < last_idx
+                    if i == 0 {
+                        result_type = self.infer_expr_type(pipe_expr);
+                        continue;
+                    }
+                    if i < last_idx
                         && let Expr::Ident(name, _) = pipe_expr
                         && !self.is_pipeline_callable_ident(name)
                     {
@@ -1690,19 +1747,75 @@ impl TypeChecker {
                         // step's type and make `name` visible to later steps.
                         // result_type is unchanged (value passes through).
                         self.define_var(name, result_type.clone());
+                        bound_names.push(name.clone());
                         continue;
                     }
-                    if i > 0 && matches!(pipe_expr, Expr::FuncCall(..)) {
-                        // The runtime hands the piped value to a
-                        // placeholder-free stage call as its implicit
-                        // first argument — pass the previous stage's
-                        // result type to the FuncCall arm (which
-                        // takes/consumes it) so arity and argument-type
-                        // validation can cover the injected value.
-                        self.pipeline_stage_injected_type = Some(result_type.clone());
+                    if !bound_names.is_empty() && expr_references_any_name(pipe_expr, &bound_names)
+                    {
+                        // The stage explicitly consumes a pipeline-scope
+                        // binding — it is evaluated as written, without
+                        // receiving the piped value. A `_` inside such a
+                        // stage has nothing to inject (review C-4): reject
+                        // it here so every backend agrees.
+                        if expr_count_placeholders(pipe_expr) > 0 {
+                            self.errors.push(TypeError {
+                                message: "[E1543] A pipeline stage that references a `=> name` \
+                                          binding is evaluated as written — `_` has no injection \
+                                          value there. Use the bound name instead of `_`."
+                                    .to_string(),
+                                span: pipe_expr.span().clone(),
+                            });
+                        }
+                        result_type = self.infer_expr_type(pipe_expr);
+                        continue;
                     }
-                    result_type = self.infer_expr_type(pipe_expr);
-                    self.pipeline_stage_injected_type = None;
+                    let placeholder_count = expr_count_placeholders(pipe_expr);
+                    if placeholder_count > 1 {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1543] A pipeline stage can contain at most one `_` (found {}). \
+                                 The pipe carries exactly one value. Hint: bind the value first \
+                                 (`x => v => f(v, v)`) to use it more than once, and use empty \
+                                 slots (`f(, _)`) for partial-application holes.",
+                                placeholder_count
+                            ),
+                            span: pipe_expr.span().clone(),
+                        });
+                    }
+                    if placeholder_count >= 1 {
+                        // Rule 1: type `_` as the piped value for this stage.
+                        let saved = self.pipeline_placeholder_type.replace(result_type.clone());
+                        result_type = self.infer_expr_type(pipe_expr);
+                        self.pipeline_placeholder_type = saved;
+                        continue;
+                    }
+                    // Rule 2: the stage is evaluated as written.
+                    let stage_type = self.infer_expr_type(pipe_expr);
+                    result_type = match (&stage_type, pipe_expr) {
+                        (Type::Function(_, ret), _) => (**ret).clone(),
+                        // Divergent stages (`=> ><`, `=> throw ...`) never
+                        // produce a value to apply — keep their type.
+                        (_, Expr::Gorilla(_)) | (_, Expr::Throw(..)) => stage_type,
+                        // Bare identifiers stay permissive: function names
+                        // type as Unknown here, and the runtime applies
+                        // function values / reports E1544 for the rest.
+                        (_, Expr::Ident(..)) => stage_type,
+                        (Type::Unknown | Type::Any, _) => Type::Unknown,
+                        _ => {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1544] Pipeline stage evaluates to a non-function value of type {}. \
+                                     A `_`-free stage is evaluated as written and must produce a \
+                                     function for the piped value. Hint: use `_` to mark the \
+                                     injection position (`x => f(_, a)`), or an empty slot for \
+                                     partial application (`x => f(, a)`).",
+                                    stage_type
+                                ),
+                                span: pipe_expr.span().clone(),
+                            });
+                            Type::Unknown
+                        }
+                    };
                 }
                 self.pop_scope();
                 self.in_pipeline = old_in_pipeline;
@@ -1758,8 +1871,34 @@ impl TypeChecker {
                     });
                 }
                 match name.as_str() {
+                    // Phase-2 review High-1: ordering molds check the same
+                    // operand rule as the `<` / `>` / `>=` operators.
+                    "Lte" => {
+                        if type_args.len() == 2 {
+                            let a = self.infer_expr_type(&type_args[0]);
+                            let b = self.infer_expr_type(&type_args[1]);
+                            self.validate_ordering_mold_pair("Lte", &a, &b, mold_span);
+                        }
+                        Type::Bool
+                    }
+                    "Between" => {
+                        if type_args.len() == 3 {
+                            let x = self.infer_expr_type(&type_args[0]);
+                            let lo = self.infer_expr_type(&type_args[1]);
+                            let hi = self.infer_expr_type(&type_args[2]);
+                            self.validate_ordering_mold_pair("Between", &lo, &x, mold_span);
+                            self.validate_ordering_mold_pair("Between", &x, &hi, mold_span);
+                        }
+                        Type::Bool
+                    }
                     "HostCapability" => self.infer_host_capability_type(type_args, mold_span),
                     "HostStep" => self.infer_host_step_type(type_args, mold_span),
+                    // F62B-024: builder chain — `Cage[subject]()` opens a
+                    // CageBuilder, `InCage[builder, method, args]()` pushes a
+                    // step, `Uncage[builder, method, Out]()` fires the host
+                    // call as Async[Out].
+                    "InCage" => self.infer_in_cage_type(type_args, mold_span),
+                    "Uncage" => self.infer_uncage_type(type_args, mold_span),
                     "HostCall" => {
                         self.validate_host_call_descriptor(type_args, mold_span);
                         self.cage_runner_type(expr)
@@ -1774,6 +1913,18 @@ impl TypeChecker {
                             })
                             .unwrap_or(Type::Unknown)
                     }
+                    // Review N-2 (F62B-009 follow-up): Stat's pack fields are
+                    // part of the documented contract (os.md §1.5) — typing
+                    // them lets `nowMs() - st.modified` infer without an
+                    // explicit annotation.
+                    "Stat" => Type::Generic(
+                        "Lax".to_string(),
+                        vec![Type::BuchiPack(vec![
+                            ("size".to_string(), Type::Int),
+                            ("modified".to_string(), Type::Int),
+                            ("isDir".to_string(), Type::Bool),
+                        ])],
+                    ),
                     // JSON[raw, Schema]() returns Lax[Schema].
                     "JSON" => {
                         // [E1541] An undefined schema name used to slip
@@ -2585,6 +2736,26 @@ impl TypeChecker {
                         };
                         let subject_type = self.infer_expr_type(subject);
 
+                        // F62B-024: the 1-arg form opens a builder chain.
+                        // The subject must be a host capability — the chain
+                        // joins the Host branch at `Uncage`.
+                        if type_args.len() == 1 {
+                            if !Self::is_host_capability_type(&subject_type)
+                                && subject_type != Type::Unknown
+                            {
+                                self.push_cage_error(
+                                    "[E1517]",
+                                    subject.span(),
+                                    format!(
+                                        "[E1517] Cage builder subject must be HostCapability, got {}. \
+                                         Hint: construct the subject with `HostCapability[name, kind]()`.",
+                                        subject_type
+                                    ),
+                                );
+                            }
+                            return Type::Named("CageBuilder".to_string());
+                        }
+
                         let Some(runner_expr) = type_args.get(1) else {
                             self.push_cage_error(
                                 "[E1517]",
@@ -2699,6 +2870,15 @@ impl TypeChecker {
                             // downstream rule (generic-func E1301 / E1506 /
                             // E1505, non-generic E1301 / E1506, function
                             // value E1301 / E1506 / E1505) fires uniformly.
+                            // F62B-021: for GENERIC functions the bracket
+                            // always carries TYPE arguments — both
+                            // `genfn[T1, T2](args)` and the zero-value-arg
+                            // `genfn[T]()`.
+                            if let Some(fd) = self.generic_func_defs.get(name).cloned() {
+                                return self.infer_explicit_generic_call(
+                                    name, &fd, type_args, fields, mold_span,
+                                );
+                            }
                             if !fields.is_empty() {
                                 self.errors.push(TypeError {
                                     message: format!(
@@ -2766,6 +2946,7 @@ impl TypeChecker {
                 // The compile-time guard is the primary defence; every backend
                 // runtime also fails closed (`>=>` / `<=<` throws on a sealed value).
                 self.reject_sealed_carrier_unmold(&inner_type, span);
+                self.reject_bare_unmold_source(inner, &inner_type, span);
                 match &inner_type {
                     Type::Generic(name, args) => {
                         match name.as_str() {
@@ -2905,6 +3086,18 @@ impl TypeChecker {
             return Type::Unknown;
         };
         match last_stmt {
+            // F62B-006: a gorilla arm (`| cond |> ><`) terminates the
+            // program and never produces a value — it must not participate
+            // in arm type unification (guide 07 documents this as the
+            // canonical unreachable-pattern arm). The same goes for a
+            // pipeline that ends in the gorilla literal
+            // (`| cond |> log(...) => ><`).
+            Statement::Expr(Expr::Gorilla(_)) => Type::Unknown,
+            Statement::Expr(Expr::Pipeline(steps, _))
+                if matches!(steps.last(), Some(Expr::Gorilla(_))) =>
+            {
+                Type::Unknown
+            }
             Statement::Expr(e) => self.infer_expr_type(e),
             Statement::Assignment(a) => self.lookup_var(&a.target).unwrap_or(Type::Unknown),
             Statement::UnmoldForward(u) => self.lookup_var(&u.target).unwrap_or(Type::Unknown),

@@ -793,6 +793,18 @@ fn check_mutual_recursion_native_impl(program: &Program, file: &str) -> Vec<Veri
         return Vec::new();
     }
 
+    // F62B-002: tail-only cycles in the mergeable subset are lowered to a
+    // single self-tail-recursive dispatcher by `graph::mutual_tco` — those
+    // run fine on the C-lowering backends and are exempt from the reject.
+    // Overlapping raw cycles are unioned into one dispatcher family
+    // (review C-2), so a raw DFS cycle is exempt when its members are a
+    // subset of any mergeable family.
+    let mergeable_families: Vec<std::collections::HashSet<String>> =
+        crate::graph::mutual_tco::mergeable_tail_cycles(program)
+            .into_iter()
+            .map(|members| members.into_iter().collect())
+            .collect();
+
     let mut findings = Vec::new();
     let mut seen_cycles: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -813,6 +825,14 @@ fn check_mutual_recursion_native_impl(program: &Program, file: &str) -> Vec<Veri
         let mut sorted: Vec<String> = distinct.iter().map(|s| s.to_string()).collect();
         sorted.sort();
         let key = sorted.join("|");
+        if mergeable_families
+            .iter()
+            .any(|family| distinct.iter().all(|m| family.contains(*m)))
+        {
+            // Tail-only mergeable cycle (possibly part of a unioned
+            // family) — handled by the dispatcher merge.
+            continue;
+        }
         if !seen_cycles.insert(key) {
             continue;
         }
@@ -832,11 +852,13 @@ fn check_mutual_recursion_native_impl(program: &Program, file: &str) -> Vec<Veri
 
         let msg = format!(
             "[E0700] Mutual recursion is rejected on Native and wasm targets: {}. \
-             These backends lower mutual cycles to plain call instructions and will \
-             overflow the OS stack at runtime. \
-             Hint: collapse the cycle into a single recursive function and use a \
-             tag / accumulator to switch behaviour, or run the program through the \
-             Interpreter / JS backend (which use a trampoline). See docs/reference/tail_recursion.md.",
+             Only tail-position-only cycles (every cycle call the last operation of a \
+             function body or cond arm, written with full arity) are lowered through \
+             the mutual tail-call dispatcher; this cycle contains a call outside that \
+             subset and would overflow the OS stack at runtime. \
+             Hint: move every mutual call into tail position, or collapse the cycle \
+             into a single recursive function and use a tag / accumulator to switch \
+             behaviour. See docs/reference/tail_recursion.md.",
             path_display.join(" -> ")
         );
 
@@ -1728,6 +1750,7 @@ fn check_stmt_naming(stmt: &Statement, file: &str, findings: &mut Vec<VerifyFind
                 crate::parser::ClassLikeKind::BuchiPack => "Type",
                 crate::parser::ClassLikeKind::Mold { .. } => "Mold",
                 crate::parser::ClassLikeKind::Inheritance { .. } => "Type",
+                crate::parser::ClassLikeKind::Alias { .. } => "Type",
             };
             if !is_excluded_name(&cl.name) && !is_pascal_case(&cl.name) {
                 findings.push(VerifyFinding {

@@ -107,6 +107,14 @@ impl GraphExtractor {
             Expr::Ident(name, span) => {
                 Some(self.add_variable_node(graph, name, span.line, span.column))
             }
+            // F62B-022: block-bodied lambda body — extract each statement's
+            // dataflow; the block itself contributes no node.
+            Expr::Block(stmts, _) => {
+                for stmt in stmts {
+                    self.extract_dataflow_stmt(graph, stmt);
+                }
+                None
+            }
 
             Expr::EnumVariant(enum_name, variant_name, span) => {
                 let id = Graph::make_id(&self.file, span.line, span.column, &NodeKind::Literal);
@@ -815,6 +823,7 @@ impl GraphExtractor {
                     crate::parser::ClassLikeKind::BuchiPack => "BuchiPack",
                     crate::parser::ClassLikeKind::Mold { .. } => "Mold",
                     crate::parser::ClassLikeKind::Inheritance { .. } => "Inheritance",
+                    crate::parser::ClassLikeKind::Alias { .. } => "TypeAlias",
                 };
                 let id =
                     Graph::make_id(&self.file, span.line, span.column, &NodeKind::ClassLikeType);
@@ -838,6 +847,9 @@ impl GraphExtractor {
                 match &cl.kind {
                     crate::parser::ClassLikeKind::BuchiPack => {
                         // 単独定義 — inheritance edge なし
+                    }
+                    crate::parser::ClassLikeKind::Alias { .. } => {
+                        // 型エイリアス — inheritance edge なし
                     }
                     crate::parser::ClassLikeKind::Mold { .. } => {
                         // Mold[T] base node + 単一 ClassLikeInheritance edge

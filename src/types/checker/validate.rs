@@ -359,36 +359,12 @@ impl TypeChecker {
             return false;
         }
 
-        let uninferable: Vec<String> = fd
-            .type_params
-            .iter()
-            .filter(|tp| {
-                !fd.params.iter().any(|param| {
-                    param
-                        .type_annotation
-                        .as_ref()
-                        .is_some_and(|ty| Self::type_expr_mentions_type_param(ty, &tp.name))
-                })
-            })
-            .map(|tp| tp.name.clone())
-            .collect();
-        if uninferable.is_empty() {
-            return true;
-        }
-
-        self.errors.push(TypeError {
-            message: Self::binding_diag(
-                "E1510",
-                format!(
-                    "Generic function '{}' has uninferable type parameter(s): {}",
-                    fd.name,
-                    uninferable.join(", ")
-                ),
-                "In inference-only generic functions, every type parameter must appear in a parameter type annotation.",
-            ),
-            span: fd.span.clone(),
-        });
-        false
+        // F62B-021: a type parameter that appears in no parameter
+        // annotation (e.g. return-position-only, or host-call Out
+        // passthrough) is legal at definition time — explicit-type-argument
+        // calls (`fn[T](args)`) bind it directly. Inference-form calls to
+        // such a function still fail with the call-site [E1510].
+        true
     }
 
     /// Per-symbol argument-shape validator for the generalized
@@ -402,9 +378,7 @@ impl TypeChecker {
         kind: CryptoSym,
         args: &[Expr],
         span: &Span,
-        injected_first_arg: Option<&Type>,
     ) {
-        let pipeline_injects_first_arg = injected_first_arg.is_some();
         let (arity, expected_label): (usize, &str) = match kind {
             // 1 arg: Str | Bytes
             CryptoSym::Hash | CryptoSym::Encode => (1, "Str or Bytes"),
@@ -419,40 +393,23 @@ impl TypeChecker {
         // Reject an arity shortfall outright: crypto builtins have a fixed
         // ABI on every backend, so a missing argument must never reach
         // lowering (the interpreter guards at runtime; native / WASM expect
-        // the full argument list). A placeholder-free pipeline stage call
-        // receives the piped value as an implicit first argument, so count
-        // it as supplied. Hole-bearing calls are partial application and
-        // are slot-checked by the [E1505] pass instead.
-        let effective_args = args.len() + usize::from(pipeline_injects_first_arg);
+        // the full argument list). A `_` placeholder in a pipeline stage
+        // counts as a written argument. Hole-bearing calls are partial
+        // application and are slot-checked by the [E1505] pass instead.
         let has_hole = args.iter().any(|a| matches!(a, Expr::Hole(_)));
-        if effective_args < arity && !has_hole {
+        if args.len() < arity && !has_hole {
             self.errors.push(TypeError {
                 message: format!(
                     "[E1301] Function '{}' expects exactly {} argument(s), got {}. Hint: Pass the missing argument(s); crypto functions have a fixed arity.",
-                    name, arity, effective_args
-                ),
-                span: span.clone(),
-            });
-        }
-        // The excess side: a non-pipeline call with too many arguments is
-        // already rejected by the general per-function arity check, but that
-        // check counts only the written arguments — a pipeline stage call
-        // that looks complete on paper still overflows the fixed ABI once
-        // the injected pipe value is counted (the lowered call would carry
-        // arity+1 values). Reject it here so no backend sees it.
-        if pipeline_injects_first_arg && effective_args > arity && !has_hole {
-            self.errors.push(TypeError {
-                message: format!(
-                    "[E1301] Function '{}' expects exactly {} argument(s), got {} (the piped value counts as the first argument). Hint: Remove the extra argument(s); crypto functions have a fixed arity.",
-                    name, arity, effective_args
+                    name, arity, args.len()
                 ),
                 span: span.clone(),
             });
         }
 
-        // The injected pipe value *is* the first argument — apply the same
-        // per-symbol type rule to it that the written arguments get below.
-        // Unknown stays permissive, matching the written-argument loop.
+        // Per-symbol argument type rule. A `_` placeholder infers to the
+        // piped value's type and participates like a written argument;
+        // Unknown stays permissive.
         let type_ok = |actual_ty: &Type| match kind {
             CryptoSym::Hash | CryptoSym::Encode | CryptoSym::Hmac | CryptoSym::Equals => {
                 Self::is_crypto_hash_input_type(actual_ty)
@@ -460,26 +417,8 @@ impl TypeChecker {
             CryptoSym::Decode => matches!(actual_ty, Type::Str),
             CryptoSym::Random => matches!(actual_ty, Type::Int),
         };
-        if let Some(injected_ty) = injected_first_arg
-            && *injected_ty != Type::Unknown
-            && !type_ok(injected_ty)
-        {
-            self.errors.push(TypeError {
-                message: format!(
-                    "[E1506] Argument 1 of '{}' has type {}, expected {} (the piped value is the first argument).",
-                    name, injected_ty, expected_label
-                ),
-                span: span.clone(),
-            });
-        }
-
-        // Written arguments fill the slots after the injected one, so cap
-        // the walk at the remaining arity and report 1-based positions
-        // shifted by the injection.
-        let written_slots = arity.saturating_sub(usize::from(pipeline_injects_first_arg));
-        let position_base = 1 + usize::from(pipeline_injects_first_arg);
-        for (i, arg) in args.iter().take(written_slots).enumerate() {
-            if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+        for (i, arg) in args.iter().take(arity).enumerate() {
+            if matches!(arg, Expr::Hole(_)) {
                 continue;
             }
             let actual_ty = self.infer_expr_type(arg);
@@ -490,7 +429,7 @@ impl TypeChecker {
                 self.errors.push(TypeError {
                     message: format!(
                         "[E1506] Argument {} of '{}' has type {}, expected {}.",
-                        i + position_base,
+                        i + 1,
                         name,
                         actual_ty,
                         expected_label
@@ -501,20 +440,11 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn validate_crypto_sha256_call(
-        &mut self,
-        name: &str,
-        args: &[Expr],
-        span: &Span,
-        injected_first_arg: Option<&Type>,
-    ) {
-        let pipeline_injects_first_arg = injected_first_arg.is_some();
+    pub(super) fn validate_crypto_sha256_call(&mut self, name: &str, args: &[Expr], span: &Span) {
         // Same fixed-arity rule as `validate_crypto_call`: a missing
-        // argument must never reach lowering. A placeholder-free pipeline
-        // stage call (`data => sha256()`) receives the piped value as its
-        // implicit first argument and is therefore complete — and for the
-        // same reason a stage call with a written argument is one over.
-        if args.is_empty() && !pipeline_injects_first_arg {
+        // argument must never reach lowering. A `_` placeholder in a
+        // pipeline stage counts as the written argument.
+        if args.is_empty() {
             self.errors.push(TypeError {
                 message: format!(
                     "[E1301] Function '{}' expects exactly 1 argument(s), got 0. Hint: Pass the missing argument(s); crypto functions have a fixed arity.",
@@ -523,41 +453,8 @@ impl TypeChecker {
                 span: span.clone(),
             });
         }
-        if pipeline_injects_first_arg
-            && !args.is_empty()
-            && !args.iter().any(|a| matches!(a, Expr::Hole(_)))
-        {
-            self.errors.push(TypeError {
-                message: format!(
-                    "[E1301] Function '{}' expects exactly 1 argument(s), got {} (the piped value counts as the first argument). Hint: Remove the extra argument(s); crypto functions have a fixed arity.",
-                    name,
-                    args.len() + 1
-                ),
-                span: span.clone(),
-            });
-        }
-        // The injected pipe value is the single argument — apply the same
-        // Str | Bytes rule the written argument gets. Unknown stays
-        // permissive, matching the written-argument loop.
-        if let Some(injected_ty) = injected_first_arg
-            && *injected_ty != Type::Unknown
-            && !Self::is_crypto_hash_input_type(injected_ty)
-        {
-            self.errors.push(TypeError {
-                message: format!(
-                    "[E1506] Argument 1 of '{}' has type {}, expected Str or Bytes \
-                     (the piped value is the first argument). \
-                     Hint: use `Bytes[...]()` and unmold the Lax value with `>=>` before hashing raw bytes.",
-                    name, injected_ty
-                ),
-                span: span.clone(),
-            });
-        }
-        // With the injection in place the single slot is taken; without it
-        // the written argument fills slot 1.
-        let written_slots = usize::from(!pipeline_injects_first_arg);
-        for (i, arg) in args.iter().take(written_slots).enumerate() {
-            if matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+        for (i, arg) in args.iter().take(1).enumerate() {
+            if matches!(arg, Expr::Hole(_)) {
                 continue;
             }
             let actual_ty = self.infer_expr_type(arg);

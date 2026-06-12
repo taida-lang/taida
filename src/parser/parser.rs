@@ -36,6 +36,12 @@ pub struct Parser {
     /// assignment so that a multi-line multi-arm guard is rejected with
     /// `[E0303]` instead of greedily swallowing later top-level statements.
     pub(crate) cond_branch_context: CondBranchContext,
+    /// F62B-028 [E1546]: depth of mold bracket-argument lists currently
+    /// being parsed. A bare `Name[args]` (no `()`) is a TYPE REFERENCE
+    /// inside another mold's `[...]` (e.g. the schema slot of
+    /// `JSON[x, Lax[Int]]()`), and a rejected value elsewhere — the `[]`
+    /// puts the value in the mold, the `()` casts it.
+    pub(crate) mold_bracket_args_depth: usize,
 }
 
 impl Parser {
@@ -92,6 +98,7 @@ impl Parser {
             errors: Vec::new(),
             depth: 0,
             cond_branch_context: CondBranchContext::TopLevel,
+            mold_bracket_args_depth: 0,
         }
     }
 
@@ -266,6 +273,10 @@ impl Parser {
     /// languages that must skip to `;` or `}` — here, newline sync is sufficient
     /// because each logical line is a complete statement.
     fn synchronize(&mut self) {
+        // Phase-2 review Low-4: defensive reset — a leaked bracket-args
+        // depth would silently exempt every later bare mold from [E1546]
+        // for the rest of the file.
+        self.mold_bracket_args_depth = 0;
         while !self.is_at_end() {
             if matches!(self.peek_kind(), TokenKind::Newline) {
                 self.advance();
@@ -346,6 +357,21 @@ impl Parser {
                 self.advance(); // consume `=`
 
                 if self.check(&TokenKind::At) {
+                    if matches!(self.peek_at(1).kind, TokenKind::LBracket) {
+                        // List type alias: `Pairs = @[ElemType]`. The rhs is a
+                        // type expression, not fields — `@(` stays the pack
+                        // type-def path below.
+                        let target = self.parse_type_expr()?;
+                        return Ok(Statement::ClassLikeDef(ClassLikeDef {
+                            name,
+                            fields: Vec::new(),
+                            doc_comments,
+                            span: start_span,
+                            kind: ClassLikeKind::Alias { target },
+                            name_args: None,
+                            type_params: Vec::new(),
+                        }));
+                    }
                     // Type definition (E30 Phase 2 Sub-step 2.1: BuchiPack kind の ClassLikeDef)
                     let fields = self.parse_buchi_pack_fields()?;
                     Ok(Statement::ClassLikeDef(ClassLikeDef {
@@ -449,9 +475,27 @@ impl Parser {
 
             // `name: Type <= expr` -> typed assignment
             // `name: Type <= step <= ... <= data` -> typed backward pipeline assignment
+            // `name: Type <=< expr` -> typed unmold backward
             TokenKind::Colon => {
                 self.advance(); // consume `:`
                 let type_ann = self.parse_type_expr()?;
+                if self.check(&TokenKind::UnmoldBackward) {
+                    self.advance(); // consume `<=<`
+                    let source = self.parse_expression()?;
+                    // Single-direction constraint: <=< used, >=> must not follow
+                    if self.check(&TokenKind::UnmoldForward) {
+                        return Err(ParseError {
+                            message: "E0302: 単一方向制約違反 — 一つの文内で >=> と <=< を混在させることはできません".to_string(),
+                            span: self.current_span(),
+                        });
+                    }
+                    return Ok(Statement::UnmoldBackward(UnmoldBackwardStmt {
+                        target: name,
+                        type_annotation: Some(type_ann),
+                        source,
+                        span: start_span,
+                    }));
+                }
                 self.expect(&TokenKind::LtEq)?;
                 // Allow multi-line rhs (parity with the untyped `<=` form).
                 self.skip_newlines();
@@ -570,10 +614,11 @@ impl Parser {
                 self.finish_expr_as_statement(expr, start_span, doc_comments)
             }
 
-            // `expr >=> name` -> unmold forward
+            // `expr >=> name` / `expr >=> name: Type` -> unmold forward
             TokenKind::UnmoldForward => {
                 self.advance(); // consume `>=>`
                 let target = self.expect_ident()?;
+                let type_annotation = self.parse_optional_unmold_target_annotation()?;
                 // Single-direction constraint: >=> used, <=< must not follow
                 if self.check(&TokenKind::UnmoldBackward) {
                     return Err(ParseError {
@@ -584,6 +629,7 @@ impl Parser {
                 Ok(Statement::UnmoldForward(UnmoldForwardStmt {
                     source: Expr::Ident(name, start_span.clone()),
                     target,
+                    type_annotation,
                     span: start_span,
                 }))
             }
@@ -601,6 +647,7 @@ impl Parser {
                 }
                 Ok(Statement::UnmoldBackward(UnmoldBackwardStmt {
                     target: name,
+                    type_annotation: None,
                     source,
                     span: start_span,
                 }))
@@ -1976,13 +2023,39 @@ impl Parser {
                     let span = self.current_span();
                     self.advance();
                     let target = self.expect_ident()?;
+                    let type_annotation = self.parse_optional_unmold_target_annotation()?;
                     return Ok(Statement::UnmoldForward(UnmoldForwardStmt {
                         source: steps.into_iter().next().unwrap(),
                         target,
+                        type_annotation,
                         span,
                     }));
                 }
                 return Ok(Statement::Expr(steps.into_iter().next().unwrap()));
+            }
+
+            // F62B-024: `data => step => ... >=> name` — a pipeline can end
+            // in an unmold binding. The pipeline result (typically a mold
+            // value, e.g. the Async from `Uncage[...]()`) is unmolded into
+            // the target. `=>` / `>=>` are both rightward, so the
+            // single-direction constraints are satisfied by construction.
+            if self.check(&TokenKind::UnmoldForward) {
+                let span = self.current_span();
+                self.advance();
+                let target = self.expect_ident()?;
+                let type_annotation = self.parse_optional_unmold_target_annotation()?;
+                if self.check(&TokenKind::UnmoldBackward) {
+                    return Err(ParseError {
+                        message: "E0302: 単一方向制約違反 — 一つの文内で >=> と <=< を混在させることはできません".to_string(),
+                        span: self.current_span(),
+                    });
+                }
+                return Ok(Statement::UnmoldForward(UnmoldForwardStmt {
+                    source: Expr::Pipeline(steps, start_span),
+                    target,
+                    type_annotation,
+                    span,
+                }));
             }
 
             // Check if the last step is a simple identifier — that's an assignment target
@@ -2009,13 +2082,35 @@ impl Parser {
             let span = self.current_span();
             self.advance(); // consume `>=>`
             let target = self.expect_ident()?;
+            let type_annotation = self.parse_optional_unmold_target_annotation()?;
+            // Phase-2 review Low-1: same E0302 guard as the ident-source
+            // path, so the non-Ident source form reports the
+            // single-direction violation instead of a generic parse error.
+            if self.check(&TokenKind::UnmoldBackward) {
+                return Err(ParseError {
+                    message: "E0302: 単一方向制約違反 — 一つの文内で >=> と <=< を混在させることはできません".to_string(),
+                    span: self.current_span(),
+                });
+            }
             Ok(Statement::UnmoldForward(UnmoldForwardStmt {
                 source: expr,
                 target,
+                type_annotation,
                 span,
             }))
         } else {
             Ok(Statement::Expr(expr))
+        }
+    }
+
+    /// Optional `: Type` after an unmold-forward target (`expr >=> name: Type`).
+    /// Symmetric with the typed backward form `name: Type <=< expr`.
+    fn parse_optional_unmold_target_annotation(&mut self) -> Result<Option<TypeExpr>, ParseError> {
+        if self.check(&TokenKind::Colon) {
+            self.advance(); // consume `:`
+            Ok(Some(self.parse_type_expr()?))
+        } else {
+            Ok(None)
         }
     }
 

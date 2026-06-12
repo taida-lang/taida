@@ -1503,36 +1503,13 @@ static int _wi_utf8_decode_one(const unsigned char *buf, int len, int *consumed,
     return 0;
 }
 
-int64_t taida_utf8_encode_mold(int64_t value) {
-    const char *s = (const char *)(intptr_t)value;
-    if (!s || !_wi_looks_like_string(value)) {
-        return taida_lax_empty(taida_bytes_default_value());
-    }
-    int slen = _wi_strlen(s);
-    int64_t out = taida_bytes_from_raw((int64_t)(intptr_t)s, (int64_t)slen);
-    return taida_lax_new(out, taida_bytes_default_value());
-}
+/* taida_utf8_encode_mold moved to runtime_core_wasm/02_containers.inc.c:
+   Bytes use the shared TAIDBYT layout, so the constructor is core-safe and
+   the mold is available on every WASM profile. */
 
-int64_t taida_utf8_decode_mold(int64_t value) {
-    if (!_wi_is_bytes(value)) return taida_lax_empty(taida_str_alloc(0));
-    int64_t *bytes = (int64_t *)(intptr_t)value;
-    int64_t len = bytes[1];
-    unsigned char *raw = (unsigned char *)_wasm_str_alloc((unsigned int)len);
-    for (int64_t i = 0; i < len; i++) raw[i] = (unsigned char)bytes[2 + i];
-    int pos = 0;
-    while (pos < (int)len) {
-        int consumed = 0;
-        uint32_t cp = 0;
-        if (!_wi_utf8_decode_one(raw + pos, (int)len - pos, &consumed, &cp)) {
-            return taida_lax_empty(taida_str_alloc(0));
-        }
-        pos += consumed;
-    }
-    char *out = (char *)_wasm_str_alloc((unsigned int)(len + 1));
-    for (int64_t i = 0; i < len; i++) out[i] = (char)raw[i];
-    out[len] = '\0';
-    return taida_lax_new((int64_t)(intptr_t)out, taida_str_alloc(0));
-}
+/* taida_utf8_decode_mold moved to runtime_core_wasm/02_containers.inc.c:
+   it only READS Bytes (shared TAIDBYT layout) and returns Lax[Str], so it
+   is available on every WASM profile. */
 
 int64_t taida_utf8_encode_scalar(int64_t v) {
     /* Encode a single Unicode scalar (codepoint) into a Bytes value. */
@@ -2494,4 +2471,25 @@ int64_t taida_crypto_random_bytes(int64_t n_val) {
         got += want;
     }
     return taida_bytes_from_raw((int64_t)(intptr_t)buf, n_val);
+}
+
+/* ── prelude: nowMs (wasm-wasi / wasm-full) ──────────────────────────────
+ * F62B-014: `nowMs()` used to be rejected on every WASM profile while
+ * prelude.md §11 promised backend-uniform behaviour. Wall clock comes from
+ * the WASI `clock_time_get` import (realtime clock id 0, nanoseconds out),
+ * which Wasmtime-class hosts provide natively and the wasm-edge glue
+ * implements with Date.now(). wasm-min stays rejected (no WASI imports by
+ * profile contract) and is documented as the prelude exception. */
+
+/* clock_time_get: (clock_id, precision, out_ptr<u64 nanoseconds>) -> errno */
+__attribute__((import_module("wasi_snapshot_preview1"), import_name("clock_time_get")))
+extern int32_t __wasi_clock_time_get(int32_t clock_id, int64_t precision, int64_t *out_ns);
+
+int64_t taida_time_now_ms(void) {
+    int64_t ns = 0;
+    /* clock id 0 == CLOCK_REALTIME; 1ms precision hint. */
+    if (__wasi_clock_time_get(0, 1000000LL, &ns) != 0) {
+        return 0;
+    }
+    return ns / 1000000LL;
 }

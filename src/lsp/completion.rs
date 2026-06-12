@@ -101,6 +101,9 @@ fn find_user_mold_detail(
                         fields_str
                     );
                 }
+                crate::parser::ClassLikeKind::Alias { target } => {
+                    return format!("{} = {}", cl.name, super::format::format_type_expr(target));
+                }
                 crate::parser::ClassLikeKind::BuchiPack => {}
             }
         }
@@ -259,6 +262,19 @@ fn partial_source_completions(statements: &[Statement]) -> Vec<CompletionItem> {
                         label: cl.name.clone(),
                         kind: Some(CompletionItemKind::CLASS),
                         detail: Some(format!("mold {}", cl.name)),
+                        documentation: format_doc_comments(&cl.doc_comments),
+                        ..Default::default()
+                    });
+                }
+                crate::parser::ClassLikeKind::Alias { target } => {
+                    items.push(CompletionItem {
+                        label: cl.name.clone(),
+                        kind: Some(CompletionItemKind::STRUCT),
+                        detail: Some(format!(
+                            "{} = {}",
+                            cl.name,
+                            super::format::format_type_expr(target)
+                        )),
                         documentation: format_doc_comments(&cl.doc_comments),
                         ..Default::default()
                     });

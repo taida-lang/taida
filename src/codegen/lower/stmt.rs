@@ -12,6 +12,16 @@ use crate::parser::*;
 
 impl Lowering {
     pub fn lower_program(&mut self, program: &Program) -> Result<IrModule, LowerError> {
+        // F62B-002: merge tail-only mutual-recursion cycles into a single
+        // self-tail-recursive dispatcher (+ thin wrappers) so the existing
+        // self-TCO loop machinery applies. The checker exempts exactly the
+        // cycles this transform handles from the [E0700] native reject
+        // (both sides share `mergeable_tail_cycles`).
+        let merged;
+        let program = {
+            merged = crate::graph::mutual_tco::merge_program(program);
+            &merged
+        };
         if !self.typed_expr_table.is_empty()
             && !self.typed_expr_table.residual_unknown_types().is_empty()
         {
@@ -41,6 +51,17 @@ impl Lowering {
                     self.user_funcs.insert(func_def.name.clone());
                     self.func_param_defs
                         .insert(func_def.name.clone(), func_def.params.clone());
+                    // F62B-021: explicit-type-argument call support.
+                    if !func_def.type_params.is_empty() {
+                        self.generic_fn_type_params.insert(
+                            func_def.name.clone(),
+                            func_def
+                                .type_params
+                                .iter()
+                                .map(|tp| tp.name.clone())
+                                .collect(),
+                        );
+                    }
                     // Track return types for type inference in binary ops
                     if let Some(ref rt) = func_def.return_type {
                         match rt {
@@ -164,6 +185,8 @@ impl Lowering {
                             self.type_method_defs.insert(type_def.name.clone(), methods);
                         }
                     }
+                    // Type aliases are checker-only — no runtime artifact.
+                    crate::parser::ClassLikeKind::Alias { .. } => {}
                     crate::parser::ClassLikeKind::Mold { .. } => {
                         let mold_def = cl;
                         let non_method_field_defs: Vec<crate::parser::FieldDef> = mold_def
@@ -547,6 +570,41 @@ impl Lowering {
 
         self.register_mold_solidify_helpers()?;
 
+        // F62B-038 #11 / F62B-040: schema-passing is transitive over
+        // explicit generic calls (`outer[T] = inner[T](..)`) — the
+        // hidden-schema-param sets are a whole-program fixpoint built from
+        // the same shared closure the checker uses for call-form
+        // enforcement (the two must never disagree). Runs AFTER the import
+        // pass: earlier modules' registrations (this instance lowers
+        // dependencies first and accumulates) plus the alias copies above
+        // seed the closure, so a forwarding generic whose callee is
+        // imported is detected like a local one. The old per-definition
+        // scan missed forwarding-only generics and lowering failed with a
+        // non-diagnostic "Unknown schema type 'T'".
+        {
+            let seed: std::collections::HashMap<String, (Vec<String>, Vec<String>)> = self
+                .generic_schema_params
+                .iter()
+                .filter_map(|(name, schema)| {
+                    self.generic_fn_type_params
+                        .get(name)
+                        .map(|decl| (name.clone(), (decl.clone(), schema.clone())))
+                })
+                .collect();
+            let fd_refs: Vec<&crate::parser::FuncDef> = program
+                .statements
+                .iter()
+                .filter_map(|s| match s {
+                    Statement::FuncDef(fd) => Some(fd),
+                    _ => None,
+                })
+                .collect();
+            self.generic_schema_params
+                .extend(crate::parser::close_schema_passing_type_params(
+                    &fd_refs, &seed,
+                ));
+        }
+
         // Pre-2nd pass: トップレベル変数名と型情報を収集（Native グローバル変数テーブル用）
         for stmt in &program.statements {
             if let Statement::Assignment(assign) = stmt {
@@ -637,7 +695,13 @@ impl Lowering {
         }
 
         // ライブラリモジュール判定（2nd pass の前に実施 — is_library_module フラグが必要）
-        module.is_library = !module.exports.is_empty();
+        // F62B-013: entry として lower する場合は `<<<` export があっても
+        // 実行可能ファイル扱い (_taida_main を生成し top-level 文を実行)。
+        // interpreter のリファレンス挙動 (guide 10_modules「呼び出し方で
+        // 決まる」) と、ランタイムが _taida_main を無条件参照する事実の
+        // 両方に合わせる。dep として import される場合は従来どおり
+        // ライブラリ lower される (別 Lowering インスタンス)。
+        module.is_library = !module.exports.is_empty() && !self.entry_mode;
         self.is_library_module = module.is_library;
 
         // 2nd pass: ユーザー定義関数を IR に変換
@@ -819,7 +883,19 @@ impl Lowering {
     }
 
     pub(super) fn lower_func_def(&mut self, func_def: &FuncDef) -> Result<IrFunction, LowerError> {
-        let params: Vec<String> = func_def.params.iter().map(|p| p.name.clone()).collect();
+        let mut params: Vec<String> = func_def.params.iter().map(|p| p.name.clone()).collect();
+        // F62B-021: a schema-passing generic gains hidden string parameters
+        // carrying the host-call Out schema descriptors. Call sites with
+        // explicit type arguments append the resolved descriptors; the
+        // body's HostCall / Uncage lowering reads them back by name.
+        let prev_schema_params = std::mem::take(&mut self.current_schema_params);
+        if let Some(needed) = self.generic_schema_params.get(&func_def.name).cloned() {
+            for type_param in needed {
+                let hidden = format!("__taida_schema_{type_param}");
+                params.push(hidden.clone());
+                self.current_schema_params.insert(type_param, hidden);
+            }
+        }
         let parent_scope_vars = self.collect_nested_scope_vars(params.clone(), &func_def.body);
 
         let mangled = self.resolve_user_func_symbol(&func_def.name);
@@ -1000,8 +1076,7 @@ impl Lowering {
                     self.lambda_funcs.push(inner_ir);
                 } else {
                     // キャプチャあり: クロージャとして生成
-                    let lambda_name = format!("_taida_lambda_{}", self.lambda_counter);
-                    self.lambda_counter += 1;
+                    let lambda_name = self.next_lambda_symbol("lambda");
 
                     // lambda_vars と closure_vars に登録
                     self.lambda_vars
@@ -1195,6 +1270,7 @@ impl Lowering {
         }
 
         // Restore net builtin shadow set to pre-function state
+        self.current_schema_params = prev_schema_params;
         self.shadowed_net_builtins = prev_shadowed_net;
         // NB-14: Restore param_tag_vars to pre-function state
         self.param_tag_vars = prev_param_tag_vars;
@@ -2034,8 +2110,10 @@ impl Lowering {
         subsequent_stmts: &[&Statement],
     ) -> Result<(), LowerError> {
         // 後続文を別関数に抽出（setjmp は呼び出し元の C 関数内で行う）
-        let try_func_name = format!("_taida_try_{}", self.lambda_counter);
-        self.lambda_counter += 1;
+        // F62B-018: module-keyed like every synthetic symbol — per-module
+        // counters made two modules' error-ceiling bodies collide in the
+        // wasm merge, silently swapping one handler's body for another's.
+        let try_func_name = self.next_lambda_symbol("try");
 
         // Collect variables from parent scope that _taida_try_N needs access to.
         // This includes function parameters and any DefVar'd variables before the ErrorCeiling.
@@ -2257,7 +2335,9 @@ impl Lowering {
             Statement::Assignment(assign) => {
                 // ラムダが変数に代入される場合、マッピングを記録
                 if let Expr::Lambda(params, body, _) = &assign.value {
-                    let next_lambda_name = format!("_taida_lambda_{}", self.lambda_counter);
+                    // Must mirror the name `lower_lambda` will allocate for
+                    // this counter value (peek, no increment).
+                    let next_lambda_name = self.peek_lambda_symbol("lambda");
                     let param_names: std::collections::HashSet<&str> =
                         params.iter().map(|p| p.name.as_str()).collect();
                     let free_vars = self.collect_free_vars(body, &param_names);
@@ -2416,6 +2496,8 @@ impl Lowering {
                     }
                     Ok(())
                 }
+                // Type aliases are checker-only — no runtime artifact.
+                crate::parser::ClassLikeKind::Alias { .. } => Ok(()),
                 crate::parser::ClassLikeKind::Mold { .. } => {
                     let mold_def = cl;
                     let non_method_field_defs: Vec<crate::parser::FieldDef> = mold_def
@@ -2718,8 +2800,7 @@ impl Lowering {
                     self.lambda_funcs.push(ir);
                 } else {
                     // キャプチャあり: クロージャとして生成
-                    let lambda_name = format!("_taida_lambda_{}", self.lambda_counter);
-                    self.lambda_counter += 1;
+                    let lambda_name = self.next_lambda_symbol("lambda");
 
                     self.lambda_vars
                         .insert(fd.name.clone(), lambda_name.clone());
@@ -2870,6 +2951,31 @@ impl Lowering {
             Expr::BinaryOp(lhs, _, rhs, _) => {
                 self.collect_free_vars_inner(lhs, bound, free, seen);
                 self.collect_free_vars_inner(rhs, bound, free, seen);
+            }
+            // F62B-022: block-bodied lambda body — block-local bindings
+            // shadow as they are introduced, exactly like a function body.
+            Expr::Block(stmts, _) => {
+                let mut block_bound = bound.clone();
+                for stmt in stmts {
+                    match stmt {
+                        Statement::Expr(e) => {
+                            self.collect_free_vars_inner(e, &block_bound, free, seen)
+                        }
+                        Statement::Assignment(a) => {
+                            self.collect_free_vars_inner(&a.value, &block_bound, free, seen);
+                            block_bound.insert(a.target.as_str());
+                        }
+                        Statement::UnmoldForward(u) => {
+                            self.collect_free_vars_inner(&u.source, &block_bound, free, seen);
+                            block_bound.insert(u.target.as_str());
+                        }
+                        Statement::UnmoldBackward(u) => {
+                            self.collect_free_vars_inner(&u.source, &block_bound, free, seen);
+                            block_bound.insert(u.target.as_str());
+                        }
+                        _ => {}
+                    }
+                }
             }
             Expr::UnaryOp(_, operand, _) => {
                 self.collect_free_vars_inner(operand, bound, free, seen);

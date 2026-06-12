@@ -907,7 +907,27 @@ mod tests {
         //   equality widens to, so past-2^53 Int/Float crossings stop
         //   splitting hash buckets the equality merges. -516.
         //   1,325,919 -> 1,325,403.
-        const EXPECTED_TOTAL_LEN: usize = 1_325_403;
+        // 2026-06-12 F62B-017 (core.c): taida_str_lt/gt/gte lexicographic
+        //   ordering trio + prototypes for the < / > / >= string arms.
+        // 2026-06-12 F62B-019 (core.c): jsonEncode slot-tag precedence.
+        // 2026-06-12 native HostCall descriptor stubs + session-less cage
+        //   rejection (core.c, before the marker).
+        // 2026-06-12 F62B-026 (core.c): taida_non_mold_unmold_gorilla;
+        //   compat audit narrowed the rule to machinery-less plain packs
+        //   (no __type) — bare values stay identity: +1,360.
+        //   1,331,526 -> 1,332,886.
+        // 2026-06-12 F62B-024 (core.c): CageBuilder chain helpers
+        //   (taida_cage_builder_new/push/fire) next to the host abi:
+        //   +2,813. 1,332,886 -> 1,335,699.
+        // 2026-06-12 F62B-034 (core.c): custom mold `__unmold` hook
+        //   invocation in taida_generic_unmold: +608.
+        //   1,335,699 -> 1,336,307.
+        // 2026-06-12 final-review #2 (core.c): CageBuilder subject PACK
+        //   tag + steps elem tag: +411. 1,336,307 -> 1,336,718.
+        // 2026-06-12 F62B-038 #6 (core.c): cage-builder check is-pack
+        //   guard + detected-type-name report: +524.
+        //   1,336,718 -> 1,337,242.
+        const EXPECTED_TOTAL_LEN: usize = 1_337_242;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1661,7 +1681,18 @@ mod tests {
         //   +317. F1 420,126 -> 420,443.
         // 2026-06-11 numeric fingerprint = f64 image (before the
         //   marker): -516. F1 420,443 -> 419,927.
-        const F1_LEN: usize = 419_927;
+        // 2026-06-12 F62B-017: the taida_str_lt/gt/gte trio + prototypes
+        // land before the marker (F1 419,927 -> 420,640); F2 unchanged.
+        // 2026-06-12 host descriptor stubs land before the marker
+        // (F1 420,640 -> 423,646); F2 unchanged.
+        // F62B-024: CageBuilder chain helpers (before the marker):
+        // 426,011 -> 428,824.
+        // Final-review #2: builder tag fixes (before the marker):
+        // 428,824 -> 429,235.
+        // F62B-038 #6: the cage-builder check gains the is-pack guard +
+        // the detected-type-name report (before the marker): +524.
+        // 429,235 -> 429,759.
+        const F1_LEN: usize = 429_759;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1726,7 +1757,28 @@ mod tests {
             // and the public-shape container display removes the
             // synthetic full-form renderers (-5,273).
             // F2 228,943 -> 225,077.
-            F1_LEN + 225_077,
+            // F62B-019 jsonEncode slot-tag precedence (after the marker):
+            // F2 225,077 -> 225,101.
+            // F62B-030 taida_exit lands next to taida_gorilla (before the
+            // marker): F1 423,646 -> 423,916; F2 unchanged.
+            // F62B-027 stack guard (init + watermark check) lands next to
+            // taida_exit (before the marker): F1 423,916 -> 425,533; F2
+            // unchanged. The sys/resource.h include adds +87 to F1 as well.
+            // F62B-027 follow-up: the guard base becomes thread-local with
+            // lazy per-thread init (before the marker): F1 425,533 -> 426,011.
+            // F62B-026: taida_non_mold_unmold_gorilla + the plain-pack
+            // (no __type) gorilla land next to taida_generic_unmold
+            // (after the marker): +1,360. F2 225,101 -> 226,461.
+            // F62B-024: CageBuilder chain helpers land next to the host
+            // descriptor stubs (before the marker): F1 426,011 -> 428,824;
+            // F2 unchanged.
+            // F62B-034: the custom-mold `__unmold` hook invocation lands in
+            // taida_generic_unmold (after the marker): +608.
+            // F2 226,461 -> 227,069.
+            // Final-review #2: the CageBuilder tag fixes land next to the
+            // host abi (before the marker): F1 428,824 -> 429,235; F2
+            // unchanged.
+            F1_LEN + 227_069,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

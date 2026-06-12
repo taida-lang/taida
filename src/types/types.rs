@@ -253,6 +253,10 @@ pub struct TypeRegistry {
     pub inheritance: HashMap<String, String>,
     /// Error type definitions (inherit from Error)
     pub error_types: HashMap<String, Vec<(String, Type)>>,
+    /// Type aliases: name -> aliased type (`Pairs = @[@(name: Str, value: Str)]`).
+    /// Expanded transparently by `resolve_type`; the alias name never appears
+    /// in resolved types.
+    pub type_aliases: HashMap<String, Type>,
 }
 
 impl TypeRegistry {
@@ -294,6 +298,13 @@ impl TypeRegistry {
     /// Register a type definition.
     pub fn register_type(&mut self, name: &str, fields: Vec<(String, Type)>) {
         self.type_defs.insert(name.to_string(), fields);
+    }
+
+    /// Register a type alias. The target is stored pre-resolved, so an alias
+    /// chain (`B = @[A]` where `A` is itself an alias) expands at the point
+    /// the later alias is registered, not at every use.
+    pub fn register_type_alias(&mut self, name: &str, target: Type) {
+        self.type_aliases.insert(name.to_string(), target);
     }
 
     /// Register an enum definition.
@@ -563,7 +574,9 @@ impl TypeRegistry {
                 "JSON" => Type::Json,
                 "Molten" => Type::Molten,
                 other => {
-                    if self.is_error_type(other) {
+                    if let Some(aliased) = self.type_aliases.get(other) {
+                        aliased.clone()
+                    } else if self.is_error_type(other) {
                         Type::Error(other.to_string())
                     } else {
                         Type::Named(other.to_string())

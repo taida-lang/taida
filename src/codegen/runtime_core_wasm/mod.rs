@@ -241,7 +241,39 @@ mod tests {
         //   484,166 -> 484,517.
         // 2026-06-11 numeric fingerprint = f64 image
         //   (01_core.inc.c) — see the native twin. 484,517 -> 483,936.
-        const EXPECTED_TOTAL_LEN: usize = 483_936;
+        // 2026-06-12 F62B-012 Bytes layout unification (01_core /
+        //   04_json_async): taida_collection_get / taida_polymorphic_length
+        //   / _wasm_stdout_display_string gain the native-mirror Bytes
+        //   branches, and the JSON wire encode/decode helpers
+        //   (_wc_wire_bytes_len / _wc_wire_bytes_at /
+        //   _wc_json_bytes_from_raw) speak the shared
+        //   [TAIDBYT, len, byte...] layout instead of the list shape the
+        //   ABI helpers used to emit. 483,936 -> 486,300.
+        // 2026-06-12 F62B-015 wasm JSON schema validation (04_json_async):
+        //   _wc_json_apply_schema rejects present-but-wrong-kind values
+        //   like the interpreter's json_to_typed_value_checked (missing /
+        //   null fields keep defaults), and default construction goes
+        //   through the missing-value path. 486,300 -> 487881.
+        // 2026-06-12 F62B-017 string ordering + Chars + Utf8Decode relocation
+        //   (02_containers): taida_str_lt/gt/gte, taida_str_chars, and
+        //   taida_utf8_decode_mold (+ _core_utf8_decode_one) move string
+        //   ordering and Bytes decoding into the all-profile core.
+        // 2026-06-12 Utf8Encode joins the core (02_containers) alongside
+        //   Utf8Decode — the TAIDBYT constructor is core-safe.
+        // 2026-06-12 F62B-019: slot-tag precedence in jsonEncode pack fields,
+        //   kind-aware list element hints, Split elem tag (02/04).
+        // 2026-06-12 F62B-026 (01_core): _wasm_non_mold_unmold_gorilla;
+        //   compat audit narrowed the rule to machinery-less plain packs
+        //   (no __type) — bare values stay identity: +2,011.
+        //   495,406 -> 497,417.
+        // 2026-06-12 F62B-034 (01_core): custom mold `__unmold` hook
+        //   invocation in generic_unmold: +565. 497,417 -> 497,982.
+        // 2026-06-12 F62B-026 follow-up (01_core): the non-mold gorilla
+        //   terminates via __builtin_trap on the edge profile instead of
+        //   importing proc_exit (the helper is reachable from every `>=>`
+        //   lowering, so the hard import broke node instantiation):
+        //   +477. 497,982 -> 498,459.
+        const EXPECTED_TOTAL_LEN: usize = 498_459;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

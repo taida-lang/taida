@@ -34,7 +34,7 @@ result <= Div[10, 2]()
 debug(result.hasValue())
 
 // Test 9: Lax getOrDefault
-Div[10, 0]().getOrDefault(999) >=> fallback
+fallback <= Div[10, 0]().getOrDefault(999)
 debug(fallback)
 
 // Test 10: Lax[value]() constructor

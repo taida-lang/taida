@@ -1170,8 +1170,8 @@ const WASI_EXPECTED_REJECTED: &[&str] = &[
 
 /// Examples where the native backend itself fails.
 const WASI_EXPECTED_NATIVE_FAIL: &[&str] = &[
-    "compile_mutual_recursion",
-    "compile_c12_3_mutual_tail",
+    // F62B-002: compile_mutual_recursion / compile_c12_3_mutual_tail now
+    // compile natively via the tail-only mutual-cycle dispatcher merge.
     "compile_stream",
     "helper_val",
     "module_math",
@@ -1317,11 +1317,20 @@ fn wasm_wasi_parity_allowlist_guard() {
     // Historical target count (WC-4 through C13-1): 71. D28 adds six
     // harness-dependent examples, all intentionally skipped here.
     // F56: +compile_f56_secret_carrier (parity-OK on wasm-wasi) -> 70.
+    // F62: +compile_f62b025_pipe_semantics (parity-OK on wasm-wasi) -> 71.
+    // F62B-002: compile_mutual_recursion + compile_c12_3_mutual_tail leave
+    // the native-fail list (tail-only mutual cycle dispatcher merge) -> 73.
+    // F62B-003: +compile_f62b003_str_molds (search/replace/pad molds) -> 74.
+    // F62B-020: +compile_f62b020_lte_between (ordering molds) -> 75.
+    // F62B-022: +compile_f62b022_lambda_blocks (block-bodied lambdas) -> 76.
+    // F62B-023: +compile_f62b023_typed_unmold (typed unmold bindings) -> 77.
+    // F62B-023(b): +compile_f62b023_type_alias (list type aliases) -> 78.
+    // F62B-023(a): +compile_f62b023_bidi_inference (expected-type hints) -> 79.
     assert_eq!(
         expected_parity_ok,
-        70,
+        79,
         "WW-3: parity-OK count drift — got {} = |fixtures {}| - |skip {}| - |rejected {}| - \
-         |native_fail {}| - |diff {}|. Expected 70. Update this constant deliberately.",
+         |native_fail {}| - |diff {}|. Expected 79. Update this constant deliberately.",
         expected_parity_ok,
         all.len(),
         WASI_SKIP_STEMS.len(),
@@ -1332,11 +1341,13 @@ fn wasm_wasi_parity_allowlist_guard() {
 }
 
 #[test]
-fn wasm_wasi_mutual_recursion_native_fail_allowlist_pins_examples() {
+fn wasm_wasi_mutual_recursion_runs_via_dispatcher_merge() {
+    // F62B-002: tail-only mutual cycles compile via the dispatcher merge —
+    // the fixtures must NOT be in the native-fail allowlist.
     for stem in ["compile_mutual_recursion", "compile_c12_3_mutual_tail"] {
         assert!(
-            WASI_EXPECTED_NATIVE_FAIL.contains(&stem),
-            "wasm-wasi parity policy must keep `{stem}` in the native-fail allowlist"
+            !WASI_EXPECTED_NATIVE_FAIL.contains(&stem),
+            "tail-only mutual recursion must compile; `{stem}` should not be in the native-fail allowlist"
         );
     }
 }
@@ -1469,9 +1480,19 @@ fn wasm_wasi_superset_of_wasm_min() {
     // C12B-034: compile_c12b_034_wasm_nonbool_param added (68 → 69)
     // C13-1: compile_c13_1_tail_bind added (69 → 70)
     // F56: compile_f56_secret_carrier added (68 → 69)
+    // F62B-013/014: entry files with exports now keep _taida_main, and
+    // nowMs links on wasm-wasi (69 → 72)
+    // F62B-025: compile_f62b025_pipe_semantics added (72 → 73)
+    // F62B-002: mutual recursion fixtures compile via dispatcher merge (73 → 75)
+    // F62B-003: compile_f62b003_str_molds added (75 → 76)
+    // F62B-020: compile_f62b020_lte_between added (76 → 77)
+    // F62B-022: compile_f62b022_lambda_blocks added (77 → 78)
+    // F62B-023: compile_f62b023_typed_unmold added (78 → 79)
+    // F62B-023(b): compile_f62b023_type_alias added (79 → 80)
+    // F62B-023(a): compile_f62b023_bidi_inference added (80 → 81)
     assert_eq!(
-        superset_ok, 69,
-        "WW-3: Expected exactly 69 superset-verified examples, got {}. \
+        superset_ok, 81,
+        "WW-3: Expected exactly 81 superset-verified examples, got {}. \
          If superset coverage improved, update the expected count.",
         superset_ok
     );

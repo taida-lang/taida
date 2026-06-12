@@ -146,6 +146,10 @@ pub enum ClassLikeKind {
         parent: String,
         parent_args: Option<Vec<MoldHeaderArg>>,
     },
+    /// 型エイリアス: `Pairs = @[@(name: Str, value: Str)]`。
+    /// 右辺が `@[` で始まる場合のみこの kind になる (`@(` は BuchiPack)。
+    /// checker-only: 注釈位置で展開される。`fields` は常に空。
+    Alias { target: TypeExpr },
 }
 
 impl ClassLikeDef {
@@ -407,18 +411,25 @@ pub struct ExportStmt {
     pub span: Span,
 }
 
-/// Unmold forward: `expr >=> name`
+/// Unmold forward: `expr >=> name` / `expr >=> name: Type`
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnmoldForwardStmt {
     pub source: Expr,
     pub target: String,
+    /// Optional annotation on the unmolded value (`expr >=> rows: PostRows`).
+    /// Checker-only: validated against the unmolded type and used as the
+    /// binding type (sharpens `Unknown` from unresolved cross-module types).
+    pub type_annotation: Option<TypeExpr>,
     pub span: Span,
 }
 
-/// Unmold backward: `name <=< expr`
+/// Unmold backward: `name <=< expr` / `name: Type <=< expr`
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnmoldBackwardStmt {
     pub target: String,
+    /// Optional annotation on the unmolded value (`half: Int <=< expr`).
+    /// Same semantics as [`UnmoldForwardStmt::type_annotation`].
+    pub type_annotation: Option<TypeExpr>,
     pub source: Expr,
     pub span: Span,
 }
@@ -444,6 +455,11 @@ pub enum Expr {
     Placeholder(Span),
     /// Hole: empty slot in function call for partial application `f(5)`
     Hole(Span),
+    /// Expression block: let-bindings followed by a result expression.
+    /// Only constructed as the body of a block-bodied lambda
+    /// (`_ x: Int =` + indented statements); follows the same
+    /// pure-expression discipline as `| |>` arm bodies.
+    Block(Vec<Statement>, Span),
 
     /// Buchi pack literal: `@(field <= value, ...)`
     BuchiPack(Vec<BuchiField>, Span),
@@ -519,7 +535,8 @@ impl Expr {
             | Expr::TypeInst(_, _, span)
             | Expr::EnumVariant(_, _, span)
             | Expr::TypeLiteral(_, _, span)
-            | Expr::Throw(_, span) => span,
+            | Expr::Throw(_, span)
+            | Expr::Block(_, span) => span,
         }
     }
 
@@ -553,7 +570,8 @@ impl Expr {
             | Expr::TypeInst(_, _, span)
             | Expr::EnumVariant(_, _, span)
             | Expr::TypeLiteral(_, _, span)
-            | Expr::Throw(_, span) => span,
+            | Expr::Throw(_, span)
+            | Expr::Block(_, span) => span,
         }
     }
 }
@@ -577,12 +595,31 @@ impl NodeIdAllocator {
         Self { next }
     }
 
+    /// Allocator for compiler-synthesised expression nodes.
+    ///
+    /// Parser-assigned ids start at 1 and grow upward, and
+    /// `TypedExprTable` is keyed by node id alone — a synthetic node
+    /// reusing a parser id (or a cloned source id) would resolve to an
+    /// unrelated source expression's recorded type. Synthetic ids live
+    /// in the top half of the id space so table lookups for them are
+    /// guaranteed misses (synthetic nodes have no checker-recorded
+    /// type), never collisions.
+    pub fn synthetic() -> Self {
+        Self {
+            next: SYNTHETIC_NODE_ID_BASE,
+        }
+    }
+
     pub fn fresh(&mut self) -> usize {
         let id = self.next;
         self.next += 1;
         id
     }
 }
+
+/// First node id of the compiler-synthesised expression id space.
+/// See [`NodeIdAllocator::synthetic`].
+pub const SYNTHETIC_NODE_ID_BASE: usize = usize::MAX / 2;
 
 impl Default for NodeIdAllocator {
     fn default() -> Self {
@@ -645,6 +682,11 @@ pub fn reassign_expr_node_ids(expr: &mut Expr, allocator: &mut NodeIdAllocator) 
         Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
             for field in fields {
                 reassign_expr_node_ids(&mut field.value, allocator);
+            }
+        }
+        Expr::Block(stmts, _) => {
+            for stmt in stmts {
+                reassign_statement_expr_node_ids(stmt, allocator);
             }
         }
         Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
@@ -844,6 +886,626 @@ pub fn expr_contains_placeholder(expr: &Expr) -> bool {
     }
 }
 
+/// Count the pipeline placeholders `_` in an expression tree.
+///
+/// Mirrors [`expr_contains_placeholder`]'s traversal exactly so the
+/// "at most one `_` per pipeline stage" rule (E1543) and the placeholder
+/// rewrite that injects the piped value can never disagree about which
+/// `_` nodes belong to a stage.
+/// F62B-021: scan a generic function body for host-call Out slots that
+/// reference a declared type parameter (`Uncage[b, m, T]()` /
+/// `HostCall[steps, T]()`). Returns the referenced type parameters in
+/// first-appearance order. Shared single definition for the checker
+/// (call-form enforcement) and codegen lowering (hidden schema params) —
+/// the two must never disagree.
+pub fn fn_schema_passing_type_params(fd: &FuncDef) -> Vec<String> {
+    if fd.type_params.is_empty() {
+        return Vec::new();
+    }
+    let params: Vec<String> = fd.type_params.iter().map(|tp| tp.name.clone()).collect();
+    let mut out = Vec::new();
+    for stmt in &fd.body {
+        scan_stmt_schema_params(stmt, &params, &mut out);
+    }
+    out
+}
+
+/// F62B-038 #11 root cause: schema-passing is TRANSITIVE over explicit
+/// generic calls. A generic that forwards its own type parameter into the
+/// type-argument list of a schema-passing generic (`outer[T] = inner[T](..)`)
+/// needs the hidden schema parameter too, even though its body never names
+/// a host-call Out slot directly — without it, native/wasm lowering has no
+/// schema to forward and fails with a non-diagnostic "Unknown schema type".
+///
+/// Computes the per-function schema-param sets for a whole program as the
+/// fixpoint of: direct Out-slot references (`fn_schema_passing_type_params`)
+/// plus parameters forwarded into an already-schema-passing callee's slot.
+/// Shared single definition for the checker (call-form enforcement) and
+/// codegen lowering (hidden schema params) — the two must never disagree.
+///
+/// `seed` carries callables that are already known to be schema-passing
+/// but whose definitions are not in `defs` — imported generics, under the
+/// name the scanned bodies use for them — as
+/// `name -> (declared type params, schema params)`. Forwarding into a
+/// seeded callee is detected exactly like forwarding into a local one.
+pub fn close_schema_passing_type_params(
+    defs: &[&FuncDef],
+    seed: &std::collections::HashMap<String, (Vec<String>, Vec<String>)>,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut declared: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for (name, (decl, schema)) in seed {
+        declared.insert(name.clone(), decl.clone());
+        if !schema.is_empty() {
+            map.insert(name.clone(), schema.clone());
+        }
+    }
+    for fd in defs {
+        if fd.type_params.is_empty() {
+            continue;
+        }
+        declared.insert(
+            fd.name.clone(),
+            fd.type_params.iter().map(|tp| tp.name.clone()).collect(),
+        );
+        let direct = fn_schema_passing_type_params(fd);
+        if !direct.is_empty() {
+            map.insert(fd.name.clone(), direct);
+        }
+    }
+    loop {
+        let mut changed = false;
+        for fd in defs {
+            if fd.type_params.is_empty() {
+                continue;
+            }
+            let params: Vec<String> = fd.type_params.iter().map(|tp| tp.name.clone()).collect();
+            let mut found = map.get(&fd.name).cloned().unwrap_or_default();
+            let before = found.len();
+            for stmt in &fd.body {
+                scan_stmt_schema_forwards(stmt, &params, &declared, &map, &mut found);
+            }
+            if found.len() != before {
+                map.insert(fd.name.clone(), found);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    map
+}
+
+/// Traversal twin of [`scan_stmt_schema_params`] for the transitive rule —
+/// the two must mirror each other's statement coverage exactly.
+fn scan_stmt_schema_forwards(
+    stmt: &Statement,
+    params: &[String],
+    declared: &std::collections::HashMap<String, Vec<String>>,
+    schema_map: &std::collections::HashMap<String, Vec<String>>,
+    out: &mut Vec<String>,
+) {
+    match stmt {
+        Statement::Expr(e) => scan_expr_schema_forwards(e, params, declared, schema_map, out),
+        Statement::Assignment(a) => {
+            scan_expr_schema_forwards(&a.value, params, declared, schema_map, out)
+        }
+        Statement::UnmoldForward(u) => {
+            scan_expr_schema_forwards(&u.source, params, declared, schema_map, out)
+        }
+        Statement::UnmoldBackward(u) => {
+            scan_expr_schema_forwards(&u.source, params, declared, schema_map, out)
+        }
+        Statement::ErrorCeiling(ec) => {
+            for st in &ec.handler_body {
+                scan_stmt_schema_forwards(st, params, declared, schema_map, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Traversal twin of [`scan_expr_schema_params`] for the transitive rule —
+/// the two must mirror each other's expression coverage exactly. The only
+/// semantic difference is the `MoldInst` head: instead of the built-in
+/// `HostCall`/`Uncage` Out slots it inspects calls to user generics that
+/// already carry schema params, and records every enclosing type parameter
+/// forwarded into one of those slots.
+fn scan_expr_schema_forwards(
+    expr: &Expr,
+    params: &[String],
+    declared: &std::collections::HashMap<String, Vec<String>>,
+    schema_map: &std::collections::HashMap<String, Vec<String>>,
+    out: &mut Vec<String>,
+) {
+    match expr {
+        Expr::MoldInst(name, type_args, fields, _) => {
+            if let (Some(callee_schema), Some(callee_declared)) =
+                (schema_map.get(name), declared.get(name))
+            {
+                for schema_param in callee_schema {
+                    if let Some(idx) = callee_declared.iter().position(|n| n == schema_param)
+                        && let Some(Expr::Ident(arg_name, _)) = type_args.get(idx)
+                        && params.iter().any(|p| p == arg_name)
+                        && !out.iter().any(|n| n == arg_name)
+                    {
+                        out.push(arg_name.clone());
+                    }
+                }
+            }
+            for arg in type_args {
+                scan_expr_schema_forwards(arg, params, declared, schema_map, out);
+            }
+            for field in fields {
+                scan_expr_schema_forwards(&field.value, params, declared, schema_map, out);
+            }
+        }
+        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+            for field in fields {
+                scan_expr_schema_forwards(&field.value, params, declared, schema_map, out);
+            }
+        }
+        Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+            for item in items {
+                scan_expr_schema_forwards(item, params, declared, schema_map, out);
+            }
+        }
+        Expr::BinaryOp(lhs, _, rhs, _) => {
+            scan_expr_schema_forwards(lhs, params, declared, schema_map, out);
+            scan_expr_schema_forwards(rhs, params, declared, schema_map, out);
+        }
+        Expr::UnaryOp(_, inner, _)
+        | Expr::Unmold(inner, _)
+        | Expr::Throw(inner, _)
+        | Expr::FieldAccess(inner, _, _)
+        | Expr::Lambda(_, inner, _) => {
+            scan_expr_schema_forwards(inner, params, declared, schema_map, out)
+        }
+        Expr::FuncCall(callee, args, _) => {
+            scan_expr_schema_forwards(callee, params, declared, schema_map, out);
+            for arg in args {
+                scan_expr_schema_forwards(arg, params, declared, schema_map, out);
+            }
+        }
+        Expr::MethodCall(obj, _, args, _) => {
+            scan_expr_schema_forwards(obj, params, declared, schema_map, out);
+            for arg in args {
+                scan_expr_schema_forwards(arg, params, declared, schema_map, out);
+            }
+        }
+        Expr::CondBranch(arms, _) => {
+            for arm in arms {
+                if let Some(cond) = &arm.condition {
+                    scan_expr_schema_forwards(cond, params, declared, schema_map, out);
+                }
+                for st in &arm.body {
+                    scan_stmt_schema_forwards(st, params, declared, schema_map, out);
+                }
+            }
+        }
+        Expr::Block(stmts, _) => {
+            for st in stmts {
+                scan_stmt_schema_forwards(st, params, declared, schema_map, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Final-review #3 (F62B-021 follow-up): a type parameter nested inside a
+/// COMPOSITE host-call Out (`HostCall[steps, @[T]]` / `Uncage[b, m, @[T]]`)
+/// has no hidden-schema representation — only a plain `T` slot does. The
+/// checker rejects such definitions; this returns the offending parameter
+/// names (first-appearance order) so the diagnostic can name them.
+pub fn fn_composite_out_type_params(fd: &FuncDef) -> Vec<String> {
+    if fd.type_params.is_empty() {
+        return Vec::new();
+    }
+    let params: Vec<String> = fd.type_params.iter().map(|tp| tp.name.clone()).collect();
+    let mut out = Vec::new();
+    for stmt in &fd.body {
+        scan_stmt_composite_out(stmt, &params, &mut out);
+    }
+    out
+}
+
+fn scan_stmt_composite_out(stmt: &Statement, params: &[String], out: &mut Vec<String>) {
+    match stmt {
+        Statement::Expr(e) => scan_expr_composite_out(e, params, out),
+        Statement::Assignment(a) => scan_expr_composite_out(&a.value, params, out),
+        Statement::UnmoldForward(u) => scan_expr_composite_out(&u.source, params, out),
+        Statement::UnmoldBackward(u) => scan_expr_composite_out(&u.source, params, out),
+        Statement::ErrorCeiling(ec) => {
+            for st in &ec.handler_body {
+                scan_stmt_composite_out(st, params, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_param_refs(expr: &Expr, params: &[String], out: &mut Vec<String>) {
+    match expr {
+        Expr::Ident(name, _) => {
+            if params.iter().any(|p| p == name) && !out.iter().any(|n| n == name) {
+                out.push(name.clone());
+            }
+        }
+        Expr::ListLit(items, _) => {
+            for item in items {
+                collect_param_refs(item, params, out);
+            }
+        }
+        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+            for f in fields {
+                collect_param_refs(&f.value, params, out);
+            }
+        }
+        Expr::MoldInst(_, args, fields, _) => {
+            for a in args {
+                collect_param_refs(a, params, out);
+            }
+            for f in fields {
+                collect_param_refs(&f.value, params, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scan_expr_composite_out(expr: &Expr, params: &[String], out: &mut Vec<String>) {
+    match expr {
+        Expr::MoldInst(name, type_args, fields, _) => {
+            let schema_slot = match name.as_str() {
+                "HostCall" => type_args.get(1),
+                "Uncage" => type_args.get(2),
+                _ => None,
+            };
+            if let Some(slot) = schema_slot
+                && !matches!(slot, Expr::Ident(_, _))
+            {
+                collect_param_refs(slot, params, out);
+            }
+            for arg in type_args {
+                scan_expr_composite_out(arg, params, out);
+            }
+            for field in fields {
+                scan_expr_composite_out(&field.value, params, out);
+            }
+        }
+        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+            for field in fields {
+                scan_expr_composite_out(&field.value, params, out);
+            }
+        }
+        Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+            for item in items {
+                scan_expr_composite_out(item, params, out);
+            }
+        }
+        Expr::BinaryOp(lhs, _, rhs, _) => {
+            scan_expr_composite_out(lhs, params, out);
+            scan_expr_composite_out(rhs, params, out);
+        }
+        Expr::UnaryOp(_, inner, _)
+        | Expr::Unmold(inner, _)
+        | Expr::Throw(inner, _)
+        | Expr::FieldAccess(inner, _, _)
+        | Expr::Lambda(_, inner, _) => scan_expr_composite_out(inner, params, out),
+        Expr::FuncCall(callee, args, _) => {
+            scan_expr_composite_out(callee, params, out);
+            for arg in args {
+                scan_expr_composite_out(arg, params, out);
+            }
+        }
+        Expr::MethodCall(obj, _, args, _) => {
+            scan_expr_composite_out(obj, params, out);
+            for arg in args {
+                scan_expr_composite_out(arg, params, out);
+            }
+        }
+        Expr::CondBranch(arms, _) => {
+            for arm in arms {
+                if let Some(cond) = &arm.condition {
+                    scan_expr_composite_out(cond, params, out);
+                }
+                for st in &arm.body {
+                    scan_stmt_composite_out(st, params, out);
+                }
+            }
+        }
+        Expr::Block(stmts, _) => {
+            for st in stmts {
+                scan_stmt_composite_out(st, params, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scan_stmt_schema_params(stmt: &Statement, params: &[String], out: &mut Vec<String>) {
+    match stmt {
+        Statement::Expr(e) => scan_expr_schema_params(e, params, out),
+        Statement::Assignment(a) => scan_expr_schema_params(&a.value, params, out),
+        Statement::UnmoldForward(u) => scan_expr_schema_params(&u.source, params, out),
+        Statement::UnmoldBackward(u) => scan_expr_schema_params(&u.source, params, out),
+        Statement::ErrorCeiling(ec) => {
+            for st in &ec.handler_body {
+                scan_stmt_schema_params(st, params, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scan_expr_schema_params(expr: &Expr, params: &[String], out: &mut Vec<String>) {
+    match expr {
+        Expr::MoldInst(name, type_args, fields, _) => {
+            let schema_slot = match name.as_str() {
+                // HostCall[steps, Out] / Uncage[builder, method, Out]
+                "HostCall" => type_args.get(1),
+                "Uncage" => type_args.get(2),
+                _ => None,
+            };
+            if let Some(Expr::Ident(slot_name, _)) = schema_slot
+                && params.iter().any(|p| p == slot_name)
+                && !out.iter().any(|n| n == slot_name)
+            {
+                out.push(slot_name.clone());
+            }
+            for arg in type_args {
+                scan_expr_schema_params(arg, params, out);
+            }
+            for field in fields {
+                scan_expr_schema_params(&field.value, params, out);
+            }
+        }
+        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+            for field in fields {
+                scan_expr_schema_params(&field.value, params, out);
+            }
+        }
+        Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+            for item in items {
+                scan_expr_schema_params(item, params, out);
+            }
+        }
+        Expr::BinaryOp(lhs, _, rhs, _) => {
+            scan_expr_schema_params(lhs, params, out);
+            scan_expr_schema_params(rhs, params, out);
+        }
+        Expr::UnaryOp(_, inner, _)
+        | Expr::Unmold(inner, _)
+        | Expr::Throw(inner, _)
+        | Expr::FieldAccess(inner, _, _)
+        | Expr::Lambda(_, inner, _) => scan_expr_schema_params(inner, params, out),
+        Expr::FuncCall(callee, args, _) => {
+            scan_expr_schema_params(callee, params, out);
+            for arg in args {
+                scan_expr_schema_params(arg, params, out);
+            }
+        }
+        Expr::MethodCall(obj, _, args, _) => {
+            scan_expr_schema_params(obj, params, out);
+            for arg in args {
+                scan_expr_schema_params(arg, params, out);
+            }
+        }
+        Expr::CondBranch(arms, _) => {
+            for arm in arms {
+                if let Some(cond) = &arm.condition {
+                    scan_expr_schema_params(cond, params, out);
+                }
+                for st in &arm.body {
+                    scan_stmt_schema_params(st, params, out);
+                }
+            }
+        }
+        Expr::Block(stmts, _) => {
+            for st in stmts {
+                scan_stmt_schema_params(st, params, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn expr_count_placeholders(expr: &Expr) -> usize {
+    match expr {
+        Expr::Placeholder(_) => 1,
+        Expr::BuchiPack(fields, _) => fields
+            .iter()
+            .map(|field| expr_count_placeholders(&field.value))
+            .sum(),
+        Expr::ListLit(items, _) => items.iter().map(expr_count_placeholders).sum(),
+        Expr::BinaryOp(lhs, _, rhs, _) => {
+            expr_count_placeholders(lhs) + expr_count_placeholders(rhs)
+        }
+        Expr::UnaryOp(_, inner, _) => expr_count_placeholders(inner),
+        Expr::FuncCall(callee, args, _) => {
+            expr_count_placeholders(callee)
+                + args.iter().map(expr_count_placeholders).sum::<usize>()
+        }
+        Expr::MethodCall(obj, _, args, _) => {
+            expr_count_placeholders(obj) + args.iter().map(expr_count_placeholders).sum::<usize>()
+        }
+        Expr::FieldAccess(obj, _, _) => expr_count_placeholders(obj),
+        Expr::CondBranch(arms, _) => arms
+            .iter()
+            .map(|arm| {
+                arm.condition
+                    .as_ref()
+                    .map(expr_count_placeholders)
+                    .unwrap_or(0)
+                    + arm
+                        .body
+                        .iter()
+                        .map(statement_count_placeholders)
+                        .sum::<usize>()
+            })
+            .sum(),
+        Expr::Pipeline(steps, _) => steps.iter().map(expr_count_placeholders).sum(),
+        Expr::MoldInst(_, type_args, fields, _) => {
+            type_args.iter().map(expr_count_placeholders).sum::<usize>()
+                + fields
+                    .iter()
+                    .map(|field| expr_count_placeholders(&field.value))
+                    .sum::<usize>()
+        }
+        Expr::Unmold(inner, _) => expr_count_placeholders(inner),
+        Expr::Lambda(params, body, _) => {
+            params
+                .iter()
+                .map(|param| {
+                    param
+                        .default_value
+                        .as_ref()
+                        .map(expr_count_placeholders)
+                        .unwrap_or(0)
+                })
+                .sum::<usize>()
+                + expr_count_placeholders(body)
+        }
+        Expr::TypeInst(_, fields, _) => fields
+            .iter()
+            .map(|field| expr_count_placeholders(&field.value))
+            .sum(),
+        Expr::Throw(inner, _) => expr_count_placeholders(inner),
+        _ => 0,
+    }
+}
+
+/// Return true if `expr` contains an `Expr::Ident(name, _)` whose name
+/// appears in `bound_names`. Used to decide whether a pipeline stage
+/// explicitly consumes a `=> name` bind-and-forward binding, in which
+/// case the stage is evaluated as written instead of receiving the
+/// piped value. The interpreter, type checker, and code generators all
+/// consume this single definition (review C-6).
+///
+/// Scoping rules (review C-9):
+/// - A lambda whose parameter shadows a searched name hides that name
+///   for the lambda's subtree — `(_ x: Int = x + 1)` does not reference
+///   a pipeline binding `x`.
+/// - Cond-arm bodies and blocks walk every statement form (bindings,
+///   unmolds, nested expressions), not just bare expression statements.
+pub fn expr_references_any_name(expr: &Expr, bound_names: &[String]) -> bool {
+    if bound_names.is_empty() {
+        return false;
+    }
+    match expr {
+        Expr::Ident(n, _) => bound_names.iter().any(|bn| bn == n),
+        Expr::BinaryOp(l, _, r, _) => {
+            expr_references_any_name(l, bound_names) || expr_references_any_name(r, bound_names)
+        }
+        Expr::UnaryOp(_, inner, _) => expr_references_any_name(inner, bound_names),
+        Expr::FuncCall(callee, args, _) => {
+            expr_references_any_name(callee, bound_names)
+                || args
+                    .iter()
+                    .any(|a| expr_references_any_name(a, bound_names))
+        }
+        Expr::MethodCall(obj, _, args, _) => {
+            expr_references_any_name(obj, bound_names)
+                || args
+                    .iter()
+                    .any(|a| expr_references_any_name(a, bound_names))
+        }
+        Expr::FieldAccess(obj, _, _) => expr_references_any_name(obj, bound_names),
+        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => fields
+            .iter()
+            .any(|f| expr_references_any_name(&f.value, bound_names)),
+        Expr::ListLit(items, _) | Expr::Pipeline(items, _) => items
+            .iter()
+            .any(|x| expr_references_any_name(x, bound_names)),
+        Expr::MoldInst(_, type_args, fields, _) => {
+            type_args
+                .iter()
+                .any(|a| expr_references_any_name(a, bound_names))
+                || fields
+                    .iter()
+                    .any(|f| expr_references_any_name(&f.value, bound_names))
+        }
+        Expr::Unmold(inner, _) | Expr::Throw(inner, _) => {
+            expr_references_any_name(inner, bound_names)
+        }
+        Expr::Lambda(params, body, _) => {
+            // Parameter defaults evaluate in the outer scope.
+            if params.iter().any(|p| {
+                p.default_value
+                    .as_ref()
+                    .is_some_and(|d| expr_references_any_name(d, bound_names))
+            }) {
+                return true;
+            }
+            // Params shadow searched names for the body subtree.
+            let visible: Vec<String> = bound_names
+                .iter()
+                .filter(|bn| !params.iter().any(|p| &&p.name == bn))
+                .cloned()
+                .collect();
+            expr_references_any_name(body, &visible)
+        }
+        Expr::Block(stmts, _) => stmts
+            .iter()
+            .any(|st| statement_references_any_name(st, bound_names)),
+        Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
+            arm.condition
+                .as_ref()
+                .is_some_and(|c| expr_references_any_name(c, bound_names))
+                || arm
+                    .body
+                    .iter()
+                    .any(|s| statement_references_any_name(s, bound_names))
+        }),
+        _ => false,
+    }
+}
+
+/// Statement-level companion of [`expr_references_any_name`].
+fn statement_references_any_name(stmt: &Statement, bound_names: &[String]) -> bool {
+    match stmt {
+        Statement::Expr(e) => expr_references_any_name(e, bound_names),
+        Statement::Assignment(a) => expr_references_any_name(&a.value, bound_names),
+        Statement::UnmoldForward(u) => expr_references_any_name(&u.source, bound_names),
+        Statement::UnmoldBackward(u) => expr_references_any_name(&u.source, bound_names),
+        Statement::FuncDef(fd) => fd
+            .body
+            .iter()
+            .any(|s| statement_references_any_name(s, bound_names)),
+        Statement::ErrorCeiling(ec) => ec
+            .handler_body
+            .iter()
+            .any(|s| statement_references_any_name(s, bound_names)),
+        _ => false,
+    }
+}
+
+/// Statement-level companion of [`expr_count_placeholders`].
+///
+/// Review C-8: counts exactly the statement forms the pipeline
+/// placeholder REWRITE reaches (expression statements, assignments,
+/// unmold bindings) so the "stage has one `_`" decision and the
+/// injection can never disagree. A `_` buried in a nested definition or
+/// error-ceiling handler inside a stage is not an injection position —
+/// it is not counted here and surfaces as the standard pipe-external
+/// `_` error at evaluation.
+pub fn statement_count_placeholders(stmt: &Statement) -> usize {
+    match stmt {
+        Statement::Expr(expr) => expr_count_placeholders(expr),
+        Statement::Assignment(assign) => expr_count_placeholders(&assign.value),
+        Statement::UnmoldForward(unmold) => expr_count_placeholders(&unmold.source),
+        Statement::UnmoldBackward(unmold) => expr_count_placeholders(&unmold.source),
+        Statement::FuncDef(_)
+        | Statement::ErrorCeiling(_)
+        | Statement::ClassLikeDef(_)
+        | Statement::EnumDef(_)
+        | Statement::Import(_)
+        | Statement::Export(_) => 0,
+    }
+}
+
 /// Statement-level companion of [`expr_contains_placeholder`].
 pub fn statement_contains_placeholder(stmt: &Statement) -> bool {
     match stmt {
@@ -992,6 +1654,12 @@ fn append_consume_scalar_safe(e: &Expr, pname: &str, fname: &str) -> bool {
 fn expr_mentions_ident(e: &Expr, name: &str) -> bool {
     match e {
         Expr::Ident(n, _) => n == name,
+        // Fail-closed: a block body may bind/use the name through any
+        // statement form — treat any yielded expression mention as a use.
+        Expr::Block(stmts, _) => stmts.iter().any(|st| {
+            st.yielded_expr()
+                .is_none_or(|e| expr_mentions_ident(e, name))
+        }),
         Expr::IntLit(..)
         | Expr::FloatLit(..)
         | Expr::StringLit(..)

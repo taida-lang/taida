@@ -281,7 +281,7 @@ function __taida_os_listdir(path) {
 }
 
 function __taida_os_stat_default() {
-  return Object.freeze({ size: 0, modified: '', isDir: false });
+  return Object.freeze({ size: 0, modified: 0, isDir: false });
 }
 
 function __taida_os_stat_error(kind) {
@@ -297,7 +297,8 @@ function __taida_os_stat(path) {
   if (!__os_fs) return __taida_os_stat_error('unavailable');
   try {
     const stat = __os_fs.statSync(path);
-    const modified = new Date(stat.mtimeMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    // F62B-009: epoch milliseconds (Int), per the documented field type.
+    const modified = Math.trunc(stat.mtimeMs);
     const result = Object.freeze({
       size: stat.size,
       modified: modified,

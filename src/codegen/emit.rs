@@ -149,6 +149,17 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[],
             returns: &[],
         },
+        // F62B-030: exit(code) — terminates the process; the nominal
+        // return slot keeps the uniform value ABI.
+        "taida_exit" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        // F62B-027: per-call stack guard (entry-block injection).
+        "taida_stack_guard" => RuntimeAbi {
+            params: &[],
+            returns: &[],
+        },
         // C18B-005 fix: runtime abort with message. Used by the
         // Ordinal[] lowering to reject non-Enum arguments at run time
         // with the same shape as the interpreter's RuntimeError.
@@ -202,12 +213,14 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         // Note: taida_str_eq/neq は Ptr 比較だが、boxed I64 として渡すため Val として扱う。
         // taida_poly_eq/neq は動的ディスパッチで型不明なため Val として扱う。
         "taida_int_eq" | "taida_int_neq" | "taida_str_eq" | "taida_str_neq" | "taida_poly_eq"
-        | "taida_poly_neq" | "taida_int_lt" | "taida_int_gt" | "taida_int_gte"
-        | "taida_float_eq" | "taida_float_neq" | "taida_float_lt" | "taida_float_gt"
-        | "taida_float_lte" | "taida_float_gte" => RuntimeAbi {
-            params: &[Val, Val],
-            returns: &[Val],
-        },
+        | "taida_poly_neq" | "taida_int_lt" | "taida_int_gt" | "taida_int_gte" | "taida_str_lt"
+        | "taida_str_gt" | "taida_str_gte" | "taida_float_eq" | "taida_float_neq"
+        | "taida_float_lt" | "taida_float_gt" | "taida_float_lte" | "taida_float_gte" => {
+            RuntimeAbi {
+                params: &[Val, Val],
+                returns: &[Val],
+            }
+        }
 
         // ── ブール演算 ──
         "taida_bool_and" | "taida_bool_or" => RuntimeAbi {
@@ -1942,6 +1955,31 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             returns: &[Ptr],
         },
 
+        // ── taida-lang/abi host capability descriptors ──
+        // Constructors build descriptor packs; cage resolves to a
+        // deterministic rejected Async (no host adapter on native yet).
+        "taida_abi_host_capability" | "taida_abi_host_call" | "taida_abi_host_cage" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_abi_host_step" => RuntimeAbi {
+            params: &[Val, Val, Val],
+            returns: &[Val],
+        },
+        // F62B-024: CageBuilder chain helpers.
+        "taida_cage_builder_new" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_cage_builder_push" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_cage_builder_fire" => RuntimeAbi {
+            params: &[Val, Val, Val],
+            returns: &[Val],
+        },
+
         // ── taida-lang/abi response helpers ──
         "taida_abi_response_text" => RuntimeAbi {
             params: &[Ptr],
@@ -2324,6 +2362,10 @@ impl Emitter {
 
     /// 全 IR 関数からランタイム関数呼び出しを収集して宣言
     fn predeclare_all_runtime_funcs(&mut self, ir_module: &IrModule) -> Result<(), EmitError> {
+        // F62B-027: the stack guard is injected into every function's entry
+        // block by the emitter itself (it never appears in the IR), so it
+        // must be declared unconditionally.
+        self.declare_runtime_func("taida_stack_guard", &[], &[])?;
         for ir_func in &ir_module.functions {
             self.predeclare_runtime_funcs_recursive(&ir_func.body)?;
         }
@@ -2670,6 +2712,13 @@ impl Emitter {
                 value_ty: self.abi.value_ty(),
                 abi: self.abi,
             };
+
+            // F62B-027: stack guard at function entry — outside the TCO
+            // loop, so tail-recursive iterations pay nothing. Deep non-tail
+            // recursion exits with a diagnostic instead of a SIGSEGV.
+            if let Some(&guard_ref) = ectx.func_refs.get("taida_stack_guard") {
+                builder.ins().call(guard_ref, &[]);
+            }
 
             if has_tail_call {
                 // TCO: パラメータを Variable に格納し、ループブロックを作成

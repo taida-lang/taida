@@ -179,6 +179,22 @@ function __taida_solidify(value) {
   return value;
 }
 
+function __taida_exit(code) {
+  // F62B-030: exit(code) prelude builtin. Flush is implicit (process.exit
+  // flushes stdout on node when not piped; pending async writes may be
+  // truncated, matching node semantics).
+  const c = typeof code === 'number' ? code : 0;
+  if (typeof process !== 'undefined' && process.exit) process.exit(c);
+  throw new __TaidaError('ExitError', `exit(${c})`, {});
+}
+
+function __taida_pipe_apply(stage, value) {
+  if (typeof stage !== 'function') {
+    throw new __TaidaError('PipeError', '[E1544] Pipeline stage evaluated to a non-function value. A `_`-free stage is evaluated as written and must produce a function for the piped value.', {});
+  }
+  return stage(value);
+}
+
 function __taida_defaultValue(typeName) {
   switch (typeName) {
     case 'Int': return 0;
@@ -2271,6 +2287,20 @@ function Pad(str, len, opts) {
   return str;
 }
 
+// F62B-003: positional mold forms of the string search / replace / pad
+// surface. Delegate to the (Taida-patched) prototype methods so the mold
+// form and the method form can never disagree — arrays get structural
+// equality, strings get the native search, exactly like `s.indexOf(n)`.
+function PadLeft(str, len, ch) { return Pad(str, len, { side: 'start', char: ch }); }
+function PadRight(str, len, ch) { return Pad(str, len, { side: 'end', char: ch }); }
+function IndexOf(subject, needle) { return subject.indexOf(needle); }
+function LastIndexOf(subject, needle) { return subject.lastIndexOf(needle); }
+function Contains(subject, needle) { return subject.contains(needle); }
+function ReplaceAll(str, old, rep) { return Replace(str, old, rep, { all: true }); }
+// F62B-020: ordering comparison molds (operand rules mirror `<` / `>`).
+function Lte(a, b) { return a <= b; }
+function Between(x, lo, hi) { return lo <= x && x <= hi; }
+
 // ── Number Mold types ───────────────────────────────────
 function ToFixed(num, digits) {
   if (typeof num !== 'number') return '0';
@@ -2904,8 +2934,36 @@ function __taida_unmold(v) {
         info.code || 0
       );
     }
+    // Custom mold instance: run its unmold hook — the same path `>=>` /
+    // `<=<` / `.unmold()` take on the interpreter and native backends
+    // (F62B-033: this used to fall through to the identity return below,
+    // yielding the whole mold pack instead of the hook result).
+    if (typeof v.unmold === 'function') return v.unmold();
+    // F62B-026: a machinery-less plain pack (no __type tag, no unmold hook,
+    // no __value channel — e.g. a builder pack or a hand-written literal)
+    // is not a mold. Unmolding it is a program error, not an identity
+    // pass-through. Tagged packs (HashMap / Set / ...) and bare values
+    // (numbers, strings, lists) stay identity: every value mold returns
+    // its bare result and `Mold[...]() >=> x` is the documented binding
+    // idiom — the checker enforces the static rule ([E1545]).
+    if (!Array.isArray(v)
+        && !__taida_isEnumVal(v)
+        && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null)) {
+      // Phase-2 review M-2: the __value channel demands a __type tag —
+      // a plain pack stays a plain pack even with a __value field
+      // (parity with the interpreter / native / wasm rule).
+      if (v.__type === undefined) return __taida_non_mold_unmold_gorilla();
+      if (Object.prototype.hasOwnProperty.call(v, '__value')) return v.__value;
+    }
   }
   return v;
+}
+
+function __taida_non_mold_unmold_gorilla() {
+  console.error('[E1545] Cannot unmold a non-mold value: `>=>` / `<=<` / `.unmold()` take a mold value (Lax, Gorillax, RelaxedGorillax, Result, Async, Stream, or a custom mold).');
+  console.error('><');
+  if (typeof process !== 'undefined') process.exit(1);
+  throw new __NativeError('><');
 }
 
 // Async version of __taida_unmold — handles true Promises (Phase 2 async OS API).

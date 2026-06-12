@@ -1,4 +1,4 @@
-docs/guide/01_types.md:465
+docs/guide/01_types.md:472
 docs/guide/02_strict_typing.md:247
 docs/guide/02_strict_typing.md:63
 docs/guide/04_buchi_pack.md:213
@@ -8,8 +8,8 @@ docs/guide/07_control_flow.md:201
 docs/guide/07_control_flow.md:286
 docs/guide/07_control_flow.md:303
 docs/guide/08_error_handling.md:519
-docs/guide/09_functions.md:195
-docs/guide/09_functions.md:303
+docs/guide/09_functions.md:209
+docs/guide/09_functions.md:334
 docs/guide/12_introspection.md:202
 docs/guide/12_introspection.md:213
 docs/reference/diagnostic_codes.md:50
@@ -37,10 +37,10 @@ docs/reference/documentation_comments.md:86
 docs/reference/documentation_comments.md:96
 docs/reference/naming_conventions.md:351
 docs/reference/naming_conventions.md:86
-docs/reference/operators.md:281
-docs/reference/operators.md:421
-docs/reference/operators.md:612
+docs/reference/operators.md:307
+docs/reference/operators.md:447
+docs/reference/operators.md:681
 docs/reference/tail_recursion.md:172
 docs/reference/tail_recursion.md:207
 docs/reference/tail_recursion.md:225
-docs/reference/tail_recursion.md:438
+docs/reference/tail_recursion.md:456

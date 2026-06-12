@@ -528,6 +528,15 @@ impl Interpreter {
                 } else {
                     Some(std::sync::Arc::new(module_enum_defs.clone()))
                 };
+                // F62B-001: the defining module's full symbol table, shared by
+                // every function of this module. The closure enrichment below
+                // only reaches two levels (the exported function and the
+                // function values inside its closure), so deep call chains used
+                // to degrade to definition-order-truncated closures. Functions
+                // resolved through this table are re-attached to the same table
+                // at call/retarget time (see `attach_module_context`), so any
+                // chain depth keeps resolving module siblings.
+                let module_symbols_arc = std::sync::Arc::new(full_env.clone());
                 // Pass 1: Create enriched versions of all Function values
                 let mut enriched_env: std::collections::HashMap<String, Value> =
                     std::collections::HashMap::new();
@@ -549,6 +558,9 @@ impl Interpreter {
                         }
                         if enriched_fv.module_enum_defs.is_none() {
                             enriched_fv.module_enum_defs = module_ed_arc.clone();
+                        }
+                        if enriched_fv.module_symbols.is_none() {
+                            enriched_fv.module_symbols = Some(module_symbols_arc.clone());
                         }
                         enriched_env.insert(name.clone(), Value::Function(enriched_fv));
                     } else {

@@ -24,6 +24,15 @@ use crate::cli::ingot::find_packages_tdm;
 use crate::cli::way::collect_td_files;
 use crate::{is_help_flag, reject_removed_migration_command};
 
+/// F62B-027: stack reservation for the dedicated evaluation threads
+/// (CLI run + REPL). Each Taida call costs multiple Rust frames and
+/// `MAX_CALL_DEPTH` is 8192; an unoptimised (debug) build's frames run
+/// several times larger than release ones — the CI test archive executes
+/// the debug binary, and 512 MiB overflowed there at depth 8000 — so the
+/// reservation is sized for the debug worst case. This is virtual
+/// address space only: pages are committed as actually used.
+const EVAL_STACK_SIZE: usize = 2 * 1024 * 1024 * 1024;
+
 pub(crate) fn run_source(source: &str, filename: &str, no_check: bool) {
     let (program, parse_errors) = parse(source);
     if !parse_errors.is_empty() {
@@ -65,6 +74,24 @@ pub(crate) fn run_source(source: &str, filename: &str, no_check: bool) {
     // C22-2 / C22B-002: CLI execution uses stream mode so that `stdout(...)`
     // / `debug(...)` flush to the terminal immediately. REPL (`run_repl`)
     // and in-process tests continue to use `Interpreter::new()` (buffered).
+    //
+    // F62B-027: evaluation runs on a dedicated thread with a large stack.
+    // Each Taida call costs multiple Rust frames, so the raised
+    // MAX_CALL_DEPTH (8192, matching the failure depth class of the
+    // compiled backends) does not fit in the default 8 MiB main stack.
+    let filename_owned = filename.to_string();
+    let eval_thread = std::thread::Builder::new()
+        .name("taida-eval".to_string())
+        .stack_size(EVAL_STACK_SIZE)
+        .spawn(move || run_program_on_eval_thread(program, &filename_owned))
+        .expect("spawn taida eval thread");
+    match eval_thread.join() {
+        Ok(()) => {}
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+fn run_program_on_eval_thread(program: taida::parser::Program, filename: &str) {
     let mut interpreter = Interpreter::new_streaming();
     // Set current file for module resolution
     if let Ok(canonical) = fs::canonicalize(filename) {
@@ -81,6 +108,13 @@ pub(crate) fn run_source(source: &str, filename: &str, no_check: bool) {
                 for line in &interpreter.output {
                     println!("{}", line);
                 }
+            }
+            // F62B-032: the gorilla literal is the documented fixed
+            // `exit(1)` immediate termination — the interpreter used to
+            // fall through here, display the gorilla value, and exit 0
+            // (native already exits 1).
+            if matches!(val, taida::interpreter::Value::Gorilla) {
+                std::process::exit(1);
             }
             // If the last value is not Unit and nothing was ever printed
             // via `stdout(...)`, print the value so that `taida expr.td`
@@ -657,6 +691,23 @@ pub(crate) fn run_lsp(args: &[String]) {
 }
 
 pub(crate) fn repl(no_check: bool) {
+    // F62B-027 (review C-1): the REPL evaluates on the same large-stack
+    // thread as `run_source` — MAX_CALL_DEPTH 8192 does not fit the
+    // default 8 MiB main stack, and a REPL input like `deep(8000)` used
+    // to hard-crash with a Rust stack overflow instead of the depth
+    // diagnostic.
+    let handle = std::thread::Builder::new()
+        .name("taida-repl-eval".to_string())
+        .stack_size(EVAL_STACK_SIZE)
+        .spawn(move || repl_loop(no_check))
+        .expect("spawn taida repl thread");
+    match handle.join() {
+        Ok(()) => {}
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+fn repl_loop(no_check: bool) {
     let mut interpreter = Interpreter::new();
 
     loop {

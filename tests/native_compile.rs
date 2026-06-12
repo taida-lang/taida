@@ -158,8 +158,7 @@ stdout(result.toString())
 fn expected_native_reject_examples() -> Vec<&'static str> {
     vec![
         "compile_stream", // Native backend does not provide Stream[T]
-        "compile_mutual_recursion",
-        "compile_c12_3_mutual_tail",
+                          // F62B-002: tail-only mutual cycles compile via the dispatcher merge.
     ]
 }
 
@@ -233,12 +232,14 @@ fn test_native_compile_parity_allowlist_guard() {
 }
 
 #[test]
-fn test_native_mutual_recursion_reject_allowlist_pins_examples() {
+fn test_native_mutual_recursion_runs_via_dispatcher_merge() {
+    // F62B-002: tail-only mutual cycles are merged into a self-tail
+    // dispatcher at lowering — the fixtures must NOT be in the reject list.
     let expected_rejects = expected_native_reject_examples();
     for stem in ["compile_mutual_recursion", "compile_c12_3_mutual_tail"] {
         assert!(
-            expected_rejects.contains(&stem),
-            "native mutual-recursion policy must keep `{stem}` in the documented reject allowlist"
+            !expected_rejects.contains(&stem),
+            "tail-only mutual recursion must compile natively; `{stem}` should not be in the reject allowlist"
         );
     }
 }
@@ -476,9 +477,10 @@ stdout(flat)
 
 #[test]
 fn test_native_unmold_large_int_matches_interpreter() {
+    // The bare-Int unmold form is rejected by [E1545] now; the large-int
+    // payload keeps its pointer-heuristic coverage through a real mold.
     let source = r#"
-x <= 1234567890123
-x >=> y
+Lax[1234567890123]() >=> y
 stdout(y.toString())
 "#;
     assert_native_matches_interpreter(source, "unmold_large_int");
@@ -533,9 +535,10 @@ stdout(flat)
 
 #[test]
 fn test_native_unmold_negative_boundary_matches_interpreter() {
+    // Same [E1545] migration as the large-int case: the boundary value
+    // unmolds through a real mold.
     let source = r#"
-x <= -2147483648
-x >=> y
+Lax[-2147483648]() >=> y
 stdout(y.toString())
 "#;
     assert_native_matches_interpreter(source, "unmold_negative_boundary");

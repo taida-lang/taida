@@ -440,16 +440,48 @@ impl Interpreter {
                     return self.call_function_preserving_signals(&unmold_func, &[]);
                 }
 
-                if let Some((_, inner)) = fields.iter().find(|(k, _)| k == "__value") {
+                // Phase-2 review M-2: the `__value` channel is mold
+                // machinery and demands a `__type` tag — a hand-written
+                // plain pack that happens to carry a `__value` field is
+                // still a plain pack (native/wasm already behaved this
+                // way; the bare fallback here and in JS was the 2-vs-2
+                // divergence).
+                if type_name.is_some()
+                    && let Some((_, inner)) = fields.iter().find(|(k, _)| k == "__value")
+                {
                     Ok(Signal::Value(inner.clone()))
+                } else if type_name.is_none() {
+                    // F62B-026: a machinery-less plain pack (no __type, no
+                    // __unmold hook, no __value channel — e.g. a builder pack
+                    // or a hand-written literal) is not a mold. Unmolding it
+                    // is a program error, not an identity pass-through.
+                    Ok(Self::non_mold_unmold_gorilla())
                 } else {
-                    // No __value field: pass through unchanged
+                    // Tagged pack without an extraction channel (HashMap /
+                    // Set / future internal packs): pass through unchanged.
+                    // Every value mold (Map / Trim / Abs / Join / ...)
+                    // returns its bare result, and `Mold[...]() >=> x` is
+                    // the documented binding idiom — bare values stay
+                    // identity at runtime; the checker enforces the static
+                    // rule ([E1545]) for non-mold sources.
                     Ok(Signal::Value(val))
                 }
             }
-            // Non-mold values pass through unchanged
+            // Non-pack bare values (Int / Str / Bool / List / ...) pass
+            // through unchanged — see the tagged-pack comment above.
             other => Ok(Signal::Value(other)),
         }
+    }
+
+    /// F62B-026: unmolding a value that is not a mold is gorilla territory.
+    /// Print the diagnostic (matching the native / JS runtimes verbatim)
+    /// and return the gorilla signal — the program terminates with exit 1.
+    fn non_mold_unmold_gorilla() -> Signal {
+        eprintln!(
+            "[E1545] Cannot unmold a non-mold value: `>=>` / `<=<` / `.unmold()` take a mold value (Lax, Gorillax, RelaxedGorillax, Result, Async, Stream, or a custom mold)."
+        );
+        eprintln!("><");
+        Signal::Gorilla
     }
 
     // ── Operation Mold Types (method→mold refactoring) ─────────

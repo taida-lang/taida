@@ -333,20 +333,46 @@ fn build_wasm_expect_reject(td: &Path, profile: &str) -> String {
 }
 
 #[test]
-fn random_bytes_rejected_on_wasm_min_and_edge() {
+fn random_bytes_rejected_on_wasm_min() {
+    // F62B-014 companion: wasm-edge gained randomBytes (the generated glue
+    // provides WASI random_get via crypto.getRandomValues), so only
+    // wasm-min still rejects the Bytes producer.
     let td = write_td(
         "rand_reject",
         ">>> taida-lang/crypto => @(randomBytes)\na <= randomBytes(8)\nstdout(a.length().toString())\n",
     );
-    for profile in ["wasm-min", "wasm-edge"] {
-        let stderr = build_wasm_expect_reject(&td, profile);
-        assert!(
-            stderr.contains("taida_crypto_random_bytes") && stderr.contains("does not support"),
-            "{} reject message must name the unsupported runtime function; got: {}",
-            profile,
-            stderr
-        );
-    }
+    let stderr = build_wasm_expect_reject(&td, "wasm-min");
+    assert!(
+        stderr.contains("taida_crypto_random_bytes") && stderr.contains("does not support"),
+        "wasm-min reject message must name the unsupported runtime function; got: {}",
+        stderr
+    );
+    let _ = std::fs::remove_file(&td);
+}
+
+#[test]
+fn random_bytes_compiles_on_wasm_edge() {
+    // F62B-014 companion: the edge profile links taida_crypto_random_bytes
+    // from runtime_edge_host.c. Compile-level gate only — execution is
+    // covered by the node-driven handler tests.
+    let td = write_td(
+        "rand_edge_ok",
+        ">>> taida-lang/crypto => @(randomBytes)\na <= randomBytes(8)\nstdout(a.length().toString())\n",
+    );
+    let wasm = unique("rand_edge_ok", ".wasm");
+    let out = Command::new(taida_bin())
+        .args(["build", "wasm-edge"])
+        .arg(&td)
+        .arg("-o")
+        .arg(&wasm)
+        .output()
+        .expect("spawn taida build");
+    assert!(
+        out.status.success(),
+        "wasm-edge must compile randomBytes; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_file(&wasm);
     let _ = std::fs::remove_file(&td);
 }
 
@@ -432,9 +458,9 @@ fn arity_shortfall_errors_use_e1301() {
         ),
         (
             "hex_encode_nested_in_stage_args",
-            // The implicit injection belongs to the stage call only — a
-            // zero-argument call nested in the stage's arguments is still
-            // an arity shortfall.
+            // A zero-argument call nested in the stage's arguments is an
+            // arity shortfall — the pipe never reaches inside argument
+            // expressions.
             ">>> taida-lang/crypto => @(sha256, hexEncode)\n\"abc\" => sha256(hexEncode()) => stdout(_)\n",
         ),
     ] {
@@ -459,25 +485,24 @@ fn arity_shortfall_errors_use_e1301() {
     }
 }
 
-/// The injection also counts toward the *excess* side: a pipeline stage
-/// call whose written arguments already fill the arity overflows the
-/// fixed ABI once the piped value is prepended (`"abc" => sha256("x")`
-/// lowers to a 2-value call of a 1-ary builtin — the interpreter guards
-/// at runtime, native fails at build time, and JS silently misruns).
-/// Such calls must be rejected at check time.
+/// A pipeline stage whose written arguments already fill the arity is an
+/// immediate call evaluated as written; its result (Str / Bytes) is not a
+/// function, so piping into it is a non-function pipe. Such stages must be
+/// rejected at check time as [E1544] (the legacy first-argument injection
+/// that made these "one over arity" is gone).
 #[test]
-fn pipeline_excess_args_use_e1301() {
+fn pipeline_full_arity_stage_uses_e1544() {
     for (label, source) in [
         (
-            "sha256_pipeline_excess",
+            "sha256_pipeline_full",
             ">>> taida-lang/crypto => @(sha256)\n\"abc\" => sha256(\"x\") => stdout(_)\n",
         ),
         (
-            "hmac_pipeline_excess",
+            "hmac_pipeline_full",
             ">>> taida-lang/crypto => @(hmacSha256)\n\"data\" => hmacSha256(\"key\", \"extra\") => stdout(_)\n",
         ),
         (
-            "random_pipeline_excess",
+            "random_pipeline_full",
             ">>> taida-lang/crypto => @(randomBytes)\n32 => randomBytes(1) => stdout(_.length().toString())\n",
         ),
     ] {
@@ -489,39 +514,39 @@ fn pipeline_excess_args_use_e1301() {
         let _ = std::fs::remove_file(&td);
         assert!(
             !out.status.success(),
-            "[{}] pipeline excess args must reject",
+            "[{}] full-arity stage call must reject",
             label
         );
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            stderr.contains("[E1301]"),
-            "[{}] expected [E1301], got: {}",
+            stderr.contains("[E1544]"),
+            "[{}] expected [E1544], got: {}",
             label,
             stderr
         );
     }
 }
 
-/// The injected pipe value is the call's first argument, so it must also
-/// satisfy the per-symbol argument-type rule. A mistyped piped value used
-/// to pass the checker (the interpreter then failed at runtime while
-/// native built and silently misran — e.g. a Bool piped into sha256
-/// hashed the empty string). Such calls must be rejected with `[E1506]`
-/// at check time.
+/// The `_` placeholder carries the piped value's type into the stage call,
+/// so a mistyped piped value must fail the per-symbol argument-type rule.
+/// Before this pin a mistyped injected value passed the checker (the
+/// interpreter then failed at runtime while native built and silently
+/// misran — e.g. a Bool piped into sha256 hashed the empty string). Such
+/// calls must be rejected with `[E1506]` at check time.
 #[test]
 fn pipeline_injected_arg_type_errors_use_e1506() {
     for (label, source) in [
         (
             "bool_into_sha256",
-            ">>> taida-lang/crypto => @(sha256)\ntrue => sha256() => stdout(_)\n",
+            ">>> taida-lang/crypto => @(sha256)\ntrue => sha256(_) => stdout(_)\n",
         ),
         (
             "str_into_random_bytes",
-            ">>> taida-lang/crypto => @(randomBytes)\n\"abc\" => randomBytes() => stdout(_.length().toString())\n",
+            ">>> taida-lang/crypto => @(randomBytes)\n\"abc\" => randomBytes(_) => stdout(_.length().toString())\n",
         ),
         (
             "int_into_hmac",
-            ">>> taida-lang/crypto => @(hmacSha256)\n1 => hmacSha256(\"key\") => stdout(_)\n",
+            ">>> taida-lang/crypto => @(hmacSha256)\n1 => hmacSha256(_, \"key\") => stdout(_)\n",
         ),
     ] {
         let td = write_td(label, source);
@@ -545,24 +570,21 @@ fn pipeline_injected_arg_type_errors_use_e1506() {
     }
 }
 
-/// A placeholder-free pipeline stage call receives the piped value as an
-/// implicit first argument at runtime (`"abc" => sha256()` runs as
-/// `sha256("abc")`). The fixed-arity validation must count that injection
-/// instead of rejecting the stage call, the substitution form
-/// (`sha256(_)`) must keep working, and the injected call must agree with
-/// the direct call on every backend. (The injected forms here return
-/// `Str` — plus a length-only randomBytes probe — so the pinned output is
-/// display-stable across backends.)
+/// A pipeline stage injects the piped value at the `_` placeholder
+/// (`"abc" => sha256(_)` runs as `sha256("abc")`), and the injected call
+/// must agree with the direct call on every backend. (The injected forms
+/// here return `Str` — plus a length-only randomBytes probe — so the
+/// pinned output is display-stable across backends.)
 #[test]
-fn pipeline_first_arg_injection_parity() {
+fn pipeline_placeholder_injection_parity() {
     assert_parity(
         "pipe_inject",
         r#">>> taida-lang/crypto => @(sha256, hmacSha256, randomBytes)
-"abc" => sha256() => stdout(_)
 "abc" => sha256(_) => stdout(_)
-"data" => hmacSha256("key") => stdout(_)
+stdout(sha256("abc"))
+"data" => hmacSha256(_, "key") => stdout(_)
 stdout(hmacSha256("data", "key"))
-32 => randomBytes() => stdout(_.length().toString())
+32 => randomBytes(_) => stdout(_.length().toString())
 "#,
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n\
          ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n\

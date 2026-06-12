@@ -12,6 +12,10 @@ impl TypeChecker {
         format!("[{}] {} Hint: {}", code, message, hint)
     }
 
+    // F62B-021: the definition-time uninferable-param rejection was lifted
+    // (explicit-type-argument calls bind such params directly); kept for
+    // potential lint reuse.
+    #[allow(dead_code)]
     pub(super) fn type_expr_mentions_type_param(ty: &TypeExpr, name: &str) -> bool {
         match ty {
             TypeExpr::Named(type_name) => type_name == name,
@@ -118,6 +122,8 @@ impl TypeChecker {
                             .insert(cl.name.clone(), header_args.len());
                     }
                     ClassLikeKind::Inheritance { .. } => {}
+                    // Type aliases are not constructible — no header arity.
+                    ClassLikeKind::Alias { .. } => {}
                 }
             }
         }
@@ -225,6 +231,10 @@ impl TypeChecker {
                         .find_map(|arg| Self::find_forbidden_default_ref(arg, forbidden))
                 }),
             Expr::FieldAccess(obj, _, _) => Self::find_forbidden_default_ref(obj, forbidden),
+            Expr::Block(stmts, _) => stmts.iter().find_map(|stmt| {
+                stmt.yielded_expr()
+                    .and_then(|e| Self::find_forbidden_default_ref(e, forbidden))
+            }),
             Expr::CondBranch(arms, _) => arms.iter().find_map(|arm| {
                 arm.condition
                     .as_ref()

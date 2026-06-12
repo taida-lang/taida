@@ -279,6 +279,9 @@ impl Parser {
                     let mut type_args = Vec::new();
                     let mut depth = 1;
                     let mut arg_tokens_valid = true;
+                    // F62B-028: args inside `[...]` may reference bare molds
+                    // as types (`JSON[x, Lax[Int]]()`); see [E1546] below.
+                    self.mold_bracket_args_depth += 1;
 
                     // Parse comma-separated expressions inside brackets.
                     // B11-6a: Also handles restricted type-literal surface:
@@ -306,7 +309,17 @@ impl Parser {
                         {
                             let lit_span = self.current_span();
                             self.advance(); // consume `:`
-                            let type_name = self.expect_ident()?;
+                            // F62B-028: unwind the bracket depth on the error
+                            // path — the parser recovers per-statement, so a
+                            // leaked depth would wrongly exempt later bare
+                            // molds from [E1546].
+                            let type_name = match self.expect_ident() {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    self.mold_bracket_args_depth -= 1;
+                                    return Err(e);
+                                }
+                            };
                             type_args.push(Expr::TypeLiteral(type_name, None, lit_span));
                             self.match_token(&TokenKind::Comma);
                             continue;
@@ -321,9 +334,21 @@ impl Parser {
                             && !matches!(self.peek_at(3).kind, TokenKind::LParen)
                         {
                             let lit_span = self.current_span();
-                            let enum_name = self.expect_ident()?;
+                            let enum_name = match self.expect_ident() {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    self.mold_bracket_args_depth -= 1;
+                                    return Err(e);
+                                }
+                            };
                             self.advance(); // consume `:`
-                            let variant_name = self.expect_ident()?;
+                            let variant_name = match self.expect_ident() {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    self.mold_bracket_args_depth -= 1;
+                                    return Err(e);
+                                }
+                            };
                             type_args.push(Expr::TypeLiteral(
                                 enum_name,
                                 Some(variant_name),
@@ -342,6 +367,7 @@ impl Parser {
                         self.match_token(&TokenKind::Comma);
                     }
 
+                    self.mold_bracket_args_depth -= 1;
                     if arg_tokens_valid && self.check(&TokenKind::LParen) {
                         // `Name[args](fields)` -> MoldInst or FuncCall
                         self.advance(); // consume `(`
@@ -351,12 +377,26 @@ impl Parser {
                     } else if arg_tokens_valid {
                         // Index access `name[...]` has been removed in v0.5.0.
                         // Use `.get(index)` instead.
-                        // `Name[args]` without `()` is treated as MoldInst with no fields.
                         if !name.chars().next().is_some_and(|c| c.is_uppercase()) {
                             return Err(ParseError {
                                 message:
                                     "Index access `name[...]` has been removed. Use `.get(index)` instead"
                                         .to_string(),
+                                span,
+                            });
+                        }
+                        // F62B-028 [E1546]: a bare `Name[args]` (no `()`) in a
+                        // value position is rejected — `[]` puts the value in
+                        // the mold, `()` casts it; the cast is not optional.
+                        // Inside another mold's `[...]` the bare form is a
+                        // type reference (schema / Out slots) and stays legal.
+                        if self.mold_bracket_args_depth == 0 {
+                            return Err(ParseError {
+                                message: format!(
+                                    "[E1546] Mold call '{name}[...]' is missing its cast `()`. \
+                                     Write `{name}[...]()` — `[]` puts the value in the mold, `()` casts it. \
+                                     (Bare `{name}[...]` is only a type reference inside another mold's `[...]` arguments or a type annotation.)"
+                                ),
                                 span,
                             });
                         }
@@ -482,6 +522,18 @@ impl Parser {
 
     pub(super) fn parse_lambda(&mut self, start_span: Span) -> Result<Expr, ParseError> {
         // `_ x: Int y: Int = expr` -> Lambda([x, y], expr)
+        //
+        // F62B-022: with a Newline after `=`, the body is an indented
+        // statement block (let-bindings + a final result expression — the
+        // same pure-expression discipline as `| |>` arm bodies):
+        //
+        //   _ r: Row =
+        //     subtotal <= r.quantity * r.price
+        //     @(name <= r.name, subtotal <= subtotal)
+        //
+        // Block-bodied lambdas require every parameter to carry a type
+        // annotation (the block boundary removes the call-site context the
+        // single-expression form can infer from).
         let mut params = Vec::new();
         while self.check_ident() {
             let param_span = self.current_span();
@@ -499,6 +551,29 @@ impl Parser {
             });
         }
         self.expect(&TokenKind::Eq)?;
+        if matches!(self.peek_kind(), TokenKind::Newline | TokenKind::Indent(_)) {
+            let block_span = self.current_span();
+            if let Some(missing) = params.iter().find(|p| p.type_annotation.is_none()) {
+                return Err(ParseError {
+                    message: format!(
+                        "[E1527] Block-bodied lambdas require a type annotation on every \
+                         parameter; `{}` has none. Write `_ {}: Type ... =` before the block.",
+                        missing.name, missing.name
+                    ),
+                    span: missing.span.clone(),
+                });
+            }
+            let block = self.parse_block()?;
+            if block.is_empty() {
+                return Err(self.error_at_current("Expected statements in lambda block body"));
+            }
+            Self::validate_expression_block_body(&block, "lambda block body")?;
+            return Ok(Expr::Lambda(
+                params,
+                Box::new(Expr::Block(block, block_span)),
+                start_span,
+            ));
+        }
         let body = self.parse_expression()?;
         Ok(Expr::Lambda(params, Box::new(body), start_span))
     }
@@ -609,9 +684,72 @@ impl Parser {
             Self::validate_cond_arm_body(&block)?;
             Ok(block)
         } else {
-            // Single-line body: parse expression and wrap
+            // Single-line body: parse expression and wrap.
+            //
+            // F62B-031: a single-line arm body supports the same pipeline /
+            // unmold continuations as a statement (`| c |> log(x) => y` /
+            // `| c |> Div[a, b]() >=> v`). Before this, the dangling `=>`
+            // hit the expression-level `=> :Type` recovery placeholder and
+            // broke the whole cond parse (the second arm was swallowed and
+            // [E1524]/[E1502] fired). Stages stop naturally at `|` (the
+            // next arm) because `|` is not an operator, and a return-type
+            // `=> :T` is left for the enclosing function parser.
+            let first_span = self.current_span();
             let expr = self.parse_expression()?;
-            Ok(vec![Statement::Expr(expr)])
+            let mut steps = vec![expr];
+            loop {
+                if !self.check(&TokenKind::FatArrow) {
+                    break;
+                }
+                if matches!(self.peek_at(1).kind, TokenKind::Colon) {
+                    break; // `=> :Type` — the function's return annotation
+                }
+                self.advance(); // consume `=>`
+                steps.push(self.parse_expression()?);
+            }
+            if self.check(&TokenKind::UnmoldForward) {
+                let span = self.current_span();
+                self.advance(); // consume `>=>`
+                let target = self.expect_ident()?;
+                let type_annotation = self.parse_optional_unmold_target_annotation()?;
+                let source = if steps.len() == 1 {
+                    steps.pop().expect("one step")
+                } else {
+                    Expr::Pipeline(steps, first_span)
+                };
+                let body = vec![Statement::UnmoldForward(UnmoldForwardStmt {
+                    source,
+                    target,
+                    type_annotation,
+                    span,
+                })];
+                Self::validate_cond_arm_body(&body)?;
+                return Ok(body);
+            }
+            if steps.len() == 1 {
+                return Ok(vec![Statement::Expr(steps.pop().expect("one step"))]);
+            }
+            // A trailing bare identifier is the tail binding, exactly like
+            // the statement-level pipeline parse.
+            if let Some(Expr::Ident(name, _)) = steps.last() {
+                let target = name.clone();
+                steps.pop();
+                let value = if steps.len() == 1 {
+                    steps.pop().expect("one step")
+                } else {
+                    Expr::Pipeline(steps, first_span.clone())
+                };
+                let body = vec![Statement::Assignment(Assignment {
+                    target,
+                    type_annotation: None,
+                    value,
+                    doc_comments: Vec::new(),
+                    span: first_span,
+                })];
+                Self::validate_cond_arm_body(&body)?;
+                return Ok(body);
+            }
+            Ok(vec![Statement::Expr(Expr::Pipeline(steps, first_span))])
         }
     }
 
@@ -642,8 +780,21 @@ impl Parser {
     /// bare call statements, discard pipelines, and nested definitions
     /// in non-final positions remain rejected.
     fn validate_cond_arm_body(block: &[Statement]) -> Result<(), ParseError> {
-        debug_assert!(!block.is_empty(), "empty arm body should be caught earlier");
-        Self::reject_discard_bindings_in_expression_block(block, "`| |>` arm body")?;
+        Self::validate_expression_block_body(block, "`| |>` arm body")
+    }
+
+    /// F62B-022: shared pure-expression discipline for `| |>` arm bodies
+    /// and block-bodied lambda bodies — optional let-bindings followed by
+    /// a final result expression or tail binding.
+    pub(super) fn validate_expression_block_body(
+        block: &[Statement],
+        label: &str,
+    ) -> Result<(), ParseError> {
+        debug_assert!(
+            !block.is_empty(),
+            "empty expression block should be caught earlier"
+        );
+        Self::reject_discard_bindings_in_expression_block(block, label)?;
         let last_idx = block.len() - 1;
         for (idx, stmt) in block.iter().enumerate() {
             if idx == last_idx {
@@ -657,7 +808,7 @@ impl Parser {
                         let span = Self::statement_span(stmt);
                         return Err(ParseError {
                             message: format!(
-                                "[E1616] `| |>` arm body must end with a result expression or a binding, not a {} statement. \
+                                "[E1616] {label} must end with a result expression or a binding, not a {} statement. \
                                  A condition arm is a pure expression: optional let-bindings \
                                  (`name <= expr`, `expr >=> name`, `name <=< expr`) may appear, \
                                  and the last line may be either a result expression or a tail binding. \
@@ -677,11 +828,14 @@ impl Parser {
                     Statement::Expr(_) => {
                         let span = Self::statement_span(stmt);
                         return Err(ParseError {
-                            message: "[E1616] side-effect statement is not allowed inside a `| |>` arm body. \
-                                      Only let-bindings (`name <= expr`, `expr >=> name`, `name <=< expr`) may \
-                                      appear before the final result expression — a bare function call or \
-                                      pipeline used for side effects breaks the pure-expression rule. \
-                                      See docs/guide/07_control_flow.md.".to_string(),
+                            message: format!(
+                                "[E1616] side-effect statement is not allowed inside a {}. \
+                                 Only let-bindings (`name <= expr`, `expr >=> name`, `name <=< expr`) may \
+                                 appear before the final result expression — a bare function call or \
+                                 pipeline used for side effects breaks the pure-expression rule. \
+                                 See docs/guide/07_control_flow.md.",
+                                label
+                            ),
                             span,
                         });
                     }
@@ -689,11 +843,12 @@ impl Parser {
                         let span = Self::statement_span(stmt);
                         return Err(ParseError {
                             message: format!(
-                                "[E1616] `{}` is not allowed inside a `| |>` arm body. \
-                                 A condition arm is a pure expression; definitions and module-level \
+                                "[E1616] `{}` is not allowed inside a {}. \
+                                 An expression block is pure; definitions and module-level \
                                  constructs must live at the top level of a function or module. \
                                  See docs/guide/07_control_flow.md.",
                                 Self::statement_kind_label(stmt),
+                                label,
                             ),
                             span,
                         });
@@ -764,6 +919,7 @@ impl Parser {
                 crate::parser::ClassLikeKind::BuchiPack => "type definition",
                 crate::parser::ClassLikeKind::Mold { .. } => "mold definition",
                 crate::parser::ClassLikeKind::Inheritance { .. } => "inheritance definition",
+                crate::parser::ClassLikeKind::Alias { .. } => "type alias",
             },
             Statement::FuncDef(_) => "function definition",
             Statement::ErrorCeiling(_) => "error ceiling",

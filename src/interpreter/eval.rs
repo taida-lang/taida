@@ -21,7 +21,7 @@ use crate::parser::*;
 /// Set conservatively to account for multiple Rust stack frames per call
 /// (eval_statements + eval_expr + call_function = ~5 frames per recursion,
 /// plus debug builds have larger frames).
-const MAX_CALL_DEPTH: usize = 256;
+const MAX_CALL_DEPTH: usize = 8192;
 
 /// Runtime error (distinct from thrown Taida errors).
 #[derive(Debug, Clone)]
@@ -613,6 +613,20 @@ impl Interpreter {
                     );
                     Ok(Signal::Value(Value::Unit))
                 }
+                crate::parser::ClassLikeKind::Alias { .. } => {
+                    // Type aliases are checker-only. Define the same name
+                    // sentinel as pack type-defs so the alias can sit in
+                    // export lists / module symbol maps without a special
+                    // case; it carries no constructor or fields.
+                    let _ = self.env.define(
+                        &cl.name,
+                        Value::pack(vec![
+                            ("__type".to_string(), Value::str("TypeDef".to_string())),
+                            ("__name".to_string(), Value::str(cl.name.clone())),
+                        ]),
+                    );
+                    Ok(Signal::Value(Value::Unit))
+                }
                 crate::parser::ClassLikeKind::Mold { .. } => {
                     let md = cl;
                     // Register methods defined in the mold type
@@ -694,6 +708,7 @@ impl Interpreter {
             Statement::FuncDef(fd) => {
                 let closure = Arc::new(self.env.snapshot());
                 let func = Value::Function(FuncValue {
+                    type_params_count: fd.type_params.len(),
                     name: fd.name.clone(),
                     params: fd.params.clone(),
                     body: fd.body.clone(),
@@ -701,6 +716,7 @@ impl Interpreter {
                     return_type: fd.return_type.clone(),
                     module_type_defs: None,
                     module_enum_defs: None,
+                    module_symbols: None,
                 });
                 // Use define() to prevent overwriting existing variables/functions.
                 // define_force is reserved for internal use only (pipeline, closures, params, prelude).
@@ -788,49 +804,11 @@ impl Interpreter {
         }
     }
 
-    /// Return true if `expr` contains an `Expr::Ident(name, _)`
-    /// whose name appears in `bound_names`. Used to decide whether a
-    /// pipeline step explicitly consumes a pipeline-scope binding, in
-    /// which case auto-injection of the pipeline `current` as an extra
-    /// argument is suppressed.
+    /// Shared `=> name` binding-reference rule — single definition in
+    /// `crate::parser::ast` (review C-6/C-9: lambda-param shadowing and
+    /// full statement coverage live there).
     pub(crate) fn expr_references_any(expr: &Expr, bound_names: &[String]) -> bool {
-        fn walk(e: &Expr, names: &[String]) -> bool {
-            match e {
-                Expr::Ident(n, _) => names.iter().any(|bn| bn == n),
-                Expr::BinaryOp(l, _, r, _) => walk(l, names) || walk(r, names),
-                Expr::UnaryOp(_, inner, _) => walk(inner, names),
-                Expr::FuncCall(callee, args, _) => {
-                    walk(callee, names) || args.iter().any(|a| walk(a, names))
-                }
-                Expr::MethodCall(obj, _, args, _) => {
-                    walk(obj, names) || args.iter().any(|a| walk(a, names))
-                }
-                Expr::FieldAccess(obj, _, _) => walk(obj, names),
-                Expr::BuchiPack(fields, _) => fields.iter().any(|f| walk(&f.value, names)),
-                Expr::ListLit(items, _) => items.iter().any(|x| walk(x, names)),
-                Expr::Pipeline(steps, _) => steps.iter().any(|s| walk(s, names)),
-                Expr::MoldInst(_, type_args, fields, _) => {
-                    type_args.iter().any(|a| walk(a, names))
-                        || fields.iter().any(|f| walk(&f.value, names))
-                }
-                Expr::Unmold(inner, _) => walk(inner, names),
-                Expr::Lambda(_, body, _) => walk(body, names),
-                Expr::TypeInst(_, fields, _) => fields.iter().any(|f| walk(&f.value, names)),
-                Expr::Throw(inner, _) => walk(inner, names),
-                Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
-                    arm.condition.as_ref().is_some_and(|c| walk(c, names))
-                        || arm.body.iter().any(|s| {
-                            if let Statement::Expr(e) = s {
-                                walk(e, names)
-                            } else {
-                                false
-                            }
-                        })
-                }),
-                _ => false,
-            }
-        }
-        walk(expr, bound_names)
+        expr_references_any_name(expr, bound_names)
     }
 
     /// Decide whether an intermediate pipeline step
@@ -1018,6 +996,17 @@ impl Interpreter {
                 message: "[E1502] Empty argument slots are only valid inside function calls."
                     .to_string(),
             }),
+            // F62B-022: expression block (block-bodied lambda body). When a
+            // lambda is materialized the block unwraps into the FuncValue's
+            // statement body, so this arm only runs if a block is evaluated
+            // standalone — scoped statement evaluation keeps the semantics
+            // identical either way.
+            Expr::Block(stmts, _) => {
+                self.env.push_scope();
+                let result = self.eval_statements_no_tco(stmts);
+                self.env.pop_scope();
+                result
+            }
             // B11-6a: TypeLiteral is only valid inside TypeIs/TypeExtends — handled by mold
             Expr::TypeLiteral(name, variant, _) => {
                 if let Some(var) = variant {
@@ -1252,7 +1241,20 @@ impl Interpreter {
                         // The user explicitly references one of the
                         // pipeline-scope bindings inside this step. Evaluate
                         // the step as-written without auto-injecting
-                        // `current` as an extra argument.
+                        // `current` as an extra argument. A `_` here has
+                        // nothing to inject (review C-4) — reject instead
+                        // of leaking a raw placeholder into evaluation.
+                        if expr_count_placeholders(expr) > 0 {
+                            if bound_any {
+                                self.env.pop_scope();
+                            }
+                            return Err(RuntimeError {
+                                message: "[E1543] A pipeline stage that references a `=> name` \
+                                          binding is evaluated as written — `_` has no injection \
+                                          value there. Use the bound name instead of `_`."
+                                    .to_string(),
+                            });
+                        }
                         current = match self.eval_expr(expr)? {
                             Signal::Value(v) => v,
                             other => {
@@ -1393,13 +1395,57 @@ impl Interpreter {
                 if !self.mold_defs.contains_key(name)
                     && let Some(Value::Function(func)) = self.env.get(name).cloned()
                 {
-                    if !fields.is_empty() {
+                    // F62B-021: for GENERIC functions the bracket always
+                    // carries TYPE arguments (`genfn[T1, T2](args)` /
+                    // `genfn[T]()`) — types erase at runtime, so the `[]`
+                    // entries are skipped and the `()` values are the call
+                    // arguments. Non-generic functions keep the legacy
+                    // positional bracket call (`fn[arg1, arg2]()`).
+                    if func.type_params_count > 0 || !fields.is_empty() {
+                        let mut arg_exprs = Vec::with_capacity(fields.len());
+                        let mut all_positional = true;
+                        for field in fields {
+                            let is_positional = field.name.starts_with('_')
+                                && field.name[1..].chars().all(|c| c.is_ascii_digit());
+                            if !is_positional {
+                                all_positional = false;
+                                break;
+                            }
+                            arg_exprs.push(field.value.clone());
+                        }
+                        if all_positional && (func.type_params_count > 0 || !fields.is_empty()) {
+                            // F62B-038 #9: for a NON-generic function the
+                            // bracket is the legacy positional call
+                            // (`fn[arg1, arg2]()`), so combining it with
+                            // `()` arguments (`fn[1](2)`) is ambiguous.
+                            // The checker rejects this statically; without
+                            // this guard the unchecked-eval path would
+                            // silently drop the bracket values and run
+                            // `fn(2)`.
+                            if func.type_params_count == 0 && !type_args.is_empty() {
+                                return Err(RuntimeError {
+                                    message: format!(
+                                        "Non-generic function '{}' cannot take both \
+                                         bracket values and call arguments. \
+                                         Call it as {}(arg1, arg2) or with the \
+                                         positional bracket form {}[arg1, arg2]().",
+                                        name, name, name
+                                    ),
+                                });
+                            }
+                            return self.call_function(&func, &arg_exprs);
+                        }
+                        let bracket_hint = if func.type_params_count > 0 {
+                            format!("{name}[T](arg1, arg2)")
+                        } else {
+                            format!("{name}[arg1, arg2]()")
+                        };
                         return Err(RuntimeError {
                             message: format!(
                                 "User-defined function '{}' called via mold syntax \
                                  cannot accept named fields '()'. \
-                                 Pass arguments positionally: {}[arg1, arg2]() or {}(arg1, arg2).",
-                                name, name, name
+                                 Pass arguments positionally: {} or {}(arg1, arg2).",
+                                name, bracket_hint, name
                             ),
                         });
                     }
@@ -1525,6 +1571,7 @@ impl Interpreter {
                         }
                     }
                     let unmold_func = Value::Function(FuncValue {
+                        type_params_count: 0,
                         name: "__unmold".to_string(),
                         params: func_def.params.clone(),
                         body: func_def.body.clone(),
@@ -1532,6 +1579,7 @@ impl Interpreter {
                         return_type: func_def.return_type.clone(),
                         module_type_defs: None,
                         module_enum_defs: None,
+                        module_symbols: None,
                     });
                     result_fields.push(("__unmold".to_string(), unmold_func));
                 }
@@ -1548,6 +1596,7 @@ impl Interpreter {
                     }
                     closure.insert("self".to_string(), instance.clone());
                     let solidify_func = FuncValue {
+                        type_params_count: 0,
                         name: "__solidify".to_string(),
                         params: func_def.params.clone(),
                         body: func_def.body.clone(),
@@ -1555,6 +1604,7 @@ impl Interpreter {
                         return_type: func_def.return_type.clone(),
                         module_type_defs: None,
                         module_enum_defs: None,
+                        module_symbols: None,
                     };
                     return self.call_function_preserving_signals(&solidify_func, &[]);
                 }
@@ -1573,14 +1623,22 @@ impl Interpreter {
 
             Expr::Lambda(params, body, _) => {
                 let closure = Arc::new(self.env.snapshot());
+                // F62B-022: a block-bodied lambda carries its statements
+                // directly (the same shape named functions use).
+                let lambda_body = match body.as_ref() {
+                    Expr::Block(stmts, _) => stmts.clone(),
+                    other => vec![Statement::Expr(other.clone())],
+                };
                 Ok(Signal::Value(Value::Function(FuncValue {
+                    type_params_count: 0,
                     name: "<lambda>".to_string(),
                     params: params.clone(),
-                    body: vec![Statement::Expr(*body.clone())],
+                    body: lambda_body,
                     closure,
                     return_type: None,
                     module_type_defs: None,
                     module_enum_defs: None,
+                    module_symbols: None,
                 })))
             }
 
@@ -1798,6 +1856,7 @@ impl Interpreter {
                     })
                     .collect();
                 Ok(Value::Function(FuncValue {
+                    type_params_count: 0,
                     name: Self::DEFAULT_FN_SENTINEL_NAME.to_string(),
                     params: synth_params,
                     body: Vec::new(),
@@ -1805,6 +1864,7 @@ impl Interpreter {
                     return_type: Some((**ret).clone()),
                     module_type_defs: None,
                     module_enum_defs: None,
+                    module_symbols: None,
                 }))
             }
         }
@@ -1888,6 +1948,7 @@ impl Interpreter {
         self.env.pop_scope();
 
         Ok(Signal::Value(Value::Function(FuncValue {
+            type_params_count: 0,
             name: "<partial>".to_string(),
             params,
             body,
@@ -1895,6 +1956,7 @@ impl Interpreter {
             return_type: None,
             module_type_defs: None,
             module_enum_defs: None,
+            module_symbols: None,
         })))
     }
 
@@ -2246,6 +2308,45 @@ impl Interpreter {
 
     // ── Function Calls ──────────────────────────────────────
 
+    /// F62B-001: propagate a module context onto a function value that has
+    /// none of its own.
+    ///
+    /// Function values stored inside closure snapshots and inside the module
+    /// symbol table are definition-time originals: their closures are
+    /// truncated to the symbols defined before them, and they carry no
+    /// module typedef / enum / symbol attachments. Calling such an original
+    /// directly loses the defining module's late-defined siblings (and JSON
+    /// schemas) at chain depth 3+. Whenever a function is resolved *through*
+    /// a module context (the closure scope of a module function, the module
+    /// symbol table, a trampoline retarget), re-attach that context so the
+    /// resolution is self-sustaining at any depth. Values that already carry
+    /// their own module context (e.g. functions imported from a different
+    /// module) are returned unchanged.
+    fn attach_module_context(val: &Value, ctx: &FuncValue) -> Value {
+        if ctx.module_symbols.is_none()
+            && ctx.module_type_defs.is_none()
+            && ctx.module_enum_defs.is_none()
+        {
+            return val.clone();
+        }
+        if let Value::Function(fv) = val
+            && fv.module_symbols.is_none()
+            && fv.name != "<lambda>"
+            && fv.name != "<partial>"
+        {
+            let mut attached = fv.clone();
+            attached.module_symbols = ctx.module_symbols.clone();
+            if attached.module_type_defs.is_none() {
+                attached.module_type_defs = ctx.module_type_defs.clone();
+            }
+            if attached.module_enum_defs.is_none() {
+                attached.module_enum_defs = ctx.module_enum_defs.clone();
+            }
+            return Value::Function(attached);
+        }
+        val.clone()
+    }
+
     /// Call a function with arguments, with tail call optimization.
     ///
     /// When a function makes a tail call (self-recursive or mutual-recursive),
@@ -2349,7 +2450,26 @@ impl Interpreter {
             // can shadow captured names without "already defined" errors)
             self.env.push_scope();
             for (name, val) in current_func.closure.iter() {
-                self.env.define_force(name, val.clone());
+                // F62B-001: function values inside a closure snapshot are the
+                // definition-time originals — without a module context of
+                // their own, a nested call into them loses the module's
+                // late-defined siblings (and JSON schemas) from depth 3 on.
+                // Re-attach the current function's module context so the
+                // chain never degrades.
+                self.env
+                    .define_force(name, Self::attach_module_context(val, &current_func));
+            }
+            if let Some(mod_syms) = current_func.module_symbols.clone() {
+                // F62B-001: complete the scope with module-level siblings the
+                // definition-time closure missed (functions defined after this
+                // one). Closure entries win — they are the same module values,
+                // just captured earlier — so only fill the gaps.
+                for (name, val) in mod_syms.iter() {
+                    if !current_func.closure.contains_key(name) {
+                        self.env
+                            .define_force(name, Self::attach_module_context(val, &current_func));
+                    }
+                }
             }
 
             // Create local scope for parameters and function body
@@ -2435,12 +2555,25 @@ impl Interpreter {
                         // Mutual tail call: switch to the target function.
                         // First check the current env scope (handles global/module-level functions).
                         // If not found, check the closure of the current function (handles
-                        // imported functions captured in the closure scope, which was already popped).
+                        // imported functions captured in the closure scope, which was already
+                        // popped), then the defining module's symbol table (F62B-001:
+                        // siblings defined after the current function are not in its
+                        // definition-time closure).
                         let target_val = self
                             .env
                             .get(&target_name)
                             .cloned()
-                            .or_else(|| current_func.closure.get(&target_name).cloned());
+                            .or_else(|| current_func.closure.get(&target_name).cloned())
+                            .or_else(|| {
+                                current_func
+                                    .module_symbols
+                                    .as_ref()
+                                    .and_then(|syms| syms.get(&target_name).cloned())
+                            })
+                            // F62B-001: a target fetched through the module context is a
+                            // definition-time original — inherit the chain's module
+                            // context so the next hop keeps resolving siblings.
+                            .map(|v| Self::attach_module_context(&v, &current_func));
                         let target_func_opt = target_val.and_then(|v| match v {
                             Value::Function(f) => Some(f),
                             _ => None,

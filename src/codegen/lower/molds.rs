@@ -303,9 +303,8 @@ impl Lowering {
         capture_names: &[String],
         data_field_names: &[String],
     ) -> Result<IrVar, LowerError> {
-        let lambda_id = self.lambda_counter;
-        self.lambda_counter += 1;
-        let lambda_name = format!("_taida_method_{}_{}", type_name, lambda_id);
+        // F62B-018: module-keyed (same collision class as _taida_try_N).
+        let lambda_name = self.next_lambda_symbol(&format!("method_{}", type_name));
 
         // The method function takes __env as the first parameter,
         // followed by the method's own parameters.
@@ -668,9 +667,8 @@ impl Lowering {
         ret: &TypeExpr,
         visiting: &mut std::collections::HashSet<String>,
     ) -> Result<IrVar, LowerError> {
-        let lambda_id = self.lambda_counter;
-        self.lambda_counter += 1;
-        let lambda_name = format!("_taida_default_fn_{}", lambda_id);
+        // F62B-018: module-keyed (same collision class as _taida_try_N).
+        let lambda_name = self.next_lambda_symbol("default_fn");
 
         // Synthetic params: __env (closure env, unused) + one slot per
         // declared type-arg (also unused inside the body).

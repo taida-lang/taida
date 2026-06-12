@@ -79,6 +79,15 @@ fn find_user_mold_hover_info(
                     let doc = format_doc_comments(&cl.doc_comments);
                     return Some(format_mold_hover_block(&signature, &fields, &doc));
                 }
+                crate::parser::ClassLikeKind::Alias { target } => {
+                    let doc = format_doc_comments(&cl.doc_comments);
+                    return Some(format!(
+                        "```taida\n{} = {}\n```{}",
+                        cl.name,
+                        format_type_expr(target),
+                        doc
+                    ));
+                }
                 crate::parser::ClassLikeKind::BuchiPack => {}
             }
         }
@@ -207,6 +216,21 @@ fn find_hover_in_statement(
         }
         // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
         Statement::ClassLikeDef(cl) => match &cl.kind {
+            crate::parser::ClassLikeKind::Alias { target } => {
+                if cl.span.line == line
+                    && cl.span.column <= col
+                    && col <= cl.span.column + cl.name.chars().count()
+                {
+                    let doc = format_doc_comments(&cl.doc_comments);
+                    return Some(format!(
+                        "```taida\n{} = {}\n```{}",
+                        cl.name,
+                        format_type_expr(target),
+                        doc
+                    ));
+                }
+                None
+            }
             crate::parser::ClassLikeKind::BuchiPack => {
                 let td = cl;
                 if td.span.line == line

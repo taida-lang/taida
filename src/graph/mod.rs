@@ -9,6 +9,7 @@ pub mod verify;
 // Internal modules used by verify — not part of the public API.
 pub(crate) mod extract;
 pub(crate) mod model;
+pub mod mutual_tco;
 pub(crate) mod query;
 pub(crate) mod tail_pos;
 

@@ -17,6 +17,8 @@ impl Lowering {
             "stdin" => Some("taida_io_stdin"),
             // C20-2: UTF-8-aware line editor. Returns Async[Lax[Str]].
             "stdinLine" => Some("taida_io_stdin_line"),
+            // F62B-030: exit(code) — terminate with the given code.
+            "exit" => Some("taida_exit"),
             _ => None,
         }
     }

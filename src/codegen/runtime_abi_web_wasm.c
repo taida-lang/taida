@@ -38,6 +38,12 @@ extern int64_t taida_pack_set_hash(int64_t pack_ptr, int64_t index, int64_t hash
 extern int64_t taida_pack_set_tag(int64_t pack_ptr, int64_t index, int64_t tag);
 extern int64_t taida_pack_set(int64_t pack_ptr, int64_t index, int64_t value);
 extern int64_t taida_pack_get(int64_t pack_ptr, int64_t field_hash);
+/* F62B-038 #6: positive type detection for the cage-builder guard. */
+extern int64_t taida_is_buchi_pack(int64_t val);
+extern int64_t taida_is_list(int64_t val);
+extern int64_t taida_is_string_value(int64_t val);
+extern int64_t taida_is_hashmap(int64_t val);
+extern int64_t taida_is_set(int64_t val);
 extern int64_t taida_json_encode(int64_t value);
 extern int64_t taida_json_encode_wire(int64_t value, int64_t schema);
 extern int64_t taida_json_schema_cast(int64_t raw_ptr, int64_t schema_ptr);
@@ -94,9 +100,25 @@ static char *abi_host_pending_json = (char *)0;
 static int32_t abi_host_pending_len = 0;
 static int64_t abi_host_next_id = 1;
 static char abi_host_pending_marker;
-static char *abi_host_resume_json = (char *)0;
-static int32_t abi_host_resume_len = 0;
-static int32_t abi_host_resume_active = 0;
+/* Host-call replay table. The handler re-executes from the top after every
+   resume; each Cage call consumes the resume payloads IN ORDER so a session
+   can issue any number of sequential host calls (the previous single-slot
+   `resume_active` design fed the LATEST resume value to the FIRST Cage of
+   every re-execution, which corrupted and live-locked any handler with more
+   than one host call). Payload pointers stay valid for the whole session:
+   they live in the caller's `taida_abi_web_alloc` region inside the session
+   arena, and the bump allocator only moves forward until `free(handle)`
+   rolls the arena back. One session is in flight at a time per instance
+   (the Workers glue model), matching the rest of this file's session state. */
+#define TAIDA_ABI_HOST_REPLAY_MAX 64
+static const char *abi_host_replay_json[TAIDA_ABI_HOST_REPLAY_MAX];
+static int32_t abi_host_replay_lens[TAIDA_ABI_HOST_REPLAY_MAX];
+static int32_t abi_host_replay_count = 0;
+static int32_t abi_host_replay_cursor = 0;
+/* Set between resume_begin and the re-execution's begin_request so the
+   request-arena lookup can distinguish "replaying after a resume" (keep the
+   recorded payloads) from "fresh request" (drop them). */
+static int32_t abi_host_replay_resuming = 0;
 
 static int abi_wasm_is_readable(int64_t value, uint64_t min_bytes) {
     if (value <= 0) return 0;
@@ -237,31 +259,28 @@ static int64_t abi_pair_list_copy(int64_t list_ptr) {
 }
 
 static int64_t abi_bytes_default(void) {
-    int64_t cap = 8;
-    int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)((ABI_WASM_LIST_ELEMS + cap + 1) * 8));
+    int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)(2 * 8));
     if (!bytes) return 0;
-    bytes[0] = cap;
+    bytes[0] = ABI_BYTES_MAGIC;
     bytes[1] = 0;
-    bytes[2] = ABI_TAG_INT;
-    bytes[3] = ABI_WASM_LIST_MAGIC;
-    bytes[ABI_WASM_LIST_ELEMS + cap] = ABI_WASM_LIST_MAGIC;
     return (int64_t)(intptr_t)bytes;
 }
 
+/* Bytes values use the shared wasm runtime layout [magic, len, byte0, ...]
+   (one int64_t per byte, TAIDBYT magic) so the core Bytes runtime
+   (Utf8Decode, ByteAt, sha256, display kind probes, ...) recognises handler
+   bodies. The list-shaped layout this helper used to emit was readable by
+   the ABI's own accessors but invisible to every Bytes consumer outside
+   this file. */
 static int64_t abi_bytes_from_raw(const unsigned char *src, int32_t len) {
     if (len < 0) len = 0;
-    int64_t cap = len < 8 ? 8 : len;
-    int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)((ABI_WASM_LIST_ELEMS + cap + 1) * 8));
+    int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)((2 + (int64_t)len) * 8));
     if (!bytes) return abi_bytes_default();
-    bytes[0] = cap;
+    bytes[0] = ABI_BYTES_MAGIC;
     bytes[1] = len;
-    bytes[2] = ABI_TAG_INT;
-    bytes[3] = ABI_WASM_LIST_MAGIC;
     for (int32_t i = 0; i < len; i++) {
-        bytes[ABI_WASM_LIST_ELEMS + i] = src ? (int64_t)src[i] : 0;
+        bytes[2 + i] = src ? (int64_t)src[i] : 0;
     }
-    for (int64_t i = len; i < cap; i++) bytes[ABI_WASM_LIST_ELEMS + i] = 0;
-    bytes[ABI_WASM_LIST_ELEMS + cap] = ABI_WASM_LIST_MAGIC;
     return (int64_t)(intptr_t)bytes;
 }
 
@@ -402,6 +421,16 @@ int32_t taida_abi_web_alloc(int32_t len) {
 }
 
 int32_t taida_abi_web_begin_request(int32_t ptr, int32_t len) {
+    /* Host-call replay bookkeeping: a resume re-execution rewinds the
+       consume cursor over the recorded payloads; a fresh request drops
+       them. */
+    if (abi_host_replay_resuming) {
+        abi_host_replay_resuming = 0;
+        abi_host_replay_cursor = 0;
+    } else {
+        abi_host_replay_count = 0;
+        abi_host_replay_cursor = 0;
+    }
     for (int32_t i = 0; i < TAIDA_ABI_WEB_ALLOC_TABLE_SIZE; i++) {
         TaidaAbiWebAlloc *entry = &abi_web_allocs[i];
         if (!entry->active) continue;
@@ -1212,17 +1241,17 @@ static int64_t abi_host_resume_error_async(const char *message) {
 }
 
 int64_t taida_abi_host_cage(int64_t capability, int64_t call) {
-    if (abi_host_resume_active) {
-        const char *json = abi_host_resume_json ? abi_host_resume_json : "";
-        int32_t len = abi_host_resume_len;
+    if (abi_host_replay_cursor < abi_host_replay_count) {
+        const char *json = abi_host_replay_json[abi_host_replay_cursor];
+        int32_t len = abi_host_replay_lens[abi_host_replay_cursor];
+        abi_host_replay_cursor++;
+        if (!json) json = "";
         int ok = 0;
         if (!abi_json_field_bool(json, len, "ok", &ok)) {
-            abi_host_resume_active = 0;
             return abi_host_resume_error_async("host call resume missing ok");
         }
         if (!ok) {
             char *message = abi_json_field_string(json, len, "error");
-            abi_host_resume_active = 0;
             return abi_host_resume_error_async(message ? message : "host call failed");
         }
 
@@ -1233,17 +1262,140 @@ int64_t taida_abi_host_cage(int64_t capability, int64_t call) {
         int64_t has_value = taida_pack_get(lax, abi_hash_cstr("has_value"));
         if (has_value) {
             int64_t value = taida_pack_get(lax, abi_hash_cstr("__value"));
-            abi_host_resume_active = 0;
             return taida_async_ok(value);
         }
         int64_t error = taida_pack_get(lax, abi_hash_cstr("__error"));
         if (!error) error = abi_host_error("host call result decode failed");
-        abi_host_resume_active = 0;
         return taida_async_err(error);
+    }
+
+    /* Outside a handler session (plain `_start` execution — parity drivers,
+       CLI runs) there is no adapter loop to resume a pending call: resolve
+       to the same deterministic rejection the native runtime uses instead
+       of a forever-uncatchable pending marker. The session arena mark is
+       non-zero exactly while a handler request is being processed. */
+    if (abi_web_current_arena_mark == 0) {
+        return taida_async_err(abi_host_error(
+            "host capabilities are not available outside a handler session"));
     }
 
     abi_host_set_pending_json(capability, call);
     return taida_async_pending_with_error(abi_host_pending_error_value());
+}
+
+/* F62B-024 — CageBuilder chain (`Cage[subject]() => InCage[...]() => ...
+   => Uncage[...]() >=> rows`). The builder is a plain pack carrying
+   `__cage_subject` + `__cage_steps` and deliberately NO `__type`, so
+   unmolding a builder is the plain-pack gorilla. Steps are copied on push
+   (value semantics — taida_list_push mutates the spine in place, same
+   reason abi_pair_list_copy exists above). */
+static int64_t taida_cage_builder_pack(int64_t subject, int64_t steps) {
+    int64_t pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, abi_hash_cstr("__cage_subject"));
+    /* The subject is a HostCapability descriptor pack (final-review #2). */
+    taida_pack_set_tag(pack, 0, ABI_TAG_PACK);
+    taida_pack_set(pack, 0, subject);
+    taida_pack_set_hash(pack, 1, abi_hash_cstr("__cage_steps"));
+    taida_pack_set_tag(pack, 1, ABI_TAG_LIST);
+    taida_pack_set(pack, 1, steps);
+    return pack;
+}
+
+static int64_t taida_cage_builder_steps_copy(int64_t builder, int64_t extra_step) {
+    int64_t old_steps = taida_pack_get(builder, abi_hash_cstr("__cage_steps"));
+    int64_t steps = taida_list_new();
+    /* HostStep descriptors are packs (final-review #2). */
+    taida_list_set_elem_tag(steps, ABI_TAG_PACK);
+    if (old_steps) {
+        int64_t *src = (int64_t *)(intptr_t)old_steps;
+        int64_t len = src[1];
+        for (int64_t i = 0; i < len; i++) {
+            steps = taida_list_push(steps, src[4 + i]);
+        }
+    }
+    return taida_list_push(steps, extra_step);
+}
+
+static int taida_cage_builder_ok(int64_t builder) {
+    /* F62B-038 #6: the taida_is_buchi_pack guard is load-bearing — a
+       non-pack value (Unknown-typed checker bypass of E1517) must not
+       reach taida_pack_get's raw pointer walk over linear memory. */
+    return taida_is_buchi_pack(builder)
+        && taida_pack_get(builder, abi_hash_cstr("__cage_subject")) != 0
+        && taida_pack_get(builder, abi_hash_cstr("__cage_steps")) != 0;
+}
+
+/* F62B-038 #6: a non-builder argument reaching the chain runtime fails
+   the way the interpreter does — "Runtime error: <mold> requires a
+   CageBuilder ..., got <Type>" on stderr, exit 1 — instead of the old
+   asymmetry (InCage silently poisoned the builder; the report only
+   surfaced at Uncage as an Async rejection). Termination mirrors the
+   core runtime's non-mold-unmold gorilla: fd_write + proc_exit, or a
+   trap on the edge profile (no proc_exit import available there). */
+static const char *abi_cage_type_name(int64_t v) {
+    if (taida_is_buchi_pack(v)) return "BuchiPack";
+    if (taida_is_list(v)) return "List";
+    if (taida_is_string_value(v)) return "Str";
+    if (taida_is_hashmap(v)) return "HashMap";
+    if (taida_is_set(v)) return "Set";
+    /* Bool / Float are indistinguishable from Int at the value level
+       (unboxed scalars) — the scalar fallback matches the native
+       runtime's taida_runtime_detect_tag. */
+    return "Int";
+}
+
+static void abi_cage_builder_panic(const char *mold, int64_t builder) {
+    extern int fd_write(int fd, const void *iovs, int iovs_len, int *nwritten)
+        __attribute__((import_module("wasi_snapshot_preview1"), import_name("fd_write")));
+    const char *parts[5];
+    parts[0] = "Runtime error: ";
+    parts[1] = mold;
+    parts[2] = " requires a CageBuilder as its first argument "
+               "(start the chain with `Cage[subject]()`), got ";
+    parts[3] = abi_cage_type_name(builder);
+    parts[4] = "\n";
+    for (int i = 0; i < 5; i++) {
+        int len = 0;
+        while (parts[i][len]) len++;
+        struct { const char *buf; int len; } iov = { parts[i], len };
+        int nwritten;
+        fd_write(2, &iov, 1, &nwritten);
+    }
+#ifdef TAIDA_WASM_PROFILE_EDGE
+    /* The edge profile runs as an exported handler under a host that
+       provides no WASI proc_exit; a trap surfaces to the host as a
+       WebAssembly.RuntimeError (same contract as taida_throw's
+       unhandled path and the non-mold-unmold gorilla). */
+    __builtin_trap();
+#else
+    extern void proc_exit(int code)
+        __attribute__((import_module("wasi_snapshot_preview1"), import_name("proc_exit")));
+    proc_exit(1);
+#endif
+}
+
+int64_t taida_cage_builder_new(int64_t subject) {
+    return taida_cage_builder_pack(subject, taida_list_new());
+}
+
+int64_t taida_cage_builder_push(int64_t builder, int64_t step) {
+    if (!taida_cage_builder_ok(builder)) {
+        abi_cage_builder_panic("InCage", builder);
+        return 0; /* unreachable */
+    }
+    int64_t subject = taida_pack_get(builder, abi_hash_cstr("__cage_subject"));
+    return taida_cage_builder_pack(subject, taida_cage_builder_steps_copy(builder, step));
+}
+
+int64_t taida_cage_builder_fire(int64_t builder, int64_t final_step, int64_t out_schema) {
+    if (!taida_cage_builder_ok(builder)) {
+        abi_cage_builder_panic("Uncage", builder);
+        return 0; /* unreachable */
+    }
+    int64_t subject = taida_pack_get(builder, abi_hash_cstr("__cage_subject"));
+    int64_t steps = taida_cage_builder_steps_copy(builder, final_step);
+    int64_t call = taida_abi_host_call(steps, out_schema);
+    return taida_abi_host_cage(subject, call);
 }
 
 int64_t taida_abi_web_store_pending_host_call_json(int32_t request_ptr, int32_t request_len) {
@@ -1355,9 +1507,11 @@ int32_t taida_abi_web_resume_begin(int64_t handle, int32_t ptr, int32_t len) {
     TaidaAbiWebOut *out = abi_web_out_get(handle);
     if (!out || out->state != 1) return 0;
     if (!taida_abi_web_validate_request(ptr, len)) return 0;
-    abi_host_resume_json = (char *)(intptr_t)ptr;
-    abi_host_resume_len = len;
-    abi_host_resume_active = 1;
+    if (abi_host_replay_count >= TAIDA_ABI_HOST_REPLAY_MAX) return 0;
+    abi_host_replay_json[abi_host_replay_count] = (const char *)(intptr_t)ptr;
+    abi_host_replay_lens[abi_host_replay_count] = len;
+    abi_host_replay_count++;
+    abi_host_replay_resuming = 1;
     return 1;
 }
 
@@ -1376,7 +1530,6 @@ void taida_abi_web_replace_handle(int64_t dst_handle, int64_t src_handle) {
     TaidaAbiWebOut *src = abi_web_out_get(src_handle);
     if (!dst || !src) {
         if (dst) dst->state = 2;
-        abi_host_resume_active = 0;
         return;
     }
     dst->state = src->state;
@@ -1393,7 +1546,6 @@ void taida_abi_web_replace_handle(int64_t dst_handle, int64_t src_handle) {
     src->request_len = 0;
     src->generation++;
     if (src->generation == 0) src->generation = 1;
-    abi_host_resume_active = 0;
 }
 
 int32_t taida_abi_web_out_ptr(int64_t handle) {

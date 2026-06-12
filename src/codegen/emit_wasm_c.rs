@@ -876,6 +876,17 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_abi_host_cage" => {
             "int64_t taida_abi_host_cage(int64_t capability, int64_t call);".to_string()
         }
+        // F62B-024: CageBuilder chain helpers (runtime_abi_web fragment).
+        "taida_cage_builder_new" => {
+            "int64_t taida_cage_builder_new(int64_t subject);".to_string()
+        }
+        "taida_cage_builder_push" => {
+            "int64_t taida_cage_builder_push(int64_t builder, int64_t step);".to_string()
+        }
+        "taida_cage_builder_fire" => {
+            "int64_t taida_cage_builder_fire(int64_t builder, int64_t final_step, int64_t out_schema);"
+                .to_string()
+        }
         // W-5: Lax runtime functions
         // F58 P2-4: divisor-proven exact division (fused unmold form).
         "taida_div_exact" => "int64_t taida_div_exact(int64_t a, int64_t b);".to_string(),
@@ -936,6 +947,8 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         // BE-WASM-2: Gorilla literal (exit with status 1)
         "taida_gorilla" => "void taida_gorilla(void);".to_string(),
+        // F62B-030: exit(code) prelude builtin (proc_exit on WASI profiles)
+        "taida_exit" => "int64_t taida_exit(int64_t code);".to_string(),
         // W-5: Type molds that return Lax
         "taida_str_mold_int" => "int64_t taida_str_mold_int(int64_t v);".to_string(),
         "taida_str_mold_float" => "int64_t taida_str_mold_float(int64_t v);".to_string(),
@@ -1029,6 +1042,7 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_str_char_at" | "taida_str_get" => {
             format!("int64_t {}(int64_t s, int64_t idx);", name)
         }
+        "taida_str_chars" => "int64_t taida_str_chars(int64_t s);".to_string(),
         "taida_str_repeat" => "int64_t taida_str_repeat(int64_t s, int64_t n);".to_string(),
         "taida_str_index_of" | "taida_str_last_index_of" => {
             format!("int64_t {}(int64_t s, int64_t sub);", name)
@@ -1037,6 +1051,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             format!("int64_t {}(int64_t s, int64_t sub);", name)
         }
         "taida_cmp_strings" => "int64_t taida_cmp_strings(int64_t a, int64_t b);".to_string(),
+        "taida_str_lt" | "taida_str_gt" | "taida_str_gte" => {
+            format!("int64_t {}(int64_t a, int64_t b);", name)
+        }
         "taida_str_release" => "void taida_str_release(int64_t s);".to_string(),
         "taida_slice_mold" => "int64_t taida_slice_mold(int64_t target, int64_t start, int64_t end);".to_string(),
         // WC-1: Char/Codepoint molds (all profiles — implemented in runtime_core_wasm.c)
@@ -1495,6 +1512,13 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         {
             format!("int64_t {}(int64_t value);", name)
         }
+        // F62B-014 companion: wasm-edge gained randomBytes — the Bytes layout
+        // is core-shared since the F62B-012 unification and the generated
+        // Workers glue provides the WASI random_get import backed by
+        // crypto.getRandomValues (runtime_edge_host.c).
+        "taida_crypto_random_bytes" if profile == WasmProfile::Edge => {
+            format!("int64_t {}(int64_t value);", name)
+        }
         "taida_crypto_hex_decode" | "taida_crypto_base64_decode" | "taida_crypto_random_bytes"
             if matches!(profile, WasmProfile::Min | WasmProfile::Edge) =>
         {
@@ -1506,12 +1530,31 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             return Err(WasmCEmitError {
                 message: format!(
                     "{} does not support runtime function '{}' \
-                     (crypto Bytes producers require the wasm-wasi / wasm-full \
-                     Bytes runtime; randomBytes additionally needs the WASI \
-                     random_get import). Use wasm-wasi, wasm-full, or the \
-                     native backend instead.",
+                     (hexDecode / base64Decode live in the wasm-wasi runtime \
+                     layer; randomBytes additionally needs the WASI \
+                     random_get import, which wasm-min does not provide). \
+                     Use wasm-wasi, wasm-full, or the native backend instead.",
                     profile_name, name
                 ),
+            });
+        }
+        // F62B-014: nowMs is backend-uniform per prelude.md §11. wasm-min is
+        // the documented exception (no WASI imports by profile contract).
+        "taida_time_now_ms"
+            if matches!(
+                profile,
+                WasmProfile::Wasi | WasmProfile::Full | WasmProfile::Edge
+            ) =>
+        {
+            "int64_t taida_time_now_ms(void);".to_string()
+        }
+        "taida_time_now_ms" if profile == WasmProfile::Min => {
+            return Err(WasmCEmitError {
+                message: "wasm-min does not support runtime function 'taida_time_now_ms' \
+                     (nowMs needs the WASI clock_time_get import, which the wasm-min \
+                     profile contract excludes). Use wasm-wasi, wasm-edge, wasm-full, \
+                     or the native backend instead."
+                    .to_string(),
             });
         }
         "taida_bytes_new_filled"
@@ -1556,8 +1599,12 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         {
             format!("int64_t {}(int64_t v);", name)
         }
-        "taida_utf8_encode_mold" | "taida_utf8_decode_mold"
-        | "taida_utf8_encode_scalar" | "taida_utf8_decode_one"
+        // Utf8Decode / Utf8Encode live in the core runtime (the shared
+        // TAIDBYT Bytes layout made both core-safe) and link everywhere.
+        "taida_utf8_decode_mold" | "taida_utf8_encode_mold" => {
+            format!("int64_t {}(int64_t v);", name)
+        }
+        "taida_utf8_encode_scalar" | "taida_utf8_decode_one"
         | "taida_utf8_single_scalar"
             if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
         {

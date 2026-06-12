@@ -765,6 +765,9 @@ fn test_generic_function_constraint_is_enforced() {
 
 #[test]
 fn test_generic_function_requires_inferable_type_param() {
+    // F62B-021: a return-position-only type parameter is legal at
+    // definition time (explicit-type-argument calls bind it directly);
+    // the inference-form call still fails with the call-site [E1510].
     let source = "make[T] =\n  1\n=> :T\n\nvalue <= make()";
     let (_checker, errors) = check(source);
     // RCB-50: Previously emitted 2 errors (E1510 + E1601), but E1601 is
@@ -772,8 +775,8 @@ fn test_generic_function_requires_inferable_type_param() {
     // unresolved type variable that cannot be meaningfully compared.
     assert!(
         errors.iter().any(|e| e.message.contains("[E1510]")
-            && e.message.contains("uninferable type parameter(s): T")),
-        "Expected generic inference error E1510, got: {:?}",
+            && e.message.contains("could not infer type parameter(s): T")),
+        "Expected call-site generic inference error E1510, got: {:?}",
         errors
     );
     assert!(
@@ -785,20 +788,28 @@ fn test_generic_function_requires_inferable_type_param() {
 
 #[test]
 fn test_rejected_generic_function_does_not_emit_spurious_non_generic_call_error() {
+    // F62B-021: the definition itself now registers (return-only U is
+    // bindable through explicit type arguments); this body is genuinely
+    // ill-typed (x: T returned as :U → [E1525]) and the inference-form
+    // call still cannot infer U ([E1510] at the call site). What must NOT
+    // appear is a spurious non-generic-call error on top.
     let source = "pair[T, U] x: T =\n  x\n=> :U\n\nvalue <= pair(1)";
     let (_checker, errors) = check(source);
     assert_eq!(
         errors.len(),
-        1,
-        "Expected exactly 1 error, got: {:?}",
+        2,
+        "Expected exactly 2 errors (E1525 + call-site E1510), got: {:?}",
         errors
     );
     assert!(
-        errors[0].message.contains("[E1510]")
-            && errors[0]
-                .message
-                .contains("uninferable type parameter(s): U"),
-        "Expected generic definition error, got: {:?}",
+        errors.iter().any(|e| e.message.contains("[E1525]")),
+        "Expected the body type conflict, got: {:?}",
+        errors
+    );
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1510]")
+            && e.message.contains("could not infer type parameter(s): U")),
+        "Expected the call-site inference error, got: {:?}",
         errors
     );
     assert!(
@@ -1585,10 +1596,13 @@ Parent[T] => Expanded[T, U] = @(
 )
 Expanded[T, U] => Child[T] = @()"#;
     let (_, errors) = check(source);
+    // Historically this surfaced the same [E1407] twice (two validation
+    // passes reach the header); identical (span, message) duplicates are
+    // now collapsed at the end of check_program.
     assert_eq!(
         errors.len(),
-        2,
-        "Expected exactly 2 errors, got: {:?}",
+        1,
+        "Expected exactly 1 error, got: {:?}",
         errors
     );
     assert!(
@@ -1733,7 +1747,9 @@ fn test_same_scope_function_overload_is_error() {
 
 #[test]
 fn test_invalid_generic_function_still_triggers_same_scope_duplicate_error() {
-    let source = "id[T] x: T =\n  x\n=> :T\n\nid[T, U] x: T =\n  x\n=> :U";
+    // F62B-021: the invalid overload uses a reserved type-param name
+    // (uninferable params no longer reject at definition).
+    let source = "id[T] x: T =\n  x\n=> :T\n\nid[Int] x: Int =\n  x\n=> :Int";
     let (_, errors) = check(source);
     assert_eq!(
         errors.len(),
@@ -1748,7 +1764,9 @@ fn test_invalid_generic_function_still_triggers_same_scope_duplicate_error() {
     );
     assert!(
         errors.iter().any(|e| {
-            e.message.contains("[E1510]") && e.message.contains("uninferable type parameter(s): U")
+            e.message.contains("[E1510]")
+                && e.message
+                    .contains("reserved concrete type name(s) as type parameter(s): Int")
         }),
         "Expected E1510 for the invalid generic overload, got: {:?}",
         errors
@@ -1757,7 +1775,10 @@ fn test_invalid_generic_function_still_triggers_same_scope_duplicate_error() {
 
 #[test]
 fn test_invalid_generic_duplicate_clears_stale_callable_metadata() {
-    let source = "id[T] x: T =\n  x\n=> :T\n\nid[T, U] x: T =\n  x\n=> :U\n\ny: Str <= id(1)";
+    // F62B-021: uninferable type params no longer reject at definition —
+    // the invalid overload uses a reserved type-param name instead, which
+    // still rejects ([E1510] reserved).
+    let source = "id[T] x: T =\n  x\n=> :T\n\nid[Int] x: Int =\n  x\n=> :Int\n\ny: Str <= id(1)";
     let (_, errors) = check(source);
     assert_eq!(
         errors.len(),
@@ -1772,7 +1793,9 @@ fn test_invalid_generic_duplicate_clears_stale_callable_metadata() {
     );
     assert!(
         errors.iter().any(|e| {
-            e.message.contains("[E1510]") && e.message.contains("uninferable type parameter(s): U")
+            e.message.contains("[E1510]")
+                && e.message
+                    .contains("reserved concrete type name(s) as type parameter(s): Int")
         }),
         "Expected invalid generic definition error, got: {:?}",
         errors
@@ -1786,7 +1809,9 @@ fn test_invalid_generic_duplicate_clears_stale_callable_metadata() {
 
 #[test]
 fn test_invalid_then_valid_duplicate_still_clears_callable_metadata() {
-    let source = "id[T, U] x: T =\n  x\n=> :U\n\nid[T] x: T =\n  x\n=> :T\n\ny: Str <= id(1)";
+    // F62B-021: invalid-first ordering via a reserved type-param name
+    // (uninferable params no longer reject at definition).
+    let source = "id[Int] x: Int =\n  x\n=> :Int\n\nid[T] x: T =\n  x\n=> :T\n\ny: Str <= id(1)";
     let (_, errors) = check(source);
     assert_eq!(
         errors.len(),
@@ -1801,7 +1826,9 @@ fn test_invalid_then_valid_duplicate_still_clears_callable_metadata() {
     );
     assert!(
         errors.iter().any(|e| {
-            e.message.contains("[E1510]") && e.message.contains("uninferable type parameter(s): U")
+            e.message.contains("[E1510]")
+                && e.message
+                    .contains("reserved concrete type name(s) as type parameter(s): Int")
         }),
         "Expected invalid generic definition error, got: {:?}",
         errors
@@ -7243,7 +7270,7 @@ out <= a.run(2)
 
 #[test]
 fn unknown_mold_inst_reports_diagnostic() {
-    let src = "x <= MissingMold[1]";
+    let src = "x <= MissingMold[1]()";
     let (_, errors) = check(src);
     assert_has_error(&errors, "[E1530] Unknown mold 'MissingMold'");
 }
@@ -7251,7 +7278,7 @@ fn unknown_mold_inst_reports_diagnostic() {
 #[test]
 fn class_like_mold_inst_form_does_not_report_unknown_mold() {
     let src = r#"Pilot = @(id: Int)
-x <= Pilot[1]"#;
+x <= Pilot[1]()"#;
     let (_, errors) = check(src);
     assert!(
         !errors

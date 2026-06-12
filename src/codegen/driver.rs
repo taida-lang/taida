@@ -542,13 +542,24 @@ pub fn default_wasm_cache_dir(project_dir: Option<&Path>) -> PathBuf {
 }
 
 /// 単一 `.td` ファイルを Native `.o` にコンパイル（リンクなし）
+/// 依存モジュール用 — entry_mode を立てない (export ありはライブラリ lower)。
 fn compile_to_object(input_path: &Path) -> Result<(PathBuf, ModuleImports), CompileError> {
-    compile_to_object_with_exports(input_path, &[])
+    compile_to_object_inner(input_path, &[], false)
 }
 
+/// ビルド entry 用 — F62B-013: entry は `<<<` export があっても
+/// `_taida_main` を持つ実行可能ファイルとして lower する。
 fn compile_to_object_with_exports(
     input_path: &Path,
     extra_exports: &[String],
+) -> Result<(PathBuf, ModuleImports), CompileError> {
+    compile_to_object_inner(input_path, extra_exports, true)
+}
+
+fn compile_to_object_inner(
+    input_path: &Path,
+    extra_exports: &[String],
+    entry_mode: bool,
 ) -> Result<(PathBuf, ModuleImports), CompileError> {
     let source = fs::read_to_string(input_path).map_err(|e| CompileError {
         message: format!("failed to read '{}': {}", input_path.display(), e),
@@ -568,6 +579,7 @@ fn compile_to_object_with_exports(
         lowering.set_source_dir(parent.to_path_buf());
     }
     lowering.set_module_key(Lowering::module_key_for_path(input_path));
+    lowering.set_entry_mode(entry_mode);
     // E34 Phase 2 (Lock-B=C): run the type-checker before lowering and
     // hand the resulting Typed HIR side table over so `expr_is_bool`
     // and friends can consume `Type::Bool` decisions instead of the
@@ -575,8 +587,14 @@ fn compile_to_object_with_exports(
     // ignored — the main / build path already surfaced them via
     // `run_type_checks_and_warnings` before reaching codegen.
     let mut checker = crate::types::TypeChecker::new();
+    // F62B-016: the source path is what lets the checker resolve and
+    // register imported types / function signatures (register_imported_types
+    // early-returns without it) — omitting it left imported-call results
+    // typed `?` in the Typed HIR and tripped the residual-unknown gate.
+    checker.set_source_file(input_path);
     checker.check_program(&program);
     lowering.set_typed_expr_table(checker.typed_expr_table.clone());
+    lowering.set_schema_passing_metadata(checker.schema_passing_metadata());
     let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
         message: format!("{}", e),
     })?;
@@ -1375,8 +1393,11 @@ fn inline_wasm_module_imports_with_backend(
         // pipeline so cross-module Bool detection benefits from the
         // typed table rather than the local name-driven pre-pass.
         let mut dep_checker = crate::types::TypeChecker::new();
+        // F62B-016: same source-path wiring as the main module checker.
+        dep_checker.set_source_file(&dep_path);
         dep_checker.check_program(&dep_program);
         dep_lowering.set_typed_expr_table(dep_checker.typed_expr_table.clone());
+        dep_lowering.set_schema_passing_metadata(dep_checker.schema_passing_metadata());
         let dep_ir = dep_lowering
             .lower_program(&dep_program)
             .map_err(|e| CompileError {
@@ -1540,6 +1561,8 @@ fn wasm_frontend(
         lowering.set_source_dir(parent.to_path_buf());
     }
     lowering.set_module_key(Lowering::module_key_for_path(input_path));
+    // F62B-013: the build entry keeps _taida_main even when it exports.
+    lowering.set_entry_mode(true);
     // RC2.5: tell the lowering layer which addon backend to enforce so
     // addon-backed package imports get the correct policy-template
     // error for wasm targets (instead of silently treating them like
@@ -1556,8 +1579,11 @@ fn wasm_frontend(
     // the same Bool decision source. Errors here are intentionally
     // ignored — the build path already surfaced them.
     let mut checker = crate::types::TypeChecker::new();
+    // F62B-016: same source-path wiring as the native object path.
+    checker.set_source_file(input_path);
     checker.check_program(&program);
     lowering.set_typed_expr_table(checker.typed_expr_table.clone());
+    lowering.set_schema_passing_metadata(checker.schema_passing_metadata());
     let mut ir_module = lowering.lower_program(&program).map_err(|e| CompileError {
         message: format!("{}", e),
     })?;

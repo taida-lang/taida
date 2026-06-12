@@ -147,3 +147,85 @@ int64_t taida_os_all_env(void) {
 
     return hm;
 }
+
+/* ── prelude: nowMs (wasm-edge) ──────────────────────────────────────────
+ * F62B-014: wall clock through the WASI clock_time_get import. The
+ * generated Workers glue implements it with Date.now(); any custom edge
+ * host must provide the same import (realtime clock id 0, nanoseconds
+ * written to out_ptr). */
+
+__attribute__((import_module("wasi_snapshot_preview1"), import_name("clock_time_get")))
+extern int32_t __wasi_clock_time_get(int32_t clock_id, int64_t precision, int64_t *out_ns);
+
+int64_t taida_time_now_ms(void) {
+    int64_t ns = 0;
+    if (__wasi_clock_time_get(0, 1000000LL, &ns) != 0) {
+        return 0;
+    }
+    return ns / 1000000LL;
+}
+
+/* ── crypto: randomBytes (wasm-edge) ─────────────────────────────────────
+ * Bytes construction uses the shared [TAIDBYT, len, byte...] layout (one
+ * int64_t per byte) that the core runtime understands everywhere since the
+ * F62B-012 unification. The constructors below mirror runtime_wasi_io.c
+ * (rt_wasi is not linked on wasm-edge, so the symbols do not collide); the
+ * layout contract is pinned by 02_containers.inc.c `_looks_like_bytes`.
+ *
+ * Entropy comes from the WASI random_get import. The generated Workers
+ * glue implements it with crypto.getRandomValues (a CSPRNG); a host that
+ * cannot provide cryptographically strong entropy must reject the import
+ * rather than substitute a weak source. */
+
+#define EDGE_BYTES_MAGIC 0x5441494442595400LL /* "TAIDBYT\0" */
+
+extern int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);
+extern int64_t taida_throw(int64_t error_val);
+
+int64_t taida_bytes_default_value(void) {
+    int64_t *bytes = (int64_t *)wasm_alloc(2 * 8);
+    if (!bytes) return 0;
+    bytes[0] = EDGE_BYTES_MAGIC;
+    bytes[1] = 0;
+    return (int64_t)(intptr_t)bytes;
+}
+
+int64_t taida_bytes_from_raw(int64_t ptr, int64_t len) {
+    if (len < 0) len = 0;
+    const unsigned char *data = (const unsigned char *)(intptr_t)ptr;
+    int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)((2 + len) * 8));
+    if (!bytes) return taida_bytes_default_value();
+    bytes[0] = EDGE_BYTES_MAGIC;
+    bytes[1] = len;
+    for (int64_t i = 0; i < len; i++) bytes[2 + i] = data ? (int64_t)data[i] : 0;
+    return (int64_t)(intptr_t)bytes;
+}
+
+/* random_get: (buf, buf_len) -> errno (0 == success) */
+__attribute__((import_module("wasi_snapshot_preview1"), import_name("random_get")))
+extern int32_t __wasi_random_get(unsigned char *buf, int32_t buf_len);
+
+#define TAIDA_EDGE_CRYPTO_MAX (256LL * 1024LL * 1024LL)
+
+int64_t taida_crypto_random_bytes(int64_t n_val) {
+    if (n_val < 0) {
+        return taida_throw(taida_make_error(WSTR("CryptoError"), WSTR("randomBytes: count must be non-negative")));
+    }
+    if (n_val == 0) {
+        return taida_bytes_from_raw(0, 0);
+    }
+    if (n_val > TAIDA_EDGE_CRYPTO_MAX) {
+        return taida_throw(taida_make_error(WSTR("CryptoError"), WSTR("randomBytes: count exceeds 256 MiB limit")));
+    }
+    unsigned char *buf = (unsigned char *)_wasm_str_alloc((unsigned int)n_val);
+    int64_t got = 0;
+    while (got < n_val) {
+        int32_t want = (int32_t)((n_val - got > 0x7fffffffLL) ? 0x7fffffff : (n_val - got));
+        int32_t rc = __wasi_random_get(buf + got, want);
+        if (rc != 0) {
+            return taida_throw(taida_make_error(WSTR("CryptoError"), WSTR("randomBytes: WASI random_get failed")));
+        }
+        got += want;
+    }
+    return taida_bytes_from_raw((int64_t)(intptr_t)buf, n_val);
+}

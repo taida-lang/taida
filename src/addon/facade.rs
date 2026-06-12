@@ -551,6 +551,7 @@ fn load_facade_file(
                     crate::parser::ClassLikeKind::BuchiPack => "TypeDef",
                     crate::parser::ClassLikeKind::Mold { .. } => "MoldDef",
                     crate::parser::ClassLikeKind::Inheritance { .. } => "InheritanceDef",
+                    crate::parser::ClassLikeKind::Alias { .. } => "TypeAlias",
                 };
                 return Err(FacadeLoadError {
                     message: format!(

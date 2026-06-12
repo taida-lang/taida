@@ -27,6 +27,13 @@ stdout(data)
 
 `async/await` のようなキーワードは存在しません。`>=>` が唯一の待機手段です。
 
+束縛名には型注釈を付けられます（`<=<` も対称）。解決値の型がモジュール境界などで推論できない場合に、型を明示する手段になります。
+
+```taida fragment
+fetchUser(7) >=> user: UserRecord
+profile: ProfileRecord <=< fetchProfile(user)
+```
+
 ---
 
 ## 即時解決 / 即時拒否

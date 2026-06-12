@@ -16,6 +16,12 @@ impl Lowering {
         expr: &Expr,
     ) -> Result<IrVar, LowerError> {
         match expr {
+            // F62B-022: blocks are unwrapped into the lambda's statement
+            // body by lower_lambda; a standalone block reaching the
+            // expression lowerer is a compiler bug.
+            Expr::Block(_, _) => Err(LowerError {
+                message: "internal: expression block outside a lambda body".to_string(),
+            }),
             Expr::IntLit(val, _) => {
                 let var = func.alloc_var();
                 func.push(IrInst::ConstInt(var, *val));
@@ -261,15 +267,26 @@ impl Lowering {
             return Ok(explicit_arg_vars);
         };
 
-        if explicit_arg_vars.len() > params.len() {
+        // F62B-021: schema-passing generics carry hidden schema parameters
+        // appended after the declared ones; explicit call sites supply them.
+        let hidden_schema_count = self
+            .generic_schema_params
+            .get(name)
+            .map(|needed| needed.len())
+            .unwrap_or(0);
+        if explicit_arg_vars.len() > params.len() + hidden_schema_count {
             return Err(LowerError {
                 message: format!(
                     "Function '{}' expected at most {} argument(s), got {}",
                     name,
-                    params.len(),
+                    params.len() + hidden_schema_count,
                     explicit_arg_vars.len()
                 ),
             });
+        }
+        if hidden_schema_count > 0 {
+            // Hidden args are pre-resolved; defaults never apply to them.
+            return Ok(explicit_arg_vars);
         }
 
         // Materialize defaults in parameter order while exposing earlier params
@@ -1490,22 +1507,31 @@ impl Lowering {
                     "taida_poly_neq"
                 }
             }
+            // F62B-017: Str operands order lexicographically (interpreter
+            // semantics). Without the string arm these fell through to the
+            // i64 comparison and ordered by pointer value.
             BinOp::Lt => {
-                if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                if lhs_is_str || rhs_is_str {
+                    "taida_str_lt"
+                } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
                     "taida_float_lt"
                 } else {
                     "taida_int_lt"
                 }
             }
             BinOp::Gt => {
-                if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                if lhs_is_str || rhs_is_str {
+                    "taida_str_gt"
+                } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
                     "taida_float_gt"
                 } else {
                     "taida_int_gt"
                 }
             }
             BinOp::GtEq => {
-                if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+                if lhs_is_str || rhs_is_str {
+                    "taida_str_gte"
+                } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
                     "taida_float_gte"
                 } else {
                     "taida_int_gte"
@@ -1694,6 +1720,16 @@ impl Lowering {
             // written (no auto-inject), with each bound name rewritten to its
             // synthetic so the binding — not an outer same-named variable — is read.
             if !bound_names.is_empty() && native_expr_references_any_name(expr, &bound_names) {
+                // Review C-4: `_` has no injection value in an as-written
+                // stage — reject for cross-backend agreement.
+                if expr_count_placeholders(expr) > 0 {
+                    return Err(LowerError {
+                        message: "[E1543] A pipeline stage that references a `=> name` binding \
+                                  is evaluated as written — `_` has no injection value there. \
+                                  Use the bound name instead of `_`."
+                            .to_string(),
+                    });
+                }
                 let rewritten = rewrite_idents(expr, &bind_renames);
                 current = self.lower_expr(func, &rewritten)?;
                 continue;
@@ -1779,40 +1815,50 @@ impl Lowering {
         // POST-STABLE-007: track the previous stage's static type on
         // `__pipe_prev` before lowering this step (see `track_pipe_prev_type`).
         self.track_pipe_prev_type(prev_expr);
+
+        // F62B-025: pipeline application closes over exactly two rules
+        // (mirror of the interpreter's `eval_pipeline_step`).
+        //
+        // Rule 1 — the stage contains `_` (one at most, E1543): bind the
+        // piped value to `__pipe_prev`, rewrite the placeholder, and lower
+        // the stage as written.
+        //
+        // Rule 2 — no `_`: lower the stage as written and call the result
+        // with the piped value (`CallIndirect`). This is what makes
+        // `5 => add(, 3)` ≡ `f <= add(, 3)` + `5 => f`. The legacy
+        // implicit first-argument injection is gone; the checker rejects
+        // statically non-function stages as E1544 before lowering.
+        let placeholder_count = expr_count_placeholders(expr);
+        if placeholder_count > 1 {
+            // The checker rejects this as E1543; keep a defensive guard so
+            // the rewrite below can assume a single placeholder.
+            return Err(LowerError {
+                message: format!(
+                    "[E1543] A pipeline stage can contain at most one `_` (found {}).",
+                    placeholder_count
+                ),
+            });
+        }
+
+        if placeholder_count == 1 {
+            // Rule 1: syntactic injection at the placeholder.
+            // C12B-020: a lone `expr => _` rewrites to `__pipe_prev` and
+            // lowers to a plain variable read — the previous accumulator
+            // passes through unchanged.
+            func.push(IrInst::DefVar("__pipe_prev".to_string(), prev_result));
+            let span = expr.span().clone();
+            let rewritten = self.rewrite_placeholder(expr, "__pipe_prev", &span);
+            return self.lower_expr(func, &rewritten);
+        }
+
+        // Rule 2: evaluate the stage as written, apply the piped value.
         match expr {
-            // f(_) → f(prev_result)
-            Expr::FuncCall(callee, args, span) => {
-                let has_placeholder = args.iter().any(|arg| self.expr_has_placeholder(arg));
-                let new_args: Vec<Expr> = args
-                    .iter()
-                    .map(|arg| {
-                        if self.expr_has_placeholder(arg) {
-                            // _ を prev_result を指す特殊マーカーに置換
-                            // ここでは直接 IrVar を渡せないので、
-                            // Ident 参照に変換して DefVar で仮名をつける
-                            self.rewrite_placeholder(arg, "__pipe_prev", span)
-                        } else {
-                            arg.clone()
-                        }
-                    })
-                    .collect();
-
-                if has_placeholder {
-                    // prev_result を __pipe_prev として定義
-                    func.push(IrInst::DefVar("__pipe_prev".to_string(), prev_result));
-                }
-
-                if has_placeholder {
-                    self.lower_func_call(func, callee, &new_args)
-                } else {
-                    let mut injected = vec![Expr::Ident("__pipe_prev".to_string(), span.clone())];
-                    injected.extend(new_args);
-                    func.push(IrInst::DefVar("__pipe_prev".to_string(), prev_result));
-                    self.lower_func_call(func, callee, &injected)
-                }
-            }
-            // 変数名のみ（関数として呼び出し）: `expr => func_name`
-            Expr::Ident(name, _) => {
+            // `expr => name`: route through the normal call lowering with
+            // the piped value as the single argument — user functions take
+            // the `CallUser` path (with default-argument completion),
+            // closure-typed variables and lambdas take `CallIndirect`,
+            // builtins take their dedicated runtime calls.
+            Expr::Ident(name, span) => {
                 if name == "debug" {
                     // debug は特殊: debug(prev)
                     let result = func.alloc_var();
@@ -1834,85 +1880,22 @@ impl Lowering {
                     func.push(IrInst::CallUser(result, mangled, arg_vars));
                     return Ok(result);
                 }
-                Err(LowerError {
-                    message: format!("unknown pipeline target: {}", name),
-                })
-            }
-            // B11-5c: MoldInst in pipeline: replace _ with prev_result
-            Expr::MoldInst(name, type_args, fields, span) => {
-                // Bind prev_result via DefVar so Ident("__pipe_prev") resolves.
+                // Closure-typed variable (`f <= add(, 3)` then `5 => f`) or
+                // builtin name: lower as `name(__pipe_prev)`.
                 func.push(IrInst::DefVar("__pipe_prev".to_string(), prev_result));
-
-                // Deep-check for any Placeholder (top-level or nested, e.g. `_ > 3`)
-                let has_any_placeholder = type_args.iter().any(|a| self.expr_has_placeholder(a));
-
-                let new_type_args: Vec<Expr> = if has_any_placeholder {
-                    // Rewrite ALL Placeholder nodes to Ident("__pipe_prev"),
-                    // handling both top-level `_` and nested `_ > 3` uniformly.
-                    type_args
-                        .iter()
-                        .map(|a| self.rewrite_placeholder(a, "__pipe_prev", span))
-                        .collect()
-                } else {
-                    // No placeholder — prepend prev_result as first type arg
-                    let mut args = vec![Expr::Ident("__pipe_prev".to_string(), span.clone())];
-                    args.extend(type_args.iter().cloned());
-                    args
-                };
-
-                self.lower_mold_inst(func, name, &new_type_args, fields)
+                let arg = Expr::Ident("__pipe_prev".to_string(), span.clone());
+                self.lower_func_call(func, expr, &[arg])
             }
-            // C12B-020: `expr => _` is a no-op pipeline step. The
-            // Interpreter already discards the result; the Native
-            // lowerer historically rejected it. Accept it explicitly
-            // by returning the previous accumulator unchanged so the
-            // surrounding code sees the last meaningful value.
-            Expr::Placeholder(_) => Ok(prev_result),
-            _ => Err(LowerError {
-                message: "unsupported pipeline step".to_string(),
-            }),
-        }
-    }
-
-    /// B11-5c: Check if an expression tree contains any Placeholder `_`.
-    pub(super) fn expr_has_placeholder(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::Placeholder(_) => true,
-            Expr::BinaryOp(lhs, _, rhs, _) => {
-                self.expr_has_placeholder(lhs) || self.expr_has_placeholder(rhs)
+            _ => {
+                // Lower the stage as written; the result must be a closure
+                // (partial application `add(, 3)`, a lambda, or a call that
+                // returns a function). Statically non-function stages were
+                // rejected by the checker (E1544).
+                let stage_var = self.lower_expr(func, expr)?;
+                let result = func.alloc_var();
+                func.push(IrInst::CallIndirect(result, stage_var, vec![prev_result]));
+                Ok(result)
             }
-            Expr::UnaryOp(_, inner, _) => self.expr_has_placeholder(inner),
-            Expr::FuncCall(callee, args, _) => {
-                self.expr_has_placeholder(callee)
-                    || args.iter().any(|a| self.expr_has_placeholder(a))
-            }
-            Expr::MethodCall(obj, _, args, _) => {
-                self.expr_has_placeholder(obj) || args.iter().any(|a| self.expr_has_placeholder(a))
-            }
-            Expr::MoldInst(_, type_args, _, _) => {
-                type_args.iter().any(|a| self.expr_has_placeholder(a))
-            }
-            Expr::FieldAccess(obj, _, _) => self.expr_has_placeholder(obj),
-            Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
-                items.iter().any(|a| self.expr_has_placeholder(a))
-            }
-            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
-                fields.iter().any(|f| self.expr_has_placeholder(&f.value))
-            }
-            Expr::Unmold(inner, _) | Expr::Lambda(_, inner, _) | Expr::Throw(inner, _) => {
-                self.expr_has_placeholder(inner)
-            }
-            Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
-                arm.condition
-                    .as_ref()
-                    .is_some_and(|condition| self.expr_has_placeholder(condition))
-                    || arm
-                        .body
-                        .iter()
-                        .filter_map(|stmt| stmt.yielded_expr())
-                        .any(|expr| self.expr_has_placeholder(expr))
-            }),
-            _ => false,
         }
     }
 
@@ -2022,6 +2005,65 @@ impl Lowering {
                 Box::new(self.rewrite_placeholder(inner, replacement, span)),
                 s.clone(),
             ),
+            Expr::CondBranch(arms, s) => Expr::CondBranch(
+                arms.iter()
+                    .map(|arm| crate::parser::CondArm {
+                        condition: arm
+                            .condition
+                            .as_ref()
+                            .map(|c| self.rewrite_placeholder(c, replacement, span)),
+                        body: arm
+                            .body
+                            .iter()
+                            .map(|stmt| self.rewrite_statement_placeholder(stmt, replacement, span))
+                            .collect(),
+                        span: arm.span.clone(),
+                    })
+                    .collect(),
+                s.clone(),
+            ),
+            other => other.clone(),
+        }
+    }
+
+    /// Statement-level companion of [`Self::rewrite_placeholder`] for
+    /// cond-branch arm bodies inside a pipeline stage.
+    fn rewrite_statement_placeholder(
+        &self,
+        stmt: &Statement,
+        replacement: &str,
+        span: &crate::lexer::Span,
+    ) -> Statement {
+        match stmt {
+            Statement::Expr(expr) => {
+                Statement::Expr(self.rewrite_placeholder(expr, replacement, span))
+            }
+            Statement::Assignment(assign) => Statement::Assignment(Assignment {
+                target: assign.target.clone(),
+                type_annotation: assign.type_annotation.clone(),
+                value: self.rewrite_placeholder(&assign.value, replacement, span),
+                doc_comments: assign.doc_comments.clone(),
+                span: assign.span.clone(),
+            }),
+            // Review C-8: unmold bindings rewrite their source like the
+            // interpreter's statement rewriter — the shared placeholder
+            // count includes them, so the rewrite must reach them too.
+            Statement::UnmoldForward(u) => {
+                Statement::UnmoldForward(crate::parser::UnmoldForwardStmt {
+                    source: self.rewrite_placeholder(&u.source, replacement, span),
+                    target: u.target.clone(),
+                    type_annotation: u.type_annotation.clone(),
+                    span: u.span.clone(),
+                })
+            }
+            Statement::UnmoldBackward(u) => {
+                Statement::UnmoldBackward(crate::parser::UnmoldBackwardStmt {
+                    target: u.target.clone(),
+                    type_annotation: u.type_annotation.clone(),
+                    source: self.rewrite_placeholder(&u.source, replacement, span),
+                    span: u.span.clone(),
+                })
+            }
             other => other.clone(),
         }
     }
@@ -2185,9 +2227,7 @@ impl Lowering {
         callee: &Expr,
         args: &[Expr],
     ) -> Result<IrVar, LowerError> {
-        let lambda_id = self.lambda_counter;
-        self.lambda_counter += 1;
-        let lambda_name = format!("_taida_partial_{}", lambda_id);
+        let lambda_name = self.next_lambda_symbol("partial");
 
         // Evaluate non-hole arguments and track hole positions
         let mut captured_vars: Vec<(usize, IrVar)> = Vec::new(); // (arg_index, ir_var)
@@ -2299,9 +2339,7 @@ impl Lowering {
         params: &[Param],
         body: &Expr,
     ) -> Result<IrVar, LowerError> {
-        let lambda_id = self.lambda_counter;
-        self.lambda_counter += 1;
-        let lambda_name = format!("_taida_lambda_{}", lambda_id);
+        let lambda_name = self.next_lambda_symbol("lambda");
 
         // キャプチャ変数の検出: ラムダ本体で使われる変数のうち、
         // パラメータでもなく、ユーザー定義関数でもないもの
@@ -2410,7 +2448,54 @@ impl Lowering {
                 }
             }
 
-            let body_var = self.lower_expr(&mut lambda_fn, body)?;
+            // F62B-022: a block-bodied lambda lowers its statements through
+            // the same machinery named functions use; the block's value is
+            // the last statement's yield (final expression or tail binding).
+            // Phase-2 review M-1: tail unmold bindings yield the BOUND
+            // value, whose type differs from the source (`Lax[n]() >=> x`
+            // yields the Int) — their return tag must not be derived from
+            // the source expression, so they carry no tag expression.
+            let (body_var, body_value_expr): (IrVar, Option<&Expr>) = match body {
+                Expr::Block(stmts, _) => {
+                    let Some((last, init)) = stmts.split_last() else {
+                        return Err(LowerError {
+                            message: "internal: empty lambda block body".to_string(),
+                        });
+                    };
+                    for stmt in init {
+                        self.lower_statement(&mut lambda_fn, stmt)?;
+                    }
+                    match last {
+                        Statement::Expr(e) => (self.lower_expr(&mut lambda_fn, e)?, Some(e)),
+                        Statement::Assignment(a) => {
+                            self.lower_statement(&mut lambda_fn, last)?;
+                            let v = lambda_fn.alloc_var();
+                            lambda_fn.push(IrInst::UseVar(v, a.target.clone()));
+                            (v, Some(&a.value))
+                        }
+                        Statement::UnmoldForward(u) => {
+                            self.lower_statement(&mut lambda_fn, last)?;
+                            let v = lambda_fn.alloc_var();
+                            lambda_fn.push(IrInst::UseVar(v, u.target.clone()));
+                            (v, None)
+                        }
+                        Statement::UnmoldBackward(u) => {
+                            self.lower_statement(&mut lambda_fn, last)?;
+                            let v = lambda_fn.alloc_var();
+                            lambda_fn.push(IrInst::UseVar(v, u.target.clone()));
+                            (v, None)
+                        }
+                        _ => {
+                            return Err(LowerError {
+                                message:
+                                    "internal: lambda block must end with an expression or binding"
+                                        .to_string(),
+                            });
+                        }
+                    }
+                }
+                other => (self.lower_expr(&mut lambda_fn, other)?, Some(other)),
+            };
 
             // NB-14: Set return type tag before Return (symmetric with lower_func_def)
             if let Some(&rtv) = self.return_tag_vars.get(&body_var) {
@@ -2420,8 +2505,8 @@ impl Lowering {
                     "taida_set_return_tag".to_string(),
                     vec![rtv],
                 ));
-            } else {
-                let tag = self.expr_type_tag(body);
+            } else if let Some(body_value_expr) = body_value_expr {
+                let tag = self.expr_type_tag(body_value_expr);
                 if tag > 0 {
                     let tag_var = lambda_fn.alloc_var();
                     lambda_fn.push(IrInst::ConstInt(tag_var, tag));
@@ -2666,7 +2751,10 @@ impl Lowering {
 /// the parser cannot place a pipeline-bound-name reference in those positions
 /// mid-pipeline, so they are left as-is. If that ever changes, the gate and this
 /// rewriter must grow together. Literals and other leaves are returned unchanged.
-fn rewrite_idents(expr: &Expr, renames: &std::collections::HashMap<String, String>) -> Expr {
+pub(crate) fn rewrite_idents(
+    expr: &Expr,
+    renames: &std::collections::HashMap<String, String>,
+) -> Expr {
     if renames.is_empty() {
         return expr.clone();
     }
@@ -2780,43 +2868,8 @@ fn rewrite_idents(expr: &Expr, renames: &std::collections::HashMap<String, Strin
 /// True if `expr` references any name in `bound_names`
 /// anywhere in its subtree. Used by `lower_pipeline` to decide whether a
 /// pipeline step should skip the classic `prev_result` auto-injection
-/// because the user explicitly consumed a pipeline-scope binding.
+/// Shared `=> name` binding-reference rule — single definition in
+/// `crate::parser::ast` (review C-6/C-9).
 fn native_expr_references_any_name(expr: &Expr, bound_names: &[String]) -> bool {
-    fn walk(e: &Expr, names: &[String]) -> bool {
-        match e {
-            Expr::Ident(n, _) => names.iter().any(|bn| bn == n),
-            Expr::BinaryOp(l, _, r, _) => walk(l, names) || walk(r, names),
-            Expr::UnaryOp(_, inner, _) => walk(inner, names),
-            Expr::FuncCall(callee, args, _) => {
-                walk(callee, names) || args.iter().any(|a| walk(a, names))
-            }
-            Expr::MethodCall(obj, _, args, _) => {
-                walk(obj, names) || args.iter().any(|a| walk(a, names))
-            }
-            Expr::FieldAccess(obj, _, _) => walk(obj, names),
-            Expr::BuchiPack(fields, _) => fields.iter().any(|f| walk(&f.value, names)),
-            Expr::ListLit(items, _) => items.iter().any(|x| walk(x, names)),
-            Expr::Pipeline(steps, _) => steps.iter().any(|s| walk(s, names)),
-            Expr::MoldInst(_, type_args, fields, _) => {
-                type_args.iter().any(|a| walk(a, names))
-                    || fields.iter().any(|f| walk(&f.value, names))
-            }
-            Expr::Unmold(inner, _) => walk(inner, names),
-            Expr::Lambda(_, body, _) => walk(body, names),
-            Expr::TypeInst(_, fields, _) => fields.iter().any(|f| walk(&f.value, names)),
-            Expr::Throw(inner, _) => walk(inner, names),
-            Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
-                arm.condition.as_ref().is_some_and(|c| walk(c, names))
-                    || arm.body.iter().any(|s| {
-                        if let Statement::Expr(e) = s {
-                            walk(e, names)
-                        } else {
-                            false
-                        }
-                    })
-            }),
-            _ => false,
-        }
-    }
-    walk(expr, bound_names)
+    crate::parser::expr_references_any_name(expr, bound_names)
 }

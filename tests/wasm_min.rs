@@ -262,9 +262,16 @@ fn wasm_min_size_gate() {
     // and scalars locally — referencing the polymorphic display
     // machinery from this path would cost ~16KB, which this gate caught.
     // Headroom kept at ~158 bytes.
+    // Unmold-rules track (2026-06-12): bumped 10,240 -> 10,752. The
+    // generic unmold gained the non-mold gorilla (diagnostic line + `><`
+    // + per-profile termination) and the custom-mold `__unmold` hook
+    // dispatch — both reachable from every `>=>` lowering, which
+    // pi_approx links: pi.wasm 9,9xx -> 10,698 (+~460). The gorilla is
+    // the runtime half of the bare-unmold rejection (the checker is the
+    // static half), so the cost is intentional. Headroom ~54 bytes.
     assert!(
-        pi_size > 0 && pi_size <= 10240,
-        "HARD GATE FAIL: pi.wasm should be <= 10,240 bytes (WC-7d gate), got {} bytes. \
+        pi_size > 0 && pi_size <= 10752,
+        "HARD GATE FAIL: pi.wasm should be <= 10,752 bytes (WC-7d gate), got {} bytes. \
          E33 core baseline is 8,348 bytes.",
         pi_size
     );

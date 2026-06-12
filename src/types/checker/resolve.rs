@@ -93,6 +93,237 @@ impl TypeChecker {
         Type::Generic("HostCapability".to_string(), vec![Type::Str, Type::Str])
     }
 
+    /// F62B-021: explicit-type-argument generic call —
+    /// `genfn[T1, T2](arg0, arg1)`. The `[]` binds the declared type
+    /// parameters directly (no inference), so return-position-only type
+    /// parameters work, and host-call Out schemas resolve per call site.
+    pub(super) fn infer_explicit_generic_call(
+        &mut self,
+        name: &str,
+        fd: &FuncDef,
+        type_args: &[Expr],
+        fields: &[BuchiField],
+        span: &Span,
+    ) -> Type {
+        if type_args.len() != fd.type_params.len() {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1505] `{}[...]` expects {} type argument(s) ({}), got {}. \
+                     Hint: write one type per declared type parameter: `{}[{}](...)`.",
+                    name,
+                    fd.type_params.len(),
+                    fd.type_params
+                        .iter()
+                        .map(|tp| tp.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    type_args.len(),
+                    name,
+                    fd.type_params
+                        .iter()
+                        .map(|tp| tp.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                span: span.clone(),
+            });
+            return Type::Unknown;
+        }
+        // Positional value arguments only — the parser names positional
+        // fields `_0`, `_1`, ... so a user-named field is detectable.
+        for field in fields {
+            let is_positional =
+                field.name.starts_with('_') && field.name[1..].chars().all(|c| c.is_ascii_digit());
+            if !is_positional {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1511] Explicit-type-argument call '{}[...](...)' takes positional \
+                         value arguments, got named field '{}'.",
+                        name, field.name
+                    ),
+                    span: field.span.clone(),
+                });
+            }
+        }
+
+        let generic_names: HashSet<String> =
+            fd.type_params.iter().map(|tp| tp.name.clone()).collect();
+        let mut bindings = HashMap::<String, Type>::new();
+        for (tp, ta) in fd.type_params.iter().zip(type_args.iter()) {
+            let ty = self.type_arg_expr_to_type(ta);
+            bindings.insert(tp.name.clone(), ty);
+        }
+
+        if fields.len() != fd.params.len() {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1301] Function '{}' takes {} argument(s), got {}. \
+                     Hint: Pass one value per parameter.",
+                    name,
+                    fd.params.len(),
+                    fields.len()
+                ),
+                span: span.clone(),
+            });
+        }
+        for (i, field) in fields.iter().enumerate() {
+            let Some(param) = fd.params.get(i) else {
+                continue;
+            };
+            let pattern = param
+                .type_annotation
+                .as_ref()
+                .map(|ty| self.registry.resolve_type(ty))
+                .unwrap_or(Type::Unknown);
+            let expected = self.substitute_generic_type(&pattern, &generic_names, &bindings);
+            let actual = self.infer_expr_type_with_expected(&field.value, &expected);
+            if actual != Type::Unknown
+                && expected != Type::Unknown
+                && !Self::contains_unknown(&expected)
+                && !self.registry.is_subtype_of(&actual, &expected)
+            {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1506] Argument {} of '{}' has type {}, expected {}. \
+                         Hint: Pass a value of the correct type, or use an explicit conversion.",
+                        i + 1,
+                        name,
+                        actual,
+                        expected
+                    ),
+                    span: field.value.span().clone(),
+                });
+            }
+        }
+
+        let ret_pattern = fd
+            .return_type
+            .as_ref()
+            .map(|ty| self.registry.resolve_type(ty))
+            .unwrap_or(Type::Unknown);
+        self.instantiate_generic_type(&ret_pattern, &generic_names, &bindings)
+    }
+
+    /// F62B-021: scan a generic function body for host-call Out slots that
+    /// reference a declared type parameter (`Uncage[b, m, T]()` /
+    /// `HostCall[steps, T]()`). Such functions need their schemas supplied
+    /// by call sites, so every call must use explicit type arguments.
+    pub(super) fn register_schema_passing_generic(&mut self, fd: &FuncDef) {
+        // Final-review #3: a type parameter nested inside a composite Out
+        // (`@[T]` etc.) has no hidden-schema representation — the checker
+        // and the interpreter would accept what native lowering cannot
+        // build. Reject at definition with the workaround named.
+        let composite = crate::parser::fn_composite_out_type_params(fd);
+        if !composite.is_empty() {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1510] Generic function '{}' nests type parameter(s) {} inside a composite host-call Out. \
+                     Only a plain type-parameter Out (`Uncage[b, m, T]`) is supported — declare the composite \
+                     as the parameter itself and pass it at the call site (e.g. `{}[@[Str]](...)`).",
+                    fd.name,
+                    composite.join(", "),
+                    fd.name
+                ),
+                span: fd.span.clone(),
+            });
+        }
+        // F62B-038 #11: the schema-param set itself is built once per
+        // program in `check_program` via the transitive closure
+        // (`close_schema_passing_type_params`) — a per-definition insert
+        // here would overwrite a closure entry with its direct-only
+        // subset. This hook now only enforces the composite-Out rule.
+    }
+
+    /// F62B-024: `InCage[builder, method, args]()` — validates the builder /
+    /// method / wire-encodable args and yields the builder type again.
+    pub(super) fn infer_in_cage_type(&mut self, type_args: &[Expr], span: &Span) -> Type {
+        if type_args.len() != 3 {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1505] `InCage[builder, method, args]()` requires exactly 3 `[]` argument(s), got {}.",
+                    type_args.len()
+                ),
+                span: span.clone(),
+            });
+            return Type::Named("CageBuilder".to_string());
+        }
+        self.check_cage_builder_arg("InCage", &type_args[0]);
+        self.check_cage_chain_method("InCage", &type_args[1]);
+        let args = &type_args[2];
+        let (args_ty, args_ok) = self.wire_encodable_expr_type(args);
+        if !args_ok {
+            self.push_wired_constraint_error("InCage args", &args_ty, args.span());
+        }
+        if !matches!(args_ty, Type::List(_)) && !matches!(args_ty, Type::Unknown) && args_ok {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E3601] InCage args must be a wire-encodable list, got {}. \
+                     Hint: pass positional arguments as `@[arg0, arg1, ...]`; use `@[]` for no arguments.",
+                    args_ty
+                ),
+                span: args.span().clone(),
+            });
+        }
+        Type::Named("CageBuilder".to_string())
+    }
+
+    /// F62B-024: `Uncage[builder, method, Out]()` — the final chain step;
+    /// fires the host call and yields `Async[Out]`.
+    pub(super) fn infer_uncage_type(&mut self, type_args: &[Expr], span: &Span) -> Type {
+        if type_args.len() != 3 {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1505] `Uncage[builder, method, Out]()` requires exactly 3 `[]` argument(s), got {}.",
+                    type_args.len()
+                ),
+                span: span.clone(),
+            });
+            return Type::Generic("Async".to_string(), vec![Type::Unknown]);
+        }
+        self.check_cage_builder_arg("Uncage", &type_args[0]);
+        self.check_cage_chain_method("Uncage", &type_args[1]);
+        let out = self.type_arg_expr_to_type(&type_args[2]);
+        Type::Generic("Async".to_string(), vec![out])
+    }
+
+    /// Shared builder-argument check for the chain molds: the first `[]`
+    /// argument must flow from `Cage[subject]()` (typed `CageBuilder`).
+    fn check_cage_builder_arg(&mut self, mold: &str, builder: &Expr) {
+        let builder_ty = self.infer_expr_type(builder);
+        let is_builder = matches!(&builder_ty, Type::Named(n) if n == "CageBuilder");
+        if !is_builder && builder_ty != Type::Unknown {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1517] {} requires a CageBuilder as its first argument (start the chain with `Cage[subject]()`), got {}.",
+                    mold, builder_ty
+                ),
+                span: builder.span().clone(),
+            });
+        }
+    }
+
+    /// Shared method-argument check for the chain molds: compile-time Str,
+    /// mirroring `HostStep[method, args]()`.
+    fn check_cage_chain_method(&mut self, mold: &str, method: &Expr) {
+        let method_ty = self.infer_expr_type(method);
+        if method_ty != Type::Str && method_ty != Type::Unknown {
+            self.errors.push(TypeError {
+                message: format!("[E1506] {} method must be Str, got {}.", mold, method_ty),
+                span: method.span().clone(),
+            });
+        }
+        if method_ty == Type::Str && self.string_const_expr(method).is_none() {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E3603] {} method must be a compile-time Str value. \
+                     Hint: use a string literal or a Str constant for the method name.",
+                    mold
+                ),
+                span: method.span().clone(),
+            });
+        }
+    }
+
     pub(super) fn infer_host_step_type(&mut self, type_args: &[Expr], span: &Span) -> Type {
         if type_args.len() != 2 {
             self.errors.push(TypeError {
@@ -343,32 +574,21 @@ impl TypeChecker {
     /// occupied by cyclic-inheritance detection.
     /// - Aliased imports (`>>>./m.td => @(Color: Paint)`) register the enum
     /// under the alias, mirroring the interpreter behaviour.
-    pub(super) fn register_imported_types(&mut self, imp: &crate::parser::ImportStmt) {
-        use crate::parser::Statement as S;
-
-        if imp.path == "taida-lang/abi" {
-            self.register_abi_imports(&imp.symbols);
-            return;
-        }
-
-        // Core bundled packages are handled elsewhere (net / crypto).
+    /// Resolve an import statement's target to its `.td` file, from the
+    /// importing file's location (relative paths) or the project package
+    /// store. `None` for core bundled packages and unresolvable targets.
+    /// Same path-resolution strategy as `validate_import_symbols`.
+    fn resolve_import_td_path(
+        source_file: &std::path::Path,
+        imp: &crate::parser::ImportStmt,
+    ) -> Option<std::path::PathBuf> {
         if imp.path.starts_with("npm:") || imp.path.starts_with("taida-lang/") {
-            return;
+            return None;
         }
-
-        // Same path-resolution strategy as `validate_import_symbols`.
-        let source_file = match &self.source_file {
-            Some(f) => f.clone(),
-            None => return,
-        };
-
-        let td_path: std::path::PathBuf = if imp.path.starts_with("./")
-            || imp.path.starts_with("../")
-            || imp.path.starts_with('/')
-        {
+        if imp.path.starts_with("./") || imp.path.starts_with("../") || imp.path.starts_with('/') {
             let source_dir = source_file.parent().unwrap_or(std::path::Path::new("."));
             let path = source_dir.join(&imp.path);
-            if path.exists() { path } else { return }
+            if path.exists() { Some(path) } else { None }
         } else {
             // Package import — resolve via .taida/deps/
             let source_dir = source_file.parent().unwrap_or(std::path::Path::new("."));
@@ -386,7 +606,11 @@ impl TypeChecker {
                 Some(res) => match &res.submodule {
                     Some(sub) => {
                         let sub_path = res.pkg_dir.join(format!("{}.td", sub));
-                        if sub_path.exists() { sub_path } else { return }
+                        if sub_path.exists() {
+                            Some(sub_path)
+                        } else {
+                            None
+                        }
                     }
                     None => {
                         let entry_name =
@@ -400,14 +624,98 @@ impl TypeChecker {
                             res.pkg_dir.join(&entry_name)
                         };
                         if entry_path.exists() {
-                            entry_path
+                            Some(entry_path)
                         } else {
-                            return;
+                            None
                         }
                     }
                 },
-                None => return,
+                None => None,
             }
+        }
+    }
+
+    /// F62B-040: a module's transitive schema-passing closure, following
+    /// its own imports depth-first (visited-guarded against cycles) so a
+    /// forwarding generic whose callee lives in another file is detected.
+    /// Returns `orig-name -> (declared type params, schema params)` for
+    /// every schema-passing generic the module defines.
+    fn module_schema_passing_closure(
+        td_path: &std::path::Path,
+        visited: &mut std::collections::HashSet<std::path::PathBuf>,
+    ) -> std::collections::HashMap<String, (Vec<String>, Vec<String>)> {
+        let canonical = td_path
+            .canonicalize()
+            .unwrap_or_else(|_| td_path.to_path_buf());
+        if !visited.insert(canonical) {
+            return Default::default();
+        }
+        let Ok(source) = std::fs::read_to_string(td_path) else {
+            return Default::default();
+        };
+        let (program, _) = crate::parser::parse(&source);
+        // Seed: the module's own imports, keyed by the local alias its
+        // bodies use.
+        let mut seed: std::collections::HashMap<String, (Vec<String>, Vec<String>)> =
+            std::collections::HashMap::new();
+        for stmt in &program.statements {
+            if let crate::parser::Statement::Import(imp2) = stmt
+                && let Some(dep_path) = Self::resolve_import_td_path(td_path, imp2)
+            {
+                let dep = Self::module_schema_passing_closure(&dep_path, visited);
+                for sym in &imp2.symbols {
+                    if let Some(entry) = dep.get(&sym.name) {
+                        let local = sym.alias.clone().unwrap_or_else(|| sym.name.clone());
+                        seed.insert(local, entry.clone());
+                    }
+                }
+            }
+        }
+        let fd_refs: Vec<&crate::parser::FuncDef> = program
+            .statements
+            .iter()
+            .filter_map(|s| match s {
+                crate::parser::Statement::FuncDef(fd) => Some(fd),
+                _ => None,
+            })
+            .collect();
+        let closure = crate::parser::close_schema_passing_type_params(&fd_refs, &seed);
+        let mut out = std::collections::HashMap::new();
+        for fd in &fd_refs {
+            if fd.type_params.is_empty() {
+                continue;
+            }
+            if let Some(schema) = closure.get(&fd.name)
+                && !schema.is_empty()
+            {
+                out.insert(
+                    fd.name.clone(),
+                    (
+                        fd.type_params.iter().map(|tp| tp.name.clone()).collect(),
+                        schema.clone(),
+                    ),
+                );
+            }
+        }
+        out
+    }
+
+    pub(super) fn register_imported_types(&mut self, imp: &crate::parser::ImportStmt) {
+        use crate::parser::Statement as S;
+
+        if imp.path == "taida-lang/abi" {
+            self.register_abi_imports(&imp.symbols);
+            return;
+        }
+
+        let source_file = match &self.source_file {
+            Some(f) => f.clone(),
+            None => return,
+        };
+
+        let td_path = match Self::resolve_import_td_path(&source_file, imp) {
+            Some(p) => p,
+            None => return,
         };
 
         let source = match std::fs::read_to_string(&td_path) {
@@ -415,6 +723,14 @@ impl TypeChecker {
             Err(_) => return,
         };
         let (program, _) = crate::parser::parse(&source);
+        // F62B-040: imported schema-passing generics (direct or forwarding)
+        // keep their call-form enforcement across the module boundary —
+        // without this an inference-form call to an imported generic whose
+        // type parameter IS inferable from the arguments passed the checker
+        // and reached native/wasm lowering with the hidden schema argument
+        // missing (an ABI arity mismatch).
+        let schema_closure =
+            Self::module_schema_passing_closure(&td_path, &mut std::collections::HashSet::new());
 
         // Build a map of imported-symbol-name → local-alias (or the same name).
         let requested: std::collections::HashMap<&str, &str> = imp
@@ -477,10 +793,108 @@ impl TypeChecker {
                     self.declared_header_arities
                         .insert(local_name.to_string(), 0);
                 }
+            } else if let S::ClassLikeDef(cl) = stmt
+                && let Some(&local_name) = requested.get(cl.name.as_str())
+            {
+                // F62B-008: imported pack / inheritance types must be
+                // registered like local declarations — `JSON[raw, Schema]()`
+                // (E1541), field-access typing, and call-site return-type
+                // resolution all read the registry. Previously only enums
+                // and function signatures crossed the module boundary, so
+                // an imported `Point = @(...)` was rejected as undefined
+                // even though the E1541 message says "import it".
+                if self.registry.type_defs.contains_key(local_name) {
+                    // A local redefinition is already registered — keep it
+                    // (same precedence as the enum path above).
+                } else if cl.name_args.is_none() && cl.type_params.is_empty() {
+                    let map_fields = |this: &Self, fields: &[crate::parser::FieldDef]| {
+                        fields
+                            .iter()
+                            .filter(|f| !f.is_method)
+                            .map(|f| {
+                                (
+                                    f.name.clone(),
+                                    f.type_annotation
+                                        .as_ref()
+                                        .map(|t| this.resolve_imported_type_expr(t, &type_aliases))
+                                        .unwrap_or(Type::Unknown),
+                                )
+                            })
+                            .collect::<Vec<(String, Type)>>()
+                    };
+                    match &cl.kind {
+                        crate::parser::ClassLikeKind::BuchiPack => {
+                            let fields = map_fields(self, &cl.fields);
+                            self.registry.register_type(local_name, fields);
+                            // Method fields resolve through mold_field_defs
+                            // (the same registry local definitions feed) —
+                            // without this, registering the type makes
+                            // `item.method()` a strict [E1509] miss.
+                            self.mold_field_defs
+                                .insert(local_name.to_string(), cl.fields.clone());
+                            self.declared_concrete_type_names
+                                .insert(local_name.to_string());
+                            self.declared_header_arities
+                                .insert(local_name.to_string(), 0);
+                        }
+                        crate::parser::ClassLikeKind::Inheritance { parent, .. } => {
+                            // Resolve the parent through the alias map; it
+                            // must already be registered (builtin `Error`,
+                            // an earlier import, or a local definition) —
+                            // otherwise skip rather than half-register.
+                            let parent_local = type_aliases
+                                .get(parent.as_str())
+                                .copied()
+                                .unwrap_or(parent.as_str());
+                            if self.registry.get_type_fields(parent_local).is_some() {
+                                let extra = map_fields(self, &cl.fields);
+                                let is_error_rooted = parent_local == "Error"
+                                    || self.registry.error_types.contains_key(parent_local);
+                                if is_error_rooted {
+                                    self.registry.register_error_type(
+                                        parent_local,
+                                        local_name,
+                                        extra,
+                                    );
+                                } else {
+                                    self.registry.register_inheritance(
+                                        parent_local,
+                                        local_name,
+                                        extra,
+                                    );
+                                }
+                                self.mold_field_defs
+                                    .insert(local_name.to_string(), cl.fields.clone());
+                                self.declared_concrete_type_names
+                                    .insert(local_name.to_string());
+                                self.declared_header_arities
+                                    .insert(local_name.to_string(), 0);
+                            }
+                        }
+                        crate::parser::ClassLikeKind::Alias { target } => {
+                            // Type alias: resolve the target through the
+                            // import renames and register under the local
+                            // name. Checker-only, like local aliases.
+                            let resolved = self.resolve_imported_type_expr(target, &type_aliases);
+                            self.registry.register_type_alias(local_name, resolved);
+                        }
+                        // Operation molds need their own registration path
+                        // (mold_defs + specs); they are not JSON schemas and
+                        // stay out of this fix's scope.
+                        crate::parser::ClassLikeKind::Mold { .. } => {}
+                    }
+                }
             } else if let S::FuncDef(fd) = stmt
                 && let Some(&local_name) = requested.get(fd.name.as_str())
             {
                 self.register_imported_function_signature(fd, local_name, &type_aliases);
+                // F62B-040: carry the schema-passing set over, under the
+                // local alias (type-parameter names are definition-side
+                // and survive aliasing unchanged).
+                if let Some((_, schema)) = schema_closure.get(fd.name.as_str()) {
+                    self.schema_passing_generic_funcs
+                        .insert(local_name.to_string(), schema.clone());
+                }
             }
         }
     }
@@ -615,7 +1029,8 @@ impl TypeChecker {
                 let has_collision = self.registry.type_defs.contains_key(&ed.name)
                     || self.registry.enum_defs.contains_key(&ed.name)
                     || self.func_types.contains_key(&ed.name)
-                    || self.registry.mold_defs.contains_key(&ed.name);
+                    || self.registry.mold_defs.contains_key(&ed.name)
+                    || self.registry.type_aliases.contains_key(&ed.name);
                 if has_collision {
                     self.errors.push(TypeError {
                         message: format!(
@@ -656,7 +1071,8 @@ impl TypeChecker {
                     let has_collision = self.registry.type_defs.contains_key(&td.name)
                         || self.registry.enum_defs.contains_key(&td.name)
                         || self.func_types.contains_key(&td.name)
-                        || self.registry.mold_defs.contains_key(&td.name);
+                        || self.registry.mold_defs.contains_key(&td.name)
+                        || self.registry.type_aliases.contains_key(&td.name);
                     if has_collision {
                         self.errors.push(TypeError {
                             message: format!(
@@ -695,6 +1111,26 @@ impl TypeChecker {
                     self.mold_field_defs
                         .insert(td.name.clone(), td.fields.clone());
                 }
+                ClassLikeKind::Alias { target } => {
+                    let has_collision = self.registry.type_defs.contains_key(&cl.name)
+                        || self.registry.enum_defs.contains_key(&cl.name)
+                        || self.func_types.contains_key(&cl.name)
+                        || self.registry.mold_defs.contains_key(&cl.name)
+                        || self.registry.type_aliases.contains_key(&cl.name);
+                    if has_collision {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1501] Name '{}' is already defined in this scope. \
+                                 Redefinition in the same scope is not allowed. \
+                                 Hint: Use a different name, or define it in an inner scope (shadowing is allowed).",
+                                cl.name
+                            ),
+                            span: cl.span.clone(),
+                        });
+                    }
+                    let resolved = self.registry.resolve_type(target);
+                    self.registry.register_type_alias(&cl.name, resolved);
+                }
                 ClassLikeKind::Mold { .. } => {
                     let md = cl;
                     // F42 sweep [E1501]: MoldDef collision check (the
@@ -710,7 +1146,8 @@ impl TypeChecker {
                     let has_collision = self.registry.type_defs.contains_key(&md.name)
                         || self.registry.enum_defs.contains_key(&md.name)
                         || self.func_types.contains_key(&md.name)
-                        || self.registry.mold_defs.contains_key(&md.name);
+                        || self.registry.mold_defs.contains_key(&md.name)
+                        || self.registry.type_aliases.contains_key(&md.name);
                     if has_collision {
                         self.errors.push(TypeError {
                             message: format!(
@@ -933,6 +1370,25 @@ impl TypeChecker {
                 }
             },
             Statement::FuncDef(fd) => {
+                // Phase-2 review M-3: function names join the same [E1501]
+                // collision space as type definitions — symmetrically, so
+                // the alias-first order is detected too (the alias side
+                // already checks func_types).
+                let type_collision = self.registry.type_defs.contains_key(&fd.name)
+                    || self.registry.enum_defs.contains_key(&fd.name)
+                    || self.registry.mold_defs.contains_key(&fd.name)
+                    || self.registry.type_aliases.contains_key(&fd.name);
+                if type_collision {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1501] Name '{}' is already defined in this scope. \
+                             Redefinition in the same scope is not allowed. \
+                             Hint: Use a different name, or define it in an inner scope (shadowing is allowed).",
+                            fd.name
+                        ),
+                        span: fd.span.clone(),
+                    });
+                }
                 let duplicate_func_name = !self.seen_func_defs.insert(fd.name.clone());
                 let generic_is_inferable = if fd.type_params.is_empty() {
                     true
@@ -960,6 +1416,7 @@ impl TypeChecker {
                         self.func_param_types.insert(fd.name.clone(), param_types);
                         if !fd.type_params.is_empty() {
                             self.generic_func_defs.insert(fd.name.clone(), fd.clone());
+                            self.register_schema_passing_generic(fd);
                         }
                     } else {
                         self.invalid_func_defs.insert(fd.name.clone());

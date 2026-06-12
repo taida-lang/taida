@@ -232,7 +232,8 @@ hexEncode(token) => tokenHex
 | ネイティブ | `getentropy(2)`、fallback で `/dev/urandom` |
 | 旧 JS ターゲット | `node:crypto` の `randomBytes` |
 | `wasm-wasi` / `wasm-full` | WASI `random_get` インポート |
-| `wasm-min` / `wasm-edge` | **コンパイル時 reject**（後述） |
+| `wasm-edge` | WASI `random_get` インポート（生成 glue が `crypto.getRandomValues` で提供） |
+| `wasm-min` | **コンパイル時 reject**（後述） |
 
 ---
 
@@ -254,17 +255,19 @@ hexEncode(token) => tokenHex
 | `constantTimeEquals` | 対応 | 対応 | 対応 | 対応 |
 | `hexEncode` / `base64Encode` | 対応 | 対応 | 対応 | 対応 |
 | `hexDecode` / `base64Decode` | reject | 対応 | reject | 対応 |
-| `randomBytes` | reject | 対応 | reject | 対応 |
+| `randomBytes` | reject | 対応 | 対応 | 対応 |
 
 ハッシュ系 / `hmacSha256` / `constantTimeEquals` / `hexEncode` /
 `base64Encode` は `Str` / `Bool` のみを返すため、guest 内の純粋な実装
 として全プロファイルで動作します。host capability bridge は使いません。
 
-`hexDecode` / `base64Decode` / `randomBytes` は `Bytes` を生成するため、
-Bytes ランタイムを持つ `wasm-wasi` / `wasm-full` でのみ利用できます。
-`randomBytes` は加えて WASI の `random_get` インポートで OS エントロピー
-を取得します。`wasm-min` / `wasm-edge` ではこれら 3 つはコンパイル時に
-決定的な「does not support」エラーで reject されます。
+`hexDecode` / `base64Decode` は `wasm-wasi` / `wasm-full` のランタイム層に
+実装があり、この 2 プロファイルでのみ利用できます。`randomBytes` は WASI
+の `random_get` インポートでエントロピーを取得し、`wasm-wasi` /
+`wasm-full`（WASI ホスト提供）に加えて `wasm-edge`（生成 glue が
+`crypto.getRandomValues` で提供）でも利用できます。`wasm-min` では
+`hexDecode` / `base64Decode` / `randomBytes` はコンパイル時に決定的な
+「does not support」エラーで reject されます。
 
 詳細は
 [`docs/reference/wasm_profiles.md`](../reference/wasm_profiles.md) を参照して

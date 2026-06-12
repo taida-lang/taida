@@ -444,7 +444,13 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
         .enforce_checker(),
     MoldSpec::exact("Stub", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::range("TODO", 0, Some(4), ANY4, MoldReturnKind::Pack).with_options(TODO_OPTIONS),
-    MoldSpec::exact("Cage", 2, ANY2, MoldReturnKind::Pack)
+    // F62B-024: `Cage[subject]()` (builder chain entry) or
+    // `Cage[subject, runner]()` (direct call).
+    MoldSpec::range("Cage", 1, Some(2), ANY2, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("InCage", 3, ANY3, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("Uncage", 3, ANY3, MoldReturnKind::Pack)
         .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
     MoldSpec::exact("CageRilla", 2, ANY2, MoldReturnKind::Pack)
         .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
@@ -532,6 +538,11 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("TypeExtends", 2, ANY2, MoldReturnKind::Bool),
     MoldSpec::exact("Exists", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("Contains", 2, ANY2, MoldReturnKind::Bool),
+    // F62B-020: ordering comparisons. `<=` is the binding operator, so
+    // "less than or equal" lives here; Between is the closed-interval
+    // range check the comparison was usually buried in.
+    MoldSpec::exact("Lte", 2, ANY2, MoldReturnKind::Bool),
+    MoldSpec::exact("Between", 3, ANY3, MoldReturnKind::Bool),
     MoldSpec::exact("SpanEquals", 3, ANY3, MoldReturnKind::Bool),
     MoldSpec::exact("SpanStartsWith", 3, ANY3, MoldReturnKind::Bool),
     MoldSpec::exact("SpanContains", 3, ANY3, MoldReturnKind::Bool),

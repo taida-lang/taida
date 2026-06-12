@@ -37,6 +37,19 @@ const OS_NET_DEFAULT_TIMEOUT_MS: i64 = 30_000;
 pub struct Lowering {
     /// ユーザー定義関数名のセット
     pub(crate) user_funcs: std::collections::HashSet<String>,
+    /// F62B-021: generic functions declaring type parameters, in order
+    /// (fn name → declared type-param names). Drives explicit-type-argument
+    /// call lowering.
+    pub(crate) generic_fn_type_params: std::collections::HashMap<String, Vec<String>>,
+    /// F62B-021: generic functions whose body passes a type parameter into
+    /// a host-call Out slot (fn name → schema-needing type params in
+    /// declared order). Such functions gain hidden `__taida_schema_{T}`
+    /// string parameters; explicit call sites append the resolved schema
+    /// descriptors as extra string-literal arguments.
+    pub(crate) generic_schema_params: std::collections::HashMap<String, Vec<String>>,
+    /// F62B-021: while lowering a schema-passing generic body, maps each
+    /// schema-needing type-param name to its hidden parameter name.
+    pub(crate) current_schema_params: std::collections::HashMap<String, String>,
     /// 関数名 → パラメータ定義（実効デフォルト補完/arity診断用）
     func_param_defs: std::collections::HashMap<String, Vec<crate::parser::Param>>,
     /// TypeDef 名 → フィールド名リスト
@@ -158,6 +171,11 @@ pub struct Lowering {
     module_key: Option<String>,
     /// ライブラリモジュールかどうか（is_library の早期判定用）
     is_library_module: bool,
+    /// F62B-013: entry として lower しているか。entry は `<<<` export が
+    /// あっても実行可能ファイル (`_taida_main` を持つ) として扱う —
+    /// guide 10_modules「ライブラリ vs 実行可能はファイルでなく呼び出し
+    /// 方で決まる」(interpreter のリファレンス挙動) に合わせる。
+    entry_mode: bool,
     /// QF-17: インポートされた TypeDef シンボル
     /// lower_type_inst で型メタデータが無い場合に constructor 呼び出しにフォールバック
     imported_type_symbols: std::collections::HashSet<String>,
@@ -364,6 +382,7 @@ impl Default for Lowering {
 mod abi;
 mod core;
 mod expr;
+pub(crate) use expr::rewrite_idents;
 mod imports;
 mod infer;
 mod json;

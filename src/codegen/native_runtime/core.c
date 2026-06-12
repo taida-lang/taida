@@ -18,6 +18,7 @@
 // F55 S4: getentropy(2) for crypto.randomBytes (glibc / macOS / *BSD).
 #if defined(__linux__) || defined(__APPLE__) || defined(__unix__)
 #include <sys/random.h>
+#include <sys/resource.h>  /* F62B-027: RLIMIT_STACK for the stack guard */
 #endif
 
 // Allocation-path counters for the perf measurement build. Compiled in only
@@ -1058,6 +1059,9 @@ taida_val taida_str_ends_with(const char* s, const char* suffix);
 taida_val taida_str_last_index_of(const char* s, const char* sub);
 taida_ptr taida_str_get(const char* s, taida_val idx);
 taida_ptr taida_str_chars(const char* s);
+taida_val taida_str_lt(taida_val a, taida_val b);
+taida_val taida_str_gt(taida_val a, taida_val b);
+taida_val taida_str_gte(taida_val a, taida_val b);
 // List state check methods
 taida_val taida_list_last_index_of(taida_ptr list_ptr, taida_val item);
 taida_val taida_list_any(taida_ptr list_ptr, taida_fn_ptr fn_ptr);
@@ -1353,6 +1357,57 @@ taida_val taida_get_return_tag(void) {
 }
 
 void taida_gorilla(void) { exit(1); }
+
+/* F62B-030: exit(code) prelude builtin — terminate the process with the
+   given code. exit() flushes stdio buffers per the C standard; the
+   declared Taida return type is :Int but control never returns. */
+taida_val taida_exit(taida_val code) { exit((int)code); }
+
+/* F62B-027: stack guard for non-tail recursion. The interpreter rejects
+   depth overruns with a diagnostic; native used to ride the OS stack
+   into a silent SIGSEGV. main() records the stack base and a budget
+   derived from RLIMIT_STACK (minus a safety margin for runtime/libc
+   frames); the compiler injects a `taida_stack_guard()` call into every
+   user-function entry (outside the TCO loop, so tail recursion is
+   unaffected), which compares the current stack position against the
+   budget and exits diagnostically instead of crashing. */
+/* The base is per-thread: HTTP serving and the async OS APIs run user
+   code on pthreads whose stacks live at unrelated addresses — comparing
+   a worker probe against the main thread's base would misfire (observed
+   as native HTTP servers dying mid-request). Each thread records its
+   own base on its first guarded call (depth 1, so the recorded base is
+   effectively the true one). The budget is process-wide. */
+static __thread char *taida_stack_guard_base = 0;
+static int64_t taida_stack_guard_budget = 0;
+
+void taida_stack_guard_init(void) {
+    int64_t limit = 8 * 1024 * 1024; /* conservative default */
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY
+        && (int64_t)rl.rlim_cur > 0) {
+        limit = (int64_t)rl.rlim_cur;
+    }
+    /* Leave 1 MiB of headroom for runtime / libc frames below the
+       guarded user frames. */
+    taida_stack_guard_budget = limit - (1024 * 1024);
+    if (taida_stack_guard_budget < 1024 * 1024) {
+        taida_stack_guard_budget = 1024 * 1024;
+    }
+}
+
+void taida_stack_guard(void) {
+    char probe;
+    if (!taida_stack_guard_base) {
+        taida_stack_guard_base = &probe;
+        return;
+    }
+    if (taida_stack_guard_budget
+        && (int64_t)(taida_stack_guard_base - &probe) > taida_stack_guard_budget) {
+        fprintf(stderr,
+                "Maximum call stack depth exceeded. Use tail recursion or restructure the code.\n");
+        exit(1);
+    }
+}
 
 // C18B-005 fix: print a `RuntimeError: <msg>` line to stderr and exit
 // with status 1. Used by the native Ordinal[] lowering to reject
@@ -2980,6 +3035,12 @@ taida_val taida_int_eq(taida_val a, taida_val b)  { return a == b ? 1 : 0; }
 taida_val taida_int_neq(taida_val a, taida_val b) { return a != b ? 1 : 0; }
 taida_val taida_str_eq(taida_val a, taida_val b)  { return (a && b) ? (strcmp((char*)a, (char*)b) == 0 ? 1 : 0) : (a == b ? 1 : 0); }
 taida_val taida_str_neq(taida_val a, taida_val b) { return (a && b) ? (strcmp((char*)a, (char*)b) != 0 ? 1 : 0) : (a != b ? 1 : 0); }
+// F62B-017: lexicographic ordering for Str operands of < / > / >=. UTF-8
+// byte order equals code-point order, so plain strcmp is the reference
+// semantics (mirrors the interpreter's String ordering).
+taida_val taida_str_lt(taida_val a, taida_val b)  { return strcmp(a ? (char*)a : "", b ? (char*)b : "") < 0 ? 1 : 0; }
+taida_val taida_str_gt(taida_val a, taida_val b)  { return strcmp(a ? (char*)a : "", b ? (char*)b : "") > 0 ? 1 : 0; }
+taida_val taida_str_gte(taida_val a, taida_val b) { return strcmp(a ? (char*)a : "", b ? (char*)b : "") >= 0 ? 1 : 0; }
 static int taida_is_string_value(taida_val v) {
     // Positive identification via the hidden 16-byte header. A Taida Str
     // value always points just past its header ([magic|rc][byte_len] |
@@ -5945,6 +6006,139 @@ static taida_val taida_abi_response_error(taida_val status, const char *message)
         message ? (taida_val)strlen(message) : (taida_val)strlen("handler error")
     );
     return taida_abi_response_new(status, headers, bytes, TAIDA_TAG_PACK);
+}
+
+// ── Host capability descriptors (native) ────────────────────────────
+// The descriptor constructors mirror the wasm runtime so HostCapability /
+// HostStep / HostCall values are real packs on native too. The native
+// handler binary has no host adapter loop, so Cage resolves to a
+// deterministic rejected Async — the error ceiling surfaces it like any
+// host failure. (A native host-call protocol over the stdin/stdout
+// bridge is future work; see docs/api/abi.md §6.)
+taida_val taida_abi_host_capability(taida_val name, taida_val kind) {
+    taida_val pack = taida_pack_new(3);
+    taida_pack_set_hash(pack, 0, taida_str_hash((taida_val)(intptr_t)"__type"));
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_STR);
+    taida_pack_set(pack, 0, (taida_val)(intptr_t)taida_str_new_copy("HostCapability"));
+    taida_pack_set_hash(pack, 1, taida_str_hash((taida_val)(intptr_t)"name"));
+    taida_pack_set_tag(pack, 1, TAIDA_TAG_STR);
+    taida_pack_set(pack, 1, name);
+    taida_pack_set_hash(pack, 2, taida_str_hash((taida_val)(intptr_t)"kind"));
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
+    taida_pack_set(pack, 2, kind);
+    return pack;
+}
+
+taida_val taida_abi_host_step(taida_val method, taida_val args, taida_val args_schema) {
+    taida_val pack = taida_pack_new(4);
+    taida_pack_set_hash(pack, 0, taida_str_hash((taida_val)(intptr_t)"__type"));
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_STR);
+    taida_pack_set(pack, 0, (taida_val)(intptr_t)taida_str_new_copy("HostStep"));
+    taida_pack_set_hash(pack, 1, taida_str_hash((taida_val)(intptr_t)"method"));
+    taida_pack_set_tag(pack, 1, TAIDA_TAG_STR);
+    taida_pack_set(pack, 1, method);
+    taida_pack_set_hash(pack, 2, taida_str_hash((taida_val)(intptr_t)"args"));
+    taida_pack_set_tag(pack, 2, 5 /* LIST */);
+    taida_pack_set(pack, 2, args);
+    taida_pack_set_hash(pack, 3, taida_str_hash((taida_val)(intptr_t)"args_schema"));
+    taida_pack_set_tag(pack, 3, TAIDA_TAG_STR);
+    taida_pack_set(pack, 3, args_schema);
+    return pack;
+}
+
+taida_val taida_abi_host_call(taida_val steps, taida_val schema) {
+    taida_val pack = taida_pack_new(3);
+    taida_pack_set_hash(pack, 0, taida_str_hash((taida_val)(intptr_t)"__type"));
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_STR);
+    taida_pack_set(pack, 0, (taida_val)(intptr_t)taida_str_new_copy("HostCall"));
+    taida_pack_set_hash(pack, 1, taida_str_hash((taida_val)(intptr_t)"steps"));
+    taida_pack_set_tag(pack, 1, 5 /* LIST */);
+    taida_pack_set(pack, 1, steps);
+    taida_pack_set_hash(pack, 2, taida_str_hash((taida_val)(intptr_t)"schema"));
+    taida_pack_set_tag(pack, 2, TAIDA_TAG_STR);
+    taida_pack_set(pack, 2, schema);
+    return pack;
+}
+
+taida_val taida_abi_host_cage(taida_val capability, taida_val call) {
+    (void)capability;
+    (void)call;
+    return taida_async_err(taida_make_error(
+        "HostCapabilityError",
+        "host capabilities are not available on the native handler runtime"));
+}
+
+/* F62B-024 — CageBuilder chain (`Cage[subject]() => InCage[...]() => ...
+   => Uncage[...]() >=> rows`). The builder is a plain pack carrying
+   `__cage_subject` + `__cage_steps` and deliberately NO `__type`, so
+   unmolding a builder is the plain-pack gorilla. Steps are copied on push
+   (value semantics: a base chain can be reused as a lightweight prepared
+   statement). */
+static taida_val taida_cage_builder_pack(taida_val subject, taida_val steps) {
+    taida_val pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, taida_str_hash((taida_val)(intptr_t)"__cage_subject"));
+    /* The subject is a HostCapability descriptor pack — tag it so the
+       tag-driven release / display / JSON paths treat it as a child pack
+       (final-review #2: an untagged slot skipped RC release and rendered
+       as a raw pointer). */
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_PACK);
+    taida_pack_set(pack, 0, subject);
+    taida_pack_set_hash(pack, 1, taida_str_hash((taida_val)(intptr_t)"__cage_steps"));
+    taida_pack_set_tag(pack, 1, 5 /* LIST */);
+    taida_pack_set(pack, 1, steps);
+    return pack;
+}
+
+static taida_val taida_cage_builder_steps_copy(taida_val builder, taida_val extra_step) {
+    taida_val old_steps = taida_pack_get(builder, taida_str_hash((taida_val)(intptr_t)"__cage_steps"));
+    taida_val steps = (taida_val)taida_list_new();
+    /* HostStep descriptors are packs (final-review #2). */
+    taida_list_set_elem_tag(steps, TAIDA_TAG_PACK);
+    if (old_steps) {
+        taida_val len = taida_list_length(old_steps);
+        for (taida_val i = 0; i < len; i++) {
+            steps = (taida_val)taida_list_push((taida_ptr)steps, taida_list_get(old_steps, i));
+        }
+    }
+    return (taida_val)taida_list_push((taida_ptr)steps, extra_step);
+}
+
+static int taida_cage_builder_check(taida_val builder, const char *mold) {
+    /* F62B-038 #6: a non-builder first argument — reachable only when an
+       Unknown-typed value bypasses the static E1517 check — fails the way
+       the interpreter does: "Runtime error: ..., got <Type>" on stderr,
+       exit 1. The taida_is_buchi_pack guard is load-bearing: a non-pack
+       value used to reach taida_pack_get's raw pointer walk and segfault
+       before this check could report anything. */
+    if (!taida_is_buchi_pack(builder)
+        || taida_pack_get(builder, taida_str_hash((taida_val)(intptr_t)"__cage_subject")) == 0
+        || taida_pack_get(builder, taida_str_hash((taida_val)(intptr_t)"__cage_steps")) == 0) {
+        char msg[224];
+        snprintf(msg, sizeof(msg),
+                 "%s requires a CageBuilder as its first argument (start the chain with `Cage[subject]()`), got %s",
+                 mold, taida_tag_name(taida_runtime_detect_tag(builder)));
+        taida_runtime_panic(msg);
+        return 0;
+    }
+    return 1;
+}
+
+taida_val taida_cage_builder_new(taida_val subject) {
+    return taida_cage_builder_pack(subject, (taida_val)taida_list_new());
+}
+
+taida_val taida_cage_builder_push(taida_val builder, taida_val step) {
+    if (!taida_cage_builder_check(builder, "InCage")) return 0;
+    taida_val subject = taida_pack_get(builder, taida_str_hash((taida_val)(intptr_t)"__cage_subject"));
+    return taida_cage_builder_pack(subject, taida_cage_builder_steps_copy(builder, step));
+}
+
+taida_val taida_cage_builder_fire(taida_val builder, taida_val final_step, taida_val out_schema) {
+    if (!taida_cage_builder_check(builder, "Uncage")) return 0;
+    taida_val subject = taida_pack_get(builder, taida_str_hash((taida_val)(intptr_t)"__cage_subject"));
+    taida_val steps = taida_cage_builder_steps_copy(builder, final_step);
+    taida_val call = taida_abi_host_call(steps, out_schema);
+    return taida_abi_host_cage(subject, call);
 }
 
 taida_val taida_abi_response_text(taida_val body_ptr) {
@@ -11131,7 +11325,20 @@ taida_val taida_async_race(taida_val list_ptr) {
 // Result:   BuchiPack fc=4, hash0=HASH_RES___VALUE → evaluate predicate, check throw, return __value or throw
 // Lax:      BuchiPack fc=4, hash0=HASH_HAS_VALUE → lax_unmold
 // Async:    [ASYNC_MAGIC, status, value, error, thread_handle, value_tag, error_tag]
+// F62B-026: unmolding a value that is not a mold is gorilla territory —
+// the old identity fallback was an implicit conversion (pretending a value
+// "came out" when there was nothing to take out). Diagnostic matches the
+// interpreter / JS runtimes verbatim.
+static taida_val taida_non_mold_unmold_gorilla(void) {
+    fprintf(stderr, "[E1545] Cannot unmold a non-mold value: `>=>` / `<=<` / `.unmold()` take a mold value (Lax, Gorillax, RelaxedGorillax, Result, Async, Stream, or a custom mold).\n");
+    fprintf(stderr, "><\n");
+    exit(1);
+    return 0;  // unreachable
+}
+
 taida_val taida_generic_unmold(taida_val ptr) {
+    // 0 must pass through unchanged: it is the throw-unwind placeholder
+    // (an upstream throw yields 0 while unwinding), not a user value.
     if (ptr == 0) return 0;
 
     // F58 P2-1: one readability probe + one magic load for the whole
@@ -11222,6 +11429,16 @@ taida_val taida_generic_unmold(taida_val ptr) {
         return taida_lax_unmold(ptr);
     }
 
+    // F62B-026: a machinery-less plain pack (no __type tag at all — e.g. a
+    // builder pack or a hand-written pack literal) is not a mold. Unmolding
+    // it is a program error, not an identity pass-through. Tagged packs and
+    // bare values stay identity: every value mold (Map / Trim / Abs / ...)
+    // returns its bare result and `Mold[...]() >=> x` is the documented
+    // binding idiom — the checker enforces the static rule ([E1545]).
+    if (!taida_pack_has_hash(ptr, (taida_val)HASH___TYPE)) {
+        return taida_non_mold_unmold_gorilla();
+    }
+
     // TODO mold unmold — check __type tag and extract via unm/default/sol/value channels.
     // The `unm` channel is returned when present (priority: unm > __default > sol > __value).
     if (taida_pack_has_hash(ptr, (taida_val)HASH___TYPE)) {
@@ -11254,6 +11471,18 @@ taida_val taida_generic_unmold(taida_val ptr) {
         }
     }
 
+    // F62B-034: custom mold `unmold` hook — stored as a closure under
+    // `__unmold` at construction (the interpreter's convention). Runs the
+    // hook instead of falling back to the `__value` (filling) channel.
+    // The hook's single `_` parameter is ignored, so a zero argument
+    // satisfies the callback shape (same convention as Result predicates).
+    if (hash0 == (taida_val)HASH___TYPE) {
+        taida_val unmold_fn = taida_pack_get(ptr, taida_str_hash((taida_val)(intptr_t)"__unmold"));
+        if (unmold_fn) {
+            return taida_invoke_callback1(unmold_fn, 0);
+        }
+    }
+
     // Custom mold default unmold:
     // pack with first field __type and a __value field.
     if (hash0 == (taida_val)HASH___TYPE &&
@@ -11266,7 +11495,8 @@ taida_val taida_generic_unmold(taida_val ptr) {
     if (unmold_magic == TAIDA_ASYNC_MAGIC) {
         return taida_async_unmold(ptr);
     }
-    // Not a monadic type or Async — return as-is (e.g., list, string, plain value)
+    // Not a monadic type or Async — bare values (list, string, float, ...)
+    // pass through unchanged; see the plain-pack comment above for why.
     return ptr;
 }
 
@@ -12709,22 +12939,24 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
         if (!is_monadic && fname[0] == '_' && fname[1] == '_') {
             continue;
         }
-        int ftype = taida_lookup_field_type(field_hash);
-        // C25B-028: pull per-slot tag from the pack layout so the
-        // payload uses the correct formatter (Int/Float/Str vs pointer
-        // heuristic). Slot tag of 0 means TAIDA_TAG_INT / untagged —
-        // the caller-level force_int_default_for_lax compensates for
-        // Lax `__default`/`__value` ambiguity. Reading the slot is not
-        // monadic-specific: every pack literal stamps per-field tags,
-        // and a FLOAT payload is unrecoverable from the value alone
-        // (it serialised as its raw bit pattern before this read).
-        if (ftype == 0) {
-            taida_val slot_tag = pack[2 + i * 3 + 1];
-            if (slot_tag == TAIDA_TAG_STR) ftype = 3;
-            else if (slot_tag == TAIDA_TAG_BOOL) ftype = 4;
-            else if (slot_tag == TAIDA_TAG_FLOAT) ftype = 2;
-            // TAIDA_TAG_INT (0) / other: leave as 0 and fall back to
-            // heuristic inside json_serialize_typed.
+        // F62B-019 (wasm twin): the per-slot tag wins over the global
+        // field-name registry — the registry keys on the field NAME hash
+        // alone, so two pack types sharing a name with different types
+        // (`tags: Str` on a D1 row vs `tags: @[Str]` on the response
+        // shape) corrupted each other. Slot tag of 0 means
+        // TAIDA_TAG_INT / untagged (indistinguishable), so only that
+        // case still consults the registry; a known non-scalar slot
+        // (PACK/LIST/CLOSURE) forces the structural walk.
+        taida_val slot_tag = pack[2 + i * 3 + 1];
+        int ftype;
+        if (slot_tag == TAIDA_TAG_STR) ftype = 3;
+        else if (slot_tag == TAIDA_TAG_BOOL) ftype = 4;
+        else if (slot_tag == TAIDA_TAG_FLOAT) ftype = 2;
+        else if (slot_tag == TAIDA_TAG_PACK || slot_tag == 5 /* LIST */
+                 || slot_tag == 6 /* CLOSURE */) {
+            ftype = 0; /* structural walk */
+        } else {
+            ftype = taida_lookup_field_type(field_hash);
         }
         // Lax payload: force formatting on `__value` and `__default`
         // based on the sibling slot's tag so `Value::Int(0)` doesn't

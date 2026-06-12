@@ -42,6 +42,41 @@ fn eval_unary_math(
     Ok(Some(Signal::Value(Value::Float(op(num)))))
 }
 
+/// Shared body of `Pad` / `PadLeft` / `PadRight` (F62B-003): pad `s` to
+/// `target_len` with repetitions of `pad_char`, appending when `pad_end`
+/// and prepending otherwise. Lengths follow the historical `Pad` semantics.
+fn pad_str_value(
+    s: std::sync::Arc<crate::interpreter::value::StrValue>,
+    target_len: i64,
+    pad_char: &str,
+    pad_end: bool,
+) -> Value {
+    if target_len <= 0 {
+        return Value::Str(s);
+    }
+    let target_len = target_len as usize;
+    if s.len() >= target_len {
+        return Value::Str(s);
+    }
+    let repeat_count = target_len - s.len();
+    let Some(padding_len) = pad_char.len().checked_mul(repeat_count) else {
+        return Value::Str(s);
+    };
+    let mut padding = String::new();
+    if padding.try_reserve_exact(padding_len).is_err() {
+        return Value::Str(s);
+    }
+    for _ in 0..repeat_count {
+        padding.push_str(pad_char);
+    }
+    let result = if pad_end {
+        format!("{}{}", s, padding)
+    } else {
+        format!("{}{}", padding, s)
+    };
+    Value::str(result)
+}
+
 fn make_lax_value(has_value: bool, value: Value, default: Value) -> Value {
     Value::pack(vec![
         ("has_value".into(), Value::Bool(has_value)),
@@ -963,31 +998,136 @@ impl Interpreter {
                         }
                     })
                     .unwrap_or_else(|| " ".to_string());
-                if target_len <= 0 {
-                    return Ok(Some(Signal::Value(Value::Str(s))));
+                Ok(Some(Signal::Value(pad_str_value(
+                    s,
+                    target_len,
+                    &pad_char,
+                    side == "end",
+                ))))
+            }
+
+            // F62B-003: positional-argument pad variants. Same semantics as
+            // `Pad[str, len](side, char)` with the side fixed; previously
+            // these fell through to the generic mold fallback and returned
+            // an unresolved `@(__value, __type)` pack.
+            "PadLeft" | "PadRight" => {
+                if type_args.len() < 3 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "{} requires 3 arguments: {}[str, len, char]()",
+                            name, name
+                        ),
+                    });
                 }
-                let target_len = target_len as usize;
-                if s.len() >= target_len {
-                    Ok(Some(Signal::Value(Value::Str(s))))
-                } else {
-                    let repeat_count = target_len - s.len();
-                    let Some(padding_len) = pad_char.len().checked_mul(repeat_count) else {
-                        return Ok(Some(Signal::Value(Value::Str(s))));
-                    };
-                    let mut padding = String::new();
-                    if padding.try_reserve_exact(padding_len).is_err() {
-                        return Ok(Some(Signal::Value(Value::Str(s))));
+                let s = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => s,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "{}: first argument must be a string, got {}",
+                                name, v
+                            ),
+                        });
                     }
-                    for _ in 0..repeat_count {
-                        padding.push_str(&pad_char);
+                    other => return Ok(Some(other)),
+                };
+                let target_len = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(Value::Int(n)) => n,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "{}: second argument must be an integer, got {}",
+                                name, v
+                            ),
+                        });
                     }
-                    let result = if side == "end" {
-                        format!("{}{}", s, padding)
-                    } else {
-                        format!("{}{}", padding, s)
-                    };
-                    Ok(Some(Signal::Value(Value::str(result))))
+                    other => return Ok(Some(other)),
+                };
+                let pad_char = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(Value::Str(c)) => c.as_string().clone(),
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "{}: third argument must be a string, got {}",
+                                name, v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Value(pad_str_value(
+                    s,
+                    target_len,
+                    &pad_char,
+                    name == "PadRight",
+                ))))
+            }
+
+            // F62B-020: ordering comparisons. `<=` is the binding operator,
+            // so "less than or equal" is a mold; `Between[x, lo, hi]()` is
+            // the closed-interval check (`lo <= x <= hi`). Operand rules
+            // inherit the `<` / `>` comparison semantics (numeric pairs,
+            // Str pairs by code-point order, same-Enum pairs by declaration
+            // order) via Value's ordering.
+            "Lte" => {
+                if type_args.len() < 2 {
+                    return Err(RuntimeError {
+                        message: "Lte requires 2 arguments: Lte[a, b]()".into(),
+                    });
                 }
+                let a = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let b = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Value(Value::Bool(a <= b))))
+            }
+            "Between" => {
+                if type_args.len() < 3 {
+                    return Err(RuntimeError {
+                        message: "Between requires 3 arguments: Between[x, lo, hi]()".into(),
+                    });
+                }
+                let x = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let lo = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let hi = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Value(Value::Bool(lo <= x && x <= hi))))
+            }
+
+            // F62B-003: search / replace molds delegate to the string-method
+            // implementations so the mold form and the method form can never
+            // disagree (`IndexOf[s, n]()` ≡ `s.indexOf(n)`). Previously these
+            // fell through to the generic mold fallback.
+            "IndexOf" | "LastIndexOf" | "Contains" | "ReplaceAll" => {
+                let (method, required, usage) = match name {
+                    "IndexOf" => ("indexOf", 2, "IndexOf[str, needle]()"),
+                    "LastIndexOf" => ("lastIndexOf", 2, "LastIndexOf[str, needle]()"),
+                    "Contains" => ("contains", 2, "Contains[str, needle]()"),
+                    _ => ("replaceAll", 3, "ReplaceAll[str, old, new]()"),
+                };
+                if type_args.len() < required {
+                    return Err(RuntimeError {
+                        message: format!("{} requires {} arguments: {}", name, required, usage),
+                    });
+                }
+                let subject = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                self.eval_method_call(&subject, method, &type_args[1..])
+                    .map(Some)
             }
 
             // ── Num molds ────────────────────────────────────
@@ -2465,6 +2605,36 @@ impl Interpreter {
         matches!(value.get_field("__type"), Some(Value::Str(s)) if s.as_str() == expected)
     }
 
+    /// F62B-024: split a CageBuilder pack (`Cage[subject]()` result) into its
+    /// subject and accumulated steps. The builder is a plain pack carrying
+    /// `__cage_subject` + `__cage_steps` and deliberately no `__type`.
+    fn cage_builder_parts(value: &Value, mold: &str) -> Result<(Value, Vec<Value>), RuntimeError> {
+        let subject = value.get_field("__cage_subject");
+        let steps = value.get_field("__cage_steps");
+        match (subject, steps) {
+            (Some(subject), Some(Value::List(items))) => {
+                Ok((subject.clone(), items.as_ref().clone()))
+            }
+            _ => Err(RuntimeError {
+                message: format!(
+                    "{} requires a CageBuilder as its first argument (start the chain with `Cage[subject]()`), got {}",
+                    mold,
+                    Self::type_name_of(value)
+                ),
+            }),
+        }
+    }
+
+    /// F62B-024: one HostStep descriptor pack — the exact shape the
+    /// `HostStep[method, args]()` constructor produces.
+    fn host_step_pack(method: String, args: Value) -> Value {
+        Value::pack(vec![
+            ("__type".into(), Value::str("HostStep".to_string())),
+            ("method".into(), Value::str(method)),
+            ("args".into(), args),
+        ])
+    }
+
     fn host_descriptor_str_field(
         value: &Value,
         descriptor: &str,
@@ -3025,9 +3195,23 @@ impl Interpreter {
             // longer canonical. Interpreter has no executable CageRilla
             // branch today; JSRilla descriptors are handled by the JS backend.
             "Cage" => {
+                // F62B-024: the 1-arg form returns a CageBuilder — a plain
+                // pack (deliberately no `__type`, so unmolding it is the
+                // plain-pack gorilla) carrying the capability and an empty
+                // step list. `InCage` / `Uncage` extend and fire it.
+                if type_args.len() == 1 {
+                    let subject = match self.eval_expr(&type_args[0])? {
+                        Signal::Value(v) => v,
+                        other => return Ok(Some(other)),
+                    };
+                    return Ok(Some(Signal::Value(Value::pack(vec![
+                        ("__cage_subject".into(), subject),
+                        ("__cage_steps".into(), Value::list(Vec::new())),
+                    ]))));
+                }
                 if type_args.len() < 2 {
                     return Err(RuntimeError {
-                        message: "Cage requires 2 type arguments: Cage[subject, runner]".into(),
+                        message: "Cage requires a subject: Cage[subject]() for a builder chain, or Cage[subject, runner]() for a direct call".into(),
                     });
                 }
                 let cage_value = match self.eval_expr(&type_args[0])? {
@@ -4948,6 +5132,74 @@ impl Interpreter {
                     ("name".into(), Value::str(name)),
                     ("kind".into(), Value::str(kind)),
                 ]))))
+            }
+            "InCage" => {
+                // F62B-024: `InCage[builder, method, args]()` — push one step
+                // onto the builder and return the extended builder (value
+                // semantics: the input builder is untouched, enabling base-
+                // chain reuse).
+                if type_args.len() != 3 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "InCage requires exactly 3 type arguments: InCage[builder, method, args](), got {}",
+                            type_args.len()
+                        ),
+                    });
+                }
+                let builder = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let (subject, steps) = Self::cage_builder_parts(&builder, "InCage")?;
+                let method = self.eval_host_boundary_str_arg(&type_args[1], "InCage method")?;
+                let args_value = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                if !matches!(args_value, Value::List(_)) {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "InCage args must be a list, got {}",
+                            Self::type_name_of(&args_value)
+                        ),
+                    });
+                }
+                let mut steps = steps;
+                steps.push(Self::host_step_pack(method, args_value));
+                Ok(Some(Signal::Value(Value::pack(vec![
+                    ("__cage_subject".into(), subject),
+                    ("__cage_steps".into(), Value::list(steps)),
+                ]))))
+            }
+            "Uncage" => {
+                // F62B-024: `Uncage[builder, method, Out]()` — push the final
+                // (arg-less) step, assemble the HostCall envelope, and fire
+                // the host cage. The chain builds a description; the host
+                // call is issued exactly once, here. `Out` is a type
+                // reference and is not evaluated (same as HostCall's Out).
+                if type_args.len() != 3 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "Uncage requires exactly 3 type arguments: Uncage[builder, method, Out](), got {}",
+                            type_args.len()
+                        ),
+                    });
+                }
+                let builder = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let (subject, steps) = Self::cage_builder_parts(&builder, "Uncage")?;
+                let method = self.eval_host_boundary_str_arg(&type_args[1], "Uncage method")?;
+                let mut steps = steps;
+                steps.push(Self::host_step_pack(method, Value::list(Vec::new())));
+                let host_call = Value::pack(vec![
+                    ("__type".into(), Value::str("HostCall".to_string())),
+                    ("steps".into(), Value::list(steps)),
+                ]);
+                Ok(Some(Signal::Value(
+                    self.eval_host_call_cage(subject, host_call)?,
+                )))
             }
             "HostStep" => {
                 if type_args.len() != 2 {

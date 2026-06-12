@@ -48,6 +48,21 @@ fn signal_name(sig: &Signal) -> &'static str {
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
 use std::sync::{Arc, Mutex};
 
+/// F62B-005: the user-argument slice for `argv()`, computed by the CLI
+/// entry point (which alone knows which tokens it consumed as its own
+/// options). Empty when never set (REPL / embedded interpreters).
+static USER_ARGV: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Record the user arguments exposed through `argv()`. First call wins;
+/// the CLI calls this exactly once before running a script.
+pub fn set_user_argv(args: Vec<String>) {
+    let _ = USER_ARGV.set(args);
+}
+
+fn user_argv() -> &'static [String] {
+    USER_ARGV.get().map(|v| v.as_slice()).unwrap_or(&[])
+}
+
 /// Maximum file size for Read / ReadAsync (64 MB).
 const MAX_READ_SIZE: u64 = 64 * 1024 * 1024;
 /// Default timeout for network operations (connect/send/recv/listen).
@@ -271,7 +286,7 @@ fn make_list_dir_lax_failure(kind: &str) -> Value {
 fn default_stat_pack() -> Value {
     Value::pack(vec![
         ("size".into(), Value::Int(0)),
-        ("modified".into(), Value::str(String::new())),
+        ("modified".into(), Value::Int(0)),
         ("isDir".into(), Value::Bool(false)),
     ])
 }
@@ -401,45 +416,6 @@ fn extract_exit_code(status: std::process::ExitStatus) -> i64 {
         }
     }
     -1
-}
-
-/// Format a SystemTime as RFC3339/UTC string (seconds precision).
-fn format_rfc3339_utc(time: std::time::SystemTime) -> String {
-    let duration = time
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = duration.as_secs();
-
-    // Manual UTC calendar calculation (no chrono dependency)
-    let days = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
-
-    // Days since 1970-01-01 to (year, month, day) — civil_from_days algorithm
-    let (year, month, day) = civil_from_days(days as i64);
-
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hours, minutes, seconds
-    )
-}
-
-/// Convert days since 1970-01-01 to (year, month, day).
-/// Based on Howard Hinnant's civil_from_days algorithm.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u32; // day of era [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
-    let mp = (5 * doy + 2) / 153; // month index [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // day [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // month [1, 12]
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
 }
 
 // ── HTTP helper (minimal HTTP/1.1 client using tokio TcpStream) ──
@@ -765,7 +741,7 @@ impl Interpreter {
                 }
             }
 
-            // ── Stat[path]() → Lax[@(size: Int, modified: Str, isDir: Bool)] ──
+            // ── Stat[path]() → Lax[@(size: Int, modified: Int, isDir: Bool)] ──
             "Stat" => {
                 if type_args.is_empty() {
                     return Err(RuntimeError {
@@ -785,11 +761,21 @@ impl Interpreter {
                 match std::fs::metadata(&path) {
                     Ok(meta) => {
                         let size = meta.len() as i64;
-                        let modified = meta.modified().map(format_rfc3339_utc).unwrap_or_default();
+                        // F62B-009: docs (os.md §1.5) and the declared field
+                        // type promise epoch milliseconds (Int); the ISO 8601
+                        // string the implementations returned put a Str in an
+                        // Int-typed field and made mtime arithmetic
+                        // (`nowMs() - st.modified`) impossible.
+                        let modified = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0);
                         let is_dir = meta.is_dir();
                         let stat_pack = Value::pack(vec![
                             ("size".into(), Value::Int(size)),
-                            ("modified".into(), Value::str(modified)),
+                            ("modified".into(), Value::Int(modified)),
                             ("isDir".into(), Value::Bool(is_dir)),
                         ]);
                         Ok(Some(Signal::Value(make_lax_success(stat_pack))))
@@ -1551,9 +1537,14 @@ impl Interpreter {
 
             // ── argv() → @[Str] (CLI user args) ──────────────
             "argv" => {
-                // Interpreter mode is typically: taida <script.td> [args...]
-                // Expose only user args to match JS/native runtime behavior.
-                let argv: Vec<Value> = std::env::args().skip(2).map(Value::str).collect();
+                // F62B-005: the CLI computes the user-argument slice
+                // (everything after the first standalone `--`, or after the
+                // script path when no separator is given) and stores it via
+                // `set_user_argv` — naive positional skipping leaked `--`,
+                // taida's own options, and even the script name depending on
+                // option order. When unset (REPL / embedded use) argv is
+                // empty: there are no user args in those modes.
+                let argv: Vec<Value> = user_argv().iter().cloned().map(Value::str).collect();
                 Ok(Some(Signal::Value(Value::list(argv))))
             }
 
@@ -3154,20 +3145,6 @@ mod tests {
         assert!(!result_is_success(&val));
     }
 
-    #[test]
-    fn test_format_rfc3339_utc_epoch() {
-        let epoch = std::time::UNIX_EPOCH;
-        assert_eq!(format_rfc3339_utc(epoch), "1970-01-01T00:00:00Z");
-    }
-
-    #[test]
-    fn test_format_rfc3339_utc_known_date() {
-        // 2025-01-01T00:00:00Z = 1735689600 seconds since epoch
-        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1735689600);
-        let s = format_rfc3339_utc(t);
-        assert_eq!(s, "2025-01-01T00:00:00Z");
-    }
-
     // ── Integration tests using Interpreter ──
 
     fn run_code(code: &str) -> Vec<String> {
@@ -3657,7 +3634,10 @@ stdout(typeof(args))"#,
     // ── Stat modified field format ──
 
     #[test]
-    fn test_stat_modified_rfc3339() {
+    fn test_stat_modified_epoch_ms() {
+        // F62B-009: docs (os.md §1.5) and the declared field type promise
+        // epoch milliseconds (Int) so mtime arithmetic works; the previous
+        // implementation returned an RFC3339 string in the Int-typed field.
         let dir = std::path::PathBuf::from("/tmp/taida_test_os_stat_modified");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -3667,20 +3647,16 @@ stdout(typeof(args))"#,
         let code = format!(
             r#"result <= Stat["{}"]()
 result >=> info
-stdout(info.modified)"#,
+m: Int <= info.modified
+stdout((m > 1000000000000).toString())
+stdout((nowMs() - m >= 0).toString())"#,
             path
         );
         let output = run_code(&code);
-        // Should be RFC3339/UTC: YYYY-MM-DDTHH:MM:SSZ
-        assert!(
-            output[0].ends_with('Z'),
-            "modified should end with Z: {}",
-            output[0]
-        );
-        assert!(
-            output[0].contains('T'),
-            "modified should contain T: {}",
-            output[0]
+        assert_eq!(
+            output,
+            vec!["true", "true"],
+            "modified must be epoch ms and usable in arithmetic"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -1453,22 +1453,18 @@ fn interpreter_skip_list() -> Vec<&'static str> {
 fn native_expected_reject_list() -> Vec<&'static str> {
     vec![
         "compile_stream", // Stream[T] is outside the native backend capability set
-        // E32B-023 (Lock-N): Native and wasm-* lower mutual cycles to
-        // plain calls and SIGSEGV at depth, so the checker now rejects
-        // **any** mutual recursion with `[E0700]`. Interpreter / JS
-        // continue to compile and run these via the trampoline.
-        "compile_mutual_recursion",
-        "compile_c12_3_mutual_tail",
+                          // F62B-002: tail-only mutual cycles are merged into a self-tail
+                          // dispatcher at lowering, so `compile_mutual_recursion` /
+                          // `compile_c12_3_mutual_tail` now compile and run natively.
+                          // Non-tail cycles stay rejected ([E1614] + [E0700]).
     ]
 }
 
 /// Per-fixture expected reject substring. Falls back to the
-/// historical Stream capability message for fixtures not listed here.
-fn native_reject_expected_substring(stem: &str) -> &'static str {
-    match stem {
-        "compile_mutual_recursion" | "compile_c12_3_mutual_tail" => "[E0700]",
-        _ => "unsupported mold type: Stream",
-    }
+/// historical Stream capability message for fixtures not listed here
+/// (per-fixture overrides hang off `_stem` when one diverges).
+fn native_reject_expected_substring(_stem: &str) -> &'static str {
+    "unsupported mold type: Stream"
 }
 
 // =========================================================================
@@ -3718,7 +3714,7 @@ waitBoth p: Int =
 => :Str
 
 out <= waitBoth(0)
-out >=> value
+value <= out
 stdout(value)
 "#;
 
@@ -3739,7 +3735,7 @@ waitWithTimeout p: Int =
 => :Str
 
 out <= waitWithTimeout(0)
-out >=> value
+value <= out
 stdout(value)
 "#;
 
@@ -4195,7 +4191,7 @@ stdout(flat)
             "unmold_negative_boundary",
             r#"
 x <= -2147483648
-x >=> y
+Lax[x]() >=> y
 stdout(y.toString())
 "#,
         ),
@@ -4993,10 +4989,9 @@ stdout(people.get(2).getOrDefault(@(name <= "", age <= 0)).age.toString())
 prefix <= "v:"
 
 data <= @[1, 2, 3, 4, 5]
-filtered <= Filter[data, _ x: Int = x > threshold]()
-filtered >=> fList
+Filter[data, _ x: Int = x > threshold]() >=> fList
 mapped <= Map[fList, _ x: Int = prefix + x.toString()]()
-mapped >=> mList
+mList <= mapped
 stdout(mList)
 "#,
         ),
@@ -5417,7 +5412,7 @@ stdout(test(-1, "T"))
 Error => E2 = @(code: Int)
 
 buildMsg err: Str =
-  @(tag <= "mid", detail <= err) >=> info
+  info <= @(tag <= "mid", detail <= err)
   info.tag + ":" + info.detail
 => :Str
 
@@ -36978,11 +36973,13 @@ stdout(r2)
 /// B11-5e: If with pipeline clamp pattern — mixed top-level and nested _
 #[test]
 fn test_b11_if_mold_pipeline_clamp_parity() {
+    // One `_` per pipeline stage: re-using the piped value in several
+    // positions goes through a `=> v` bind-and-forward.
     let source = r#"
-150 => If[_ > 100, 100, _]() => r1
+150 => v => If[v > 100, 100, v]() => r1
 stdout(r1)
 
-50 => If[_ > 100, 100, _]() => r2
+50 => w => If[w > 100, 100, w]() => r2
 stdout(r2)
 "#;
     assert_backend_parity_for_source(source, "b11_if_pipeline_clamp");
@@ -39826,9 +39823,9 @@ fn d28b_009_nan_propagation_three_backend_parity() {
 Sqrt[-1.0]() >=> nan
 nan_value: Float <= nan
 debug(nan_value)
-Div[nan_value, 2.0] >=> nan_div
+Div[nan_value, 2.0]() >=> nan_div
 debug(nan_div)
-Mod[nan_value, 3.0] >=> nan_mod
+Mod[nan_value, 3.0]() >=> nan_mod
 debug(nan_mod)
 nan_plus <= nan_value + 1.0
 debug(nan_plus)
@@ -39847,15 +39844,15 @@ fn d28b_009_inf_arithmetic_three_backend_parity() {
         return;
     }
     let src = r#"
-Div[1e308, 1e-308] >=> big
+Div[1e308, 1e-308]() >=> big
 big_value: Float <= big
 debug(big_value)
-Div[-1e308, 1e-308] >=> negbig
+Div[-1e308, 1e-308]() >=> negbig
 negbig_value: Float <= negbig
 debug(negbig_value)
-Mod[1.5, big_value] >=> m_pos
+Mod[1.5, big_value]() >=> m_pos
 debug(m_pos)
-Mod[2.5, negbig_value] >=> m_neg
+Mod[2.5, negbig_value]() >=> m_neg
 debug(m_neg)
 plus_inf <= big_value + 1.0
 debug(plus_inf)
@@ -41574,34 +41571,18 @@ stdout(isEven(50000))
         );
     }
 
-    // Native must reject with `[E0700]` before it can lower the
-    // program. The error is surfaced via the build subcommand because
-    // the type-checker runs once we know the compile target.
+    // F62B-002: tail-only mutual cycles are merged into a self-tail
+    // dispatcher at lowering, so native now ACCEPTS this program and must
+    // produce the same answer at 50k depth (the old [E0700] wholesale
+    // reject is retained only for cycles outside the mergeable subset —
+    // pinned by tests/f62b002_mutual_tco_native.rs).
     let tmp = unique_temp_path("taida_parity_e32b_023", "native", "td");
     fs::write(&tmp, source).expect("failed to write E32B-023 source");
-    let native_err = run_native_build_error(&tmp, "e32b_023_native_mutual_recursion_rejected")
-        .expect("native build must fail for E32B-023 mutual recursion");
-    assert!(
-        native_err.contains("[E0700]"),
-        "native rejection must cite [E0700], got: {}",
-        native_err
-    );
-    assert!(
-        native_err.contains("Mutual recursion"),
-        "native rejection must explain mutual recursion, got: {}",
-        native_err
-    );
-
-    // wasm-min covers the wasm lowering pipeline (the same checker runs
-    // for every wasm-* profile via `set_compile_target`, so wasm-min is
-    // sufficient as the canonical wasm reject pin without paying the
-    // wasm-full link cost).
-    let wasm_err = run_wasm_min_build_error(&tmp, "e32b_023_wasm_mutual_recursion_rejected")
-        .expect("wasm-min build must fail for E32B-023 mutual recursion");
-    assert!(
-        wasm_err.contains("[E0700]"),
-        "wasm-min rejection must cite [E0700], got: {}",
-        wasm_err
+    let native_out =
+        run_native(&tmp).expect("native build+run must succeed for tail-only mutual recursion");
+    assert_eq!(
+        native_out, interp,
+        "interpreter/native mismatch for deep tail-only mutual recursion"
     );
 
     let _ = fs::remove_file(&tmp);
@@ -41625,17 +41606,17 @@ fn test_e32b_046_native_mutual_recursion_anchor_points_at_user_func() {
 
 a n: Int =
   | n == 0 |> 1
-  | _ |> b(n - 1)
+  | _ |> 1 + b(n - 1)
 => :Int
 
 b n: Int =
   | n == 0 |> 1
-  | _ |> c(n - 1)
+  | _ |> 1 + c(n - 1)
 => :Int
 
 c n: Int =
   | n == 0 |> 1
-  | _ |> a(n - 1)
+  | _ |> 1 + a(n - 1)
 => :Int
 
 stdout(a(10))

@@ -351,15 +351,19 @@ exit code: Int => :Int
 
 ```taida fragment
 | configValid |> startServer()
-| _           |> stderr("config 不正") => exit(2)
+| _ |> exit(2)
 ```
 
+(`stderr(...) => exit(2)` のようなパイプ連結は使えません — `exit(2)` は
+`Int` に評価される即時呼び出しなので、関数でない値へのパイプとして
+`[E1544]` になります。メッセージを出してから終了したい場合は、関数本体
+など文を並べられる位置で `stderr(...)` と `exit(2)` を別文に分けます。)
+
 「致命的エラーで終了したい」だけのケースは `exit(1)` ではなく `><` を
-使う方が Taida 流です:
+使う方が Taida 流です。`><` はパイプ末尾にも置けます:
 
 ```taida fragment
-| has_error |> stderr("致命的エラー") => ><
-| _         |> stdout("正常終了")
+"致命的エラー" => stderr(_) => ><
 ```
 
 ---
@@ -652,12 +656,26 @@ Div[10, 0]().has_value   // false
 | モールド | `[]` 必須 | 戻り値 | 説明 |
 |---------|----------|--------|------|
 | `If[cond, then, else]()` | cond, then, else | `T` | 2 分岐の条件式 (短絡評価) |
+| `Lte[a, b]()` | a, b | `Bool` | `a <= b` (「以下」比較 — `<=` は束縛演算子のためモールドで提供) |
+| `Between[x, lo, hi]()` | x, lo, hi | `Bool` | 閉区間チェック `lo <= x <= hi` |
+
+`Lte` / `Between` のオペランドルールは `<` / `>` / `>=` と同じです
+(numeric 同士、Str 同士 — コードポイント順、同一 Enum 同士 — 宣言順)。
+
+```taida fragment
+// 文字範囲チェック ([a-z]) — Between が直接の表現
+Between[c, "a", "z"]()
+
+// パイプ形
+score => Between[_, 0, 100]() => valid
+```
 
 ```taida fragment
 result <= If[x > 0, "positive", "negative"]()
 
-// パイプラインで _ を複数回参照 (clamp パターン)
-150 => If[_ > 100, 100, _]() => clamped   // 100
+// パイプラインで前段値を複数回使う (clamp パターン):
+// `_` は 1 ステージ 1 個までなので、束縛転送で名前を付ける
+150 => v => If[v > 100, 100, v]() => clamped   // 100
 ```
 
 `If` は **2 分岐向き** です。3 分岐以上は `| cond |> value` 構文を使用
@@ -1091,6 +1109,7 @@ str_b <= StrOf[req.path, req.bytes]()          // モールド形式
 | 関数 / メソッド | 例外バックエンド | 補足 |
 |----------------|------------------|------|
 | `stdinLine` | `wasm-min` / `wasm-edge` で利用不可 | WASI 入力の TTY 抽象が必要。 |
+| `nowMs` | `wasm-min` で利用不可 | WASI `clock_time_get` インポートが必要。`wasm-wasi` / `wasm-full` は WASI ホストの実時計、`wasm-edge` は生成 glue が `Date.now()` で提供する。 |
 | Regex `\b` / `\B` | Native POSIX ERE で非対応 | 単語境界が必要なら Interpreter に限定、または `(^|[^A-Za-z0-9_])` で代替。 |
 | Regex `s` フラグ (dotall) | Native POSIX ERE で非対応 | Interpreter のみ。 |
 

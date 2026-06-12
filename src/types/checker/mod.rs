@@ -362,19 +362,31 @@ pub struct TypeChecker {
     /// restored at every scope boundary (function body, lambda, error
     /// ceiling, branch arm).
     descriptor_scope_shadows: HashSet<String>,
-    /// While `infer_expr_type` descends into a `FuncCall` that is itself
-    /// a pipeline stage (`data => f(...)`), this holds the *previous
-    /// stage's* result type — the value the runtime injects as the
-    /// implicit first argument when the stage call carries no
-    /// placeholder. Consumed (taken) by the FuncCall arm so calls nested
-    /// inside the stage's arguments do not inherit it; arity *and* type
-    /// validation must count / check that injected argument. `None`
-    /// outside pipeline stages.
-    pipeline_stage_injected_type: Option<Type>,
+    /// While `infer_expr_type` descends into a pipeline stage that
+    /// contains a `_` placeholder (`data => f(_, a)`), this holds the
+    /// *previous stage's* result type — the value the runtime injects at
+    /// the placeholder (F62B-025 rule 1). The `Expr::Placeholder` arm
+    /// reads it so `_` carries the piped value's type into argument and
+    /// operand validation at any nesting depth. `None` outside pipeline
+    /// stages.
+    pipeline_placeholder_type: Option<Type>,
     /// Typed HIR / expression type table. `infer_expr_type` records
     /// every observed `Expr` here so codegen lowering can answer
     /// "is this expression Bool?" by looking up the recorded type.
     pub typed_expr_table: super::typed_hir::TypedExprTable,
+    /// F62B-021: generic functions whose body passes a type parameter into
+    /// a host-call Out slot (`Uncage[b, m, T]` / `HostCall[steps, T]`).
+    /// Maps function name → the type parameters (declared order) whose
+    /// schemas must be supplied by call sites. Such functions require
+    /// explicit type arguments at every call site.
+    pub schema_passing_generic_funcs: HashMap<String, Vec<String>>,
+    /// Bidirectional hints for empty list literals, keyed by AST node id.
+    /// Seeded by `seed_empty_literal_hints` when an expected type reaches a
+    /// literal tree (annotated bindings, annotated call arguments, type
+    /// constructors); consulted by the plain `ListLit` inference arm so an
+    /// empty `@[]` in a hinted position types as the expected list instead
+    /// of `@[?]`.
+    pub(super) empty_literal_hints: HashMap<usize, Type>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -474,8 +486,10 @@ impl TypeChecker {
             descriptor_binding_names: HashSet::new(),
             descriptor_shadow_names: HashSet::new(),
             descriptor_scope_shadows: HashSet::new(),
-            pipeline_stage_injected_type: None,
+            pipeline_placeholder_type: None,
             typed_expr_table: super::typed_hir::TypedExprTable::new(),
+            schema_passing_generic_funcs: HashMap::new(),
+            empty_literal_hints: HashMap::new(),
         };
         // C19B-002 (import-less): the C19 interactive variants are core-bundled
         // in `src/codegen/lower/core.rs` (import-less parity with interpreter/
@@ -724,6 +738,8 @@ impl TypeChecker {
                 | "HostCall"
                 | "HostStep"
                 | "HostCapability"
+                | "InCage"
+                | "Uncage"
                 | "Lax"
                 | "Result"
                 | "Async"
@@ -882,6 +898,35 @@ impl TypeChecker {
             .collect()
     }
 
+    /// F62B-040: schema-passing metadata for codegen lowering —
+    /// `name -> (declared type params, schema params)` for every callable
+    /// this checker knows to be schema-passing, local and imported alike
+    /// (imported ones under their local aliases). The driver hands this
+    /// to `Lowering::set_schema_passing_metadata` next to the typed-HIR
+    /// table so the checker's call-form enforcement and the lowering's
+    /// hidden schema params never disagree across module boundaries.
+    pub fn schema_passing_metadata(
+        &self,
+    ) -> std::collections::HashMap<String, (Vec<String>, Vec<String>)> {
+        self.schema_passing_generic_funcs
+            .iter()
+            .filter_map(|(name, schema)| {
+                self.generic_func_defs.get(name).map(|fd| {
+                    (
+                        name.clone(),
+                        (
+                            fd.type_params
+                                .iter()
+                                .map(|tp| tp.name.clone())
+                                .collect::<Vec<String>>(),
+                            schema.clone(),
+                        ),
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// Check an entire program. Collects type definitions first,
     /// then checks all statements.
     pub fn check_program(&mut self, program: &Program) {
@@ -891,6 +936,11 @@ impl TypeChecker {
         self.worker_effect_symbols.clear();
         self.worker_addon_symbols.clear();
         self.worker_addon_bindings.clear();
+        // Phase-2 review Low-2: AST node ids restart at 1 per parse — a
+        // reused checker must not leak per-program node-id-keyed state
+        // into the next program.
+        self.empty_literal_hints.clear();
+        self.schema_passing_generic_funcs.clear();
         for stmt in &program.statements {
             match stmt {
                 Statement::EnumDef(ed) => {
@@ -947,6 +997,80 @@ impl TypeChecker {
             );
             if !is_inheritance {
                 self.register_types(stmt);
+            }
+        }
+
+        // F62B-038 #11 / F62B-040: schema-passing is transitive over
+        // explicit generic calls (`outer[T] = inner[T](..)`), so the
+        // per-function sets are a whole-program fixpoint, not a
+        // per-definition scan. Built AFTER the register_types pass so the
+        // imported schema-passing generics registered there (under their
+        // local aliases) seed the closure — a local forwarding generic
+        // whose callee is imported is detected like a local one. Shared
+        // closure with codegen lowering: the checker's call-form
+        // enforcement and the lowering's hidden schema params must never
+        // disagree.
+        {
+            let seed: std::collections::HashMap<String, (Vec<String>, Vec<String>)> = self
+                .schema_passing_generic_funcs
+                .iter()
+                .filter_map(|(name, schema)| {
+                    self.generic_func_defs.get(name).map(|fd| {
+                        (
+                            name.clone(),
+                            (
+                                fd.type_params
+                                    .iter()
+                                    .map(|tp| tp.name.clone())
+                                    .collect::<Vec<String>>(),
+                                schema.clone(),
+                            ),
+                        )
+                    })
+                })
+                .collect();
+            let fd_refs: Vec<&FuncDef> = program
+                .statements
+                .iter()
+                .filter_map(|s| match s {
+                    Statement::FuncDef(fd) => Some(fd),
+                    _ => None,
+                })
+                .collect();
+            self.schema_passing_generic_funcs =
+                crate::parser::close_schema_passing_type_params(&fd_refs, &seed);
+        }
+
+        // Phase-2 review M-4: alias targets resolve at registration, so a
+        // forward reference (`Grid = @[Row]` before `Row = @[Int]`) left an
+        // unexpanded `Named` inside the stored type. Re-resolve every alias
+        // from its source TypeExpr until the table is stable — each round
+        // can pick up names registered later in the file; the round count
+        // is bounded by the alias count (a cycle simply stops expanding).
+        let alias_defs: Vec<(String, crate::parser::TypeExpr)> = program
+            .statements
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Statement::ClassLikeDef(cl) => match &cl.kind {
+                    crate::parser::ClassLikeKind::Alias { target } => {
+                        Some((cl.name.clone(), target.clone()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        for _ in 0..alias_defs.len().saturating_sub(1) {
+            let mut changed = false;
+            for (name, target) in &alias_defs {
+                let resolved = self.registry.resolve_type(target);
+                if self.registry.type_aliases.get(name) != Some(&resolved) {
+                    self.registry.register_type_alias(name, resolved);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
             }
         }
 
@@ -1054,6 +1178,22 @@ impl TypeChecker {
                 span: Span::new(0, 0, 1, 1),
             });
         }
+
+        // Drop exact duplicates (same span, same message) while keeping the
+        // first occurrence's position. Overlapping validation passes can
+        // legitimately reach the same node twice (e.g. the call-argument
+        // walk and the expression-arm walk both seeing a misplaced `_`);
+        // reporting the identical diagnostic twice adds no information.
+        let mut seen = std::collections::HashSet::new();
+        self.errors.retain(|err| {
+            seen.insert((
+                err.span.line,
+                err.span.column,
+                err.span.start,
+                err.span.end,
+                err.message.clone(),
+            ))
+        });
     }
 
     fn type_expr_to_string(ty: &TypeExpr) -> String {

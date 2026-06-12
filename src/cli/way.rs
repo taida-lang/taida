@@ -757,6 +757,11 @@ pub(crate) fn scan_expr_for_todo(expr: &Expr, file: &str, out: &mut TodoScanResu
             }
         }
         Expr::FieldAccess(receiver, _, _) => scan_expr_for_todo(receiver, file, out),
+        Expr::Block(stmts, _) => {
+            for stmt in stmts {
+                scan_stmt_for_todo(stmt, file, out);
+            }
+        }
         Expr::CondBranch(arms, _) => {
             for arm in arms {
                 if let Some(cond) = &arm.condition {

@@ -94,6 +94,20 @@ export async function handleTaidaRequest(request, env, ctx) {{
         view.setUint32(nwritten_ptr, total, true);
         return 0;
       }},
+      // randomBytes entropy. crypto.getRandomValues is a CSPRNG; never
+      // substitute Math.random here.
+      random_get(buf_ptr, buf_len) {{
+        const out = new Uint8Array(memory.buffer, buf_ptr, buf_len);
+        for (let off = 0; off < buf_len; off += 65536) {{
+          crypto.getRandomValues(out.subarray(off, Math.min(off + 65536, buf_len)));
+        }}
+        return 0;
+      }},
+      // nowMs wall clock (clock id is ignored; Date.now() is realtime).
+      clock_time_get(_clock_id, _precision, out_ptr) {{
+        new DataView(memory.buffer).setBigUint64(out_ptr, BigInt(Date.now()) * 1000000n, true);
+        return 0;
+      }},
     }};
 
     // -- taida_host --
@@ -282,6 +296,20 @@ async function getInstance(env) {{
         view.setUint32(nwritten_ptr, total, true);
         return 0;
       }},
+      // randomBytes entropy. crypto.getRandomValues is a CSPRNG; never
+      // substitute Math.random here.
+      random_get(buf_ptr, buf_len) {{
+        const out = new Uint8Array(memory.buffer, buf_ptr, buf_len);
+        for (let off = 0; off < buf_len; off += 65536) {{
+          crypto.getRandomValues(out.subarray(off, Math.min(off + 65536, buf_len)));
+        }}
+        return 0;
+      }},
+      // nowMs wall clock (clock id is ignored; Date.now() is realtime).
+      clock_time_get(_clock_id, _precision, out_ptr) {{
+        new DataView(memory.buffer).setBigUint64(out_ptr, BigInt(Date.now()) * 1000000n, true);
+        return 0;
+      }},
     }};
 
     const taida_host = {{
@@ -373,10 +401,69 @@ async function readTaidaWebSession(exports, memory, decoder, encoder, session, e
     throw new Error("handler ABI poll limit exceeded");
 }}
 
+// Well-known `fetch` capability (kind cloudflare/fetch): outbound HTTP
+// through the ambient Workers fetch. The step chain mirrors the D1
+// prepare/bind shape so every step keeps a homogeneous argument list:
+//   HostStep["fetch", @[url]] -> HostStep["send", @[webRequest]]
+// `send` resolves to a WebResponse-shaped JSON value
+// ({{status, headers, bodyBase64}}). Bodies are buffered; redirects follow
+// the platform default.
+const taidaFetchCapability = {{
+  fetch(url) {{
+    return {{
+      async send(req) {{
+        req = req && typeof req === "object" ? req : {{}};
+        const headers = new Headers();
+        for (const header of req.headers || []) {{
+          if (header && typeof header.name === "string" && typeof header.value === "string") {{
+            headers.append(header.name, header.value);
+          }}
+        }}
+        const method = typeof req.method === "string" && req.method ? req.method : "GET";
+        const init = {{ method, headers }};
+        const bodyBytes = base64ToUint8Array(req.bodyBase64 || "");
+        if (bodyBytes.length > 0 && method !== "GET" && method !== "HEAD") {{
+          init.body = bodyBytes;
+        }}
+        const resp = await fetch(String(url), init);
+        const respHeaders = [];
+        resp.headers.forEach((value, key) => {{
+          respHeaders.push({{ name: key, value }});
+        }});
+        return {{
+          status: resp.status,
+          headers: respHeaders,
+          bodyBase64: arrayBufferToBase64(await resp.arrayBuffer()),
+        }};
+      }},
+    }};
+  }},
+}};
+
+// Well-known `crypto` capability (kind cloudflare/crypto): stable
+// entropy across host-call resumes. The handler re-executes after every
+// resume, so guest-side randomBytes taken before a suspend point would
+// regenerate per re-execution; randomHex(n) fetches the bytes as a host
+// call and replays deterministically.
+const taidaCryptoCapability = {{
+  randomHex(n) {{
+    const count = Math.max(0, Math.min(65536, Number(n) || 0));
+    const bytes = new Uint8Array(count);
+    crypto.getRandomValues(bytes);
+    let out = "";
+    for (const b of bytes) out += b.toString(16).padStart(2, "0");
+    return out;
+  }},
+}};
+
 async function dispatchTaidaHostCall(envelope, env) {{
     const id = envelope.id;
     try {{
-      let target = env[envelope.capability];
+      let target = envelope.capability === "fetch"
+        ? taidaFetchCapability
+        : envelope.capability === "crypto"
+          ? taidaCryptoCapability
+          : env[envelope.capability];
       for (const step of envelope.steps) {{
         target = await target[step.method](...step.args);
       }}

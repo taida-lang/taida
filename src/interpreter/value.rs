@@ -964,6 +964,10 @@ fn scrub_json(jv: &mut serde_json::Value) {
 pub struct FuncValue {
     pub name: String,
     pub params: Vec<Param>,
+    /// F62B-021: number of declared generic type parameters. Non-zero
+    /// makes the mold-syntax bracket (`fn[..](..)`) carry TYPE arguments
+    /// instead of the legacy positional-value form.
+    pub type_params_count: usize,
     pub body: Vec<Statement>,
     /// Captured environment (lexical scope closure).
     /// Shared to avoid recursive deep-clone blow-up when many functions capture prior functions.
@@ -987,6 +991,25 @@ pub struct FuncValue {
     /// Enum registry from the function's defining module.
     /// Same semantics as `module_type_defs` but for enum declarations.
     pub module_enum_defs: Option<Arc<HashMap<String, Vec<String>>>>,
+    /// Module-level symbol table from the function's defining module.
+    ///
+    /// A module function's definition-time closure snapshot does not
+    /// contain siblings defined *after* it, and the eager closure
+    /// enrichment at export time only reaches two levels (the exported
+    /// function and the function values inside its closure). A call
+    /// chain that hops three or more module functions therefore used to
+    /// degrade to a definition-order-truncated closure and die with
+    /// `Undefined variable` (observed as imported mutual tail recursion
+    /// failing past the first retarget, and as chained arm-tail calls
+    /// losing module-local functions and JSON schemas).
+    ///
+    /// This field carries the defining module's full symbol table. The
+    /// closure-scope push and the trampoline retarget resolve siblings
+    /// against it at any depth, re-attaching the same table (plus the
+    /// module typedef / enum registries) to fetched siblings so the
+    /// resolution never degrades. `None` for main-file functions,
+    /// lambdas, and partials — those resolve through the live scope.
+    pub module_symbols: Option<Arc<HashMap<String, Value>>>,
 }
 
 /// An error value.
