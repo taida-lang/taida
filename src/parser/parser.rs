@@ -36,6 +36,12 @@ pub struct Parser {
     /// assignment so that a multi-line multi-arm guard is rejected with
     /// `[E0303]` instead of greedily swallowing later top-level statements.
     pub(crate) cond_branch_context: CondBranchContext,
+    /// F62B-028 [E1546]: depth of mold bracket-argument lists currently
+    /// being parsed. A bare `Name[args]` (no `()`) is a TYPE REFERENCE
+    /// inside another mold's `[...]` (e.g. the schema slot of
+    /// `JSON[x, Lax[Int]]()`), and a rejected value elsewhere — the `[]`
+    /// puts the value in the mold, the `()` casts it.
+    pub(crate) mold_bracket_args_depth: usize,
 }
 
 impl Parser {
@@ -92,6 +98,7 @@ impl Parser {
             errors: Vec::new(),
             depth: 0,
             cond_branch_context: CondBranchContext::TopLevel,
+            mold_bracket_args_depth: 0,
         }
     }
 

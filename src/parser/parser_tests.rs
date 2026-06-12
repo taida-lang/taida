@@ -777,11 +777,11 @@ fn test_parse_lambda_param_default_value_is_rejected() {
 
 #[test]
 fn test_parse_stub_mold_with_message_literal() {
-    match first_stmt("stub <= Stub[\"User API placeholder\"]") {
+    match first_stmt("stub <= Stub[\"User API placeholder\"]()") {
         Statement::Assignment(a) => match &a.value {
             Expr::MoldInst(name, type_args, fields, _) => {
                 assert_eq!(name, "Stub");
-                assert!(fields.is_empty(), "Stub should not require `()` fields");
+                assert!(fields.is_empty(), "Stub takes no `()` fields");
                 assert_eq!(type_args.len(), 1);
                 match &type_args[0] {
                     Expr::StringLit(msg, _) => assert_eq!(msg, "User API placeholder"),
@@ -1320,8 +1320,8 @@ fn test_single_direction_assignment_then_pipeline_violation() {
 
 #[test]
 fn test_bt3_direction_violation_in_mold_args() {
-    // Concat[@[1], @[2]] => result then <= — E0301
-    let source = r#"x <= Concat[@[1], @[2]] => result"#;
+    // Concat[@[1], @[2]]() => result then <= — E0301
+    let source = r#"x <= Concat[@[1], @[2]]() => result"#;
     let (_, errors) = parse(source);
     assert!(
         !errors.is_empty(),
@@ -2647,18 +2647,16 @@ fn test_removed_lowercase_index_syntax_rejects_multiple_args() {
 }
 
 #[test]
-fn test_uppercase_mold_shorthand_without_fields_still_parses() {
-    match first_stmt("value <= Result[1]") {
-        Statement::Assignment(assign) => match assign.value {
-            Expr::MoldInst(name, args, fields, _) => {
-                assert_eq!(name, "Result");
-                assert_eq!(args.len(), 1);
-                assert!(fields.is_empty());
-            }
-            other => panic!("expected MoldInst, got {:?}", other),
-        },
-        other => panic!("expected assignment, got {:?}", other),
-    }
+fn test_uppercase_mold_shorthand_without_fields_is_rejected() {
+    // F62B-028 [E1546]: a bare `Name[args]` (no `()`) in a value position is
+    // a missing cast, not an accepted shorthand. `[]` puts the value in the
+    // mold, `()` casts it.
+    let (_, errors) = parse("value <= Result[1]");
+    assert!(
+        errors.iter().any(|e| e.message.contains("[E1546]")),
+        "bare mold in value position must be rejected, got: {:?}",
+        errors
+    );
 }
 
 // ── BT-9: Deep nesting resilience tests ──

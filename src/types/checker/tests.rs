@@ -7246,7 +7246,7 @@ out <= a.run(2)
 
 #[test]
 fn unknown_mold_inst_reports_diagnostic() {
-    let src = "x <= MissingMold[1]";
+    let src = "x <= MissingMold[1]()";
     let (_, errors) = check(src);
     assert_has_error(&errors, "[E1530] Unknown mold 'MissingMold'");
 }
@@ -7254,7 +7254,7 @@ fn unknown_mold_inst_reports_diagnostic() {
 #[test]
 fn class_like_mold_inst_form_does_not_report_unknown_mold() {
     let src = r#"Pilot = @(id: Int)
-x <= Pilot[1]"#;
+x <= Pilot[1]()"#;
     let (_, errors) = check(src);
     assert!(
         !errors

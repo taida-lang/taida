@@ -279,6 +279,9 @@ impl Parser {
                     let mut type_args = Vec::new();
                     let mut depth = 1;
                     let mut arg_tokens_valid = true;
+                    // F62B-028: args inside `[...]` may reference bare molds
+                    // as types (`JSON[x, Lax[Int]]()`); see [E1546] below.
+                    self.mold_bracket_args_depth += 1;
 
                     // Parse comma-separated expressions inside brackets.
                     // B11-6a: Also handles restricted type-literal surface:
@@ -306,7 +309,17 @@ impl Parser {
                         {
                             let lit_span = self.current_span();
                             self.advance(); // consume `:`
-                            let type_name = self.expect_ident()?;
+                            // F62B-028: unwind the bracket depth on the error
+                            // path — the parser recovers per-statement, so a
+                            // leaked depth would wrongly exempt later bare
+                            // molds from [E1546].
+                            let type_name = match self.expect_ident() {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    self.mold_bracket_args_depth -= 1;
+                                    return Err(e);
+                                }
+                            };
                             type_args.push(Expr::TypeLiteral(type_name, None, lit_span));
                             self.match_token(&TokenKind::Comma);
                             continue;
@@ -321,9 +334,21 @@ impl Parser {
                             && !matches!(self.peek_at(3).kind, TokenKind::LParen)
                         {
                             let lit_span = self.current_span();
-                            let enum_name = self.expect_ident()?;
+                            let enum_name = match self.expect_ident() {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    self.mold_bracket_args_depth -= 1;
+                                    return Err(e);
+                                }
+                            };
                             self.advance(); // consume `:`
-                            let variant_name = self.expect_ident()?;
+                            let variant_name = match self.expect_ident() {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    self.mold_bracket_args_depth -= 1;
+                                    return Err(e);
+                                }
+                            };
                             type_args.push(Expr::TypeLiteral(
                                 enum_name,
                                 Some(variant_name),
@@ -342,6 +367,7 @@ impl Parser {
                         self.match_token(&TokenKind::Comma);
                     }
 
+                    self.mold_bracket_args_depth -= 1;
                     if arg_tokens_valid && self.check(&TokenKind::LParen) {
                         // `Name[args](fields)` -> MoldInst or FuncCall
                         self.advance(); // consume `(`
@@ -351,12 +377,26 @@ impl Parser {
                     } else if arg_tokens_valid {
                         // Index access `name[...]` has been removed in v0.5.0.
                         // Use `.get(index)` instead.
-                        // `Name[args]` without `()` is treated as MoldInst with no fields.
                         if !name.chars().next().is_some_and(|c| c.is_uppercase()) {
                             return Err(ParseError {
                                 message:
                                     "Index access `name[...]` has been removed. Use `.get(index)` instead"
                                         .to_string(),
+                                span,
+                            });
+                        }
+                        // F62B-028 [E1546]: a bare `Name[args]` (no `()`) in a
+                        // value position is rejected — `[]` puts the value in
+                        // the mold, `()` casts it; the cast is not optional.
+                        // Inside another mold's `[...]` the bare form is a
+                        // type reference (schema / Out slots) and stays legal.
+                        if self.mold_bracket_args_depth == 0 {
+                            return Err(ParseError {
+                                message: format!(
+                                    "[E1546] Mold call '{name}[...]' is missing its cast `()`. \
+                                     Write `{name}[...]()` — `[]` puts the value in the mold, `()` casts it. \
+                                     (Bare `{name}[...]` is only a type reference inside another mold's `[...]` arguments or a type annotation.)"
+                                ),
                                 span,
                             });
                         }
