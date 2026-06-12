@@ -6077,6 +6077,11 @@ taida_val taida_abi_host_cage(taida_val capability, taida_val call) {
 static taida_val taida_cage_builder_pack(taida_val subject, taida_val steps) {
     taida_val pack = taida_pack_new(2);
     taida_pack_set_hash(pack, 0, taida_str_hash((taida_val)(intptr_t)"__cage_subject"));
+    /* The subject is a HostCapability descriptor pack — tag it so the
+       tag-driven release / display / JSON paths treat it as a child pack
+       (final-review #2: an untagged slot skipped RC release and rendered
+       as a raw pointer). */
+    taida_pack_set_tag(pack, 0, TAIDA_TAG_PACK);
     taida_pack_set(pack, 0, subject);
     taida_pack_set_hash(pack, 1, taida_str_hash((taida_val)(intptr_t)"__cage_steps"));
     taida_pack_set_tag(pack, 1, 5 /* LIST */);
@@ -6087,6 +6092,8 @@ static taida_val taida_cage_builder_pack(taida_val subject, taida_val steps) {
 static taida_val taida_cage_builder_steps_copy(taida_val builder, taida_val extra_step) {
     taida_val old_steps = taida_pack_get(builder, taida_str_hash((taida_val)(intptr_t)"__cage_steps"));
     taida_val steps = (taida_val)taida_list_new();
+    /* HostStep descriptors are packs (final-review #2). */
+    taida_list_set_elem_tag(steps, TAIDA_TAG_PACK);
     if (old_steps) {
         taida_val len = taida_list_length(old_steps);
         for (taida_val i = 0; i < len; i++) {

@@ -891,6 +891,137 @@ pub fn fn_schema_passing_type_params(fd: &FuncDef) -> Vec<String> {
     out
 }
 
+/// Final-review #3 (F62B-021 follow-up): a type parameter nested inside a
+/// COMPOSITE host-call Out (`HostCall[steps, @[T]]` / `Uncage[b, m, @[T]]`)
+/// has no hidden-schema representation — only a plain `T` slot does. The
+/// checker rejects such definitions; this returns the offending parameter
+/// names (first-appearance order) so the diagnostic can name them.
+pub fn fn_composite_out_type_params(fd: &FuncDef) -> Vec<String> {
+    if fd.type_params.is_empty() {
+        return Vec::new();
+    }
+    let params: Vec<String> = fd.type_params.iter().map(|tp| tp.name.clone()).collect();
+    let mut out = Vec::new();
+    for stmt in &fd.body {
+        scan_stmt_composite_out(stmt, &params, &mut out);
+    }
+    out
+}
+
+fn scan_stmt_composite_out(stmt: &Statement, params: &[String], out: &mut Vec<String>) {
+    match stmt {
+        Statement::Expr(e) => scan_expr_composite_out(e, params, out),
+        Statement::Assignment(a) => scan_expr_composite_out(&a.value, params, out),
+        Statement::UnmoldForward(u) => scan_expr_composite_out(&u.source, params, out),
+        Statement::UnmoldBackward(u) => scan_expr_composite_out(&u.source, params, out),
+        Statement::ErrorCeiling(ec) => {
+            for st in &ec.handler_body {
+                scan_stmt_composite_out(st, params, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_param_refs(expr: &Expr, params: &[String], out: &mut Vec<String>) {
+    match expr {
+        Expr::Ident(name, _) => {
+            if params.iter().any(|p| p == name) && !out.iter().any(|n| n == name) {
+                out.push(name.clone());
+            }
+        }
+        Expr::ListLit(items, _) => {
+            for item in items {
+                collect_param_refs(item, params, out);
+            }
+        }
+        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+            for f in fields {
+                collect_param_refs(&f.value, params, out);
+            }
+        }
+        Expr::MoldInst(_, args, fields, _) => {
+            for a in args {
+                collect_param_refs(a, params, out);
+            }
+            for f in fields {
+                collect_param_refs(&f.value, params, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scan_expr_composite_out(expr: &Expr, params: &[String], out: &mut Vec<String>) {
+    match expr {
+        Expr::MoldInst(name, type_args, fields, _) => {
+            let schema_slot = match name.as_str() {
+                "HostCall" => type_args.get(1),
+                "Uncage" => type_args.get(2),
+                _ => None,
+            };
+            if let Some(slot) = schema_slot
+                && !matches!(slot, Expr::Ident(_, _))
+            {
+                collect_param_refs(slot, params, out);
+            }
+            for arg in type_args {
+                scan_expr_composite_out(arg, params, out);
+            }
+            for field in fields {
+                scan_expr_composite_out(&field.value, params, out);
+            }
+        }
+        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+            for field in fields {
+                scan_expr_composite_out(&field.value, params, out);
+            }
+        }
+        Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+            for item in items {
+                scan_expr_composite_out(item, params, out);
+            }
+        }
+        Expr::BinaryOp(lhs, _, rhs, _) => {
+            scan_expr_composite_out(lhs, params, out);
+            scan_expr_composite_out(rhs, params, out);
+        }
+        Expr::UnaryOp(_, inner, _)
+        | Expr::Unmold(inner, _)
+        | Expr::Throw(inner, _)
+        | Expr::FieldAccess(inner, _, _)
+        | Expr::Lambda(_, inner, _) => scan_expr_composite_out(inner, params, out),
+        Expr::FuncCall(callee, args, _) => {
+            scan_expr_composite_out(callee, params, out);
+            for arg in args {
+                scan_expr_composite_out(arg, params, out);
+            }
+        }
+        Expr::MethodCall(obj, _, args, _) => {
+            scan_expr_composite_out(obj, params, out);
+            for arg in args {
+                scan_expr_composite_out(arg, params, out);
+            }
+        }
+        Expr::CondBranch(arms, _) => {
+            for arm in arms {
+                if let Some(cond) = &arm.condition {
+                    scan_expr_composite_out(cond, params, out);
+                }
+                for st in &arm.body {
+                    scan_stmt_composite_out(st, params, out);
+                }
+            }
+        }
+        Expr::Block(stmts, _) => {
+            for st in stmts {
+                scan_stmt_composite_out(st, params, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn scan_stmt_schema_params(stmt: &Statement, params: &[String], out: &mut Vec<String>) {
     match stmt {
         Statement::Expr(e) => scan_expr_schema_params(e, params, out),

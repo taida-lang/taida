@@ -374,12 +374,6 @@ pub struct TypeChecker {
     /// every observed `Expr` here so codegen lowering can answer
     /// "is this expression Bool?" by looking up the recorded type.
     pub typed_expr_table: super::typed_hir::TypedExprTable,
-    /// F62B-021: explicit-type-argument generic calls
-    /// (`queryAll[PostRows](db, sql)`), keyed by the call's AST node id.
-    /// Values are the type bindings in declared type-parameter order.
-    /// Consumed by codegen lowering to resolve host-call Out schemas at
-    /// the call site (dictionary passing).
-    pub explicit_generic_call_bindings: HashMap<usize, Vec<(String, Type)>>,
     /// F62B-021: generic functions whose body passes a type parameter into
     /// a host-call Out slot (`Uncage[b, m, T]` / `HostCall[steps, T]`).
     /// Maps function name → the type parameters (declared order) whose
@@ -494,7 +488,6 @@ impl TypeChecker {
             descriptor_scope_shadows: HashSet::new(),
             pipeline_placeholder_type: None,
             typed_expr_table: super::typed_hir::TypedExprTable::new(),
-            explicit_generic_call_bindings: HashMap::new(),
             schema_passing_generic_funcs: HashMap::new(),
             empty_literal_hints: HashMap::new(),
         };
@@ -918,7 +911,6 @@ impl TypeChecker {
         // reused checker must not leak per-program node-id-keyed state
         // into the next program.
         self.empty_literal_hints.clear();
-        self.explicit_generic_call_bindings.clear();
         self.schema_passing_generic_funcs.clear();
         for stmt in &program.statements {
             match stmt {

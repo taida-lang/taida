@@ -1416,12 +1416,17 @@ impl Interpreter {
                         if all_positional && (func.type_params_count > 0 || !fields.is_empty()) {
                             return self.call_function(&func, &arg_exprs);
                         }
+                        let bracket_hint = if func.type_params_count > 0 {
+                            format!("{name}[T](arg1, arg2)")
+                        } else {
+                            format!("{name}[arg1, arg2]()")
+                        };
                         return Err(RuntimeError {
                             message: format!(
                                 "User-defined function '{}' called via mold syntax \
                                  cannot accept named fields '()'. \
-                                 Pass arguments positionally: {}[arg1, arg2]() or {}(arg1, arg2).",
-                                name, name, name
+                                 Pass arguments positionally: {} or {}(arg1, arg2).",
+                                name, bracket_hint, name
                             ),
                         });
                     }

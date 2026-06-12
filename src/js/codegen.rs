@@ -3492,6 +3492,24 @@ impl JsCodegen {
             Expr::MoldInst(name, type_args, fields, span) => {
                 // B5: MoldInst → function call with type args
 
+                // Final-review #4: the host-capability surface has no JS
+                // backend implementation — the generic fallback emitted
+                // calls to undefined runtime symbols (`HostCapability is
+                // not defined`) or fed the 2-arg `Cage_mold` a builder.
+                // Reject at build time with the support matrix named.
+                if matches!(
+                    name.as_str(),
+                    "HostCapability" | "HostStep" | "HostCall" | "InCage" | "Uncage"
+                ) || (name == "Cage" && type_args.len() == 1)
+                {
+                    return Err(JsError {
+                        message: format!(
+                            "{} is not available on the JS backend — host capability calls run on the interpreter (fixtures), native, and wasm targets.",
+                            name
+                        ),
+                    });
+                }
+
                 // Append-consume site (shared shape analysis keyed by
                 // node_id): emit the consuming runtime variant. Sites
                 // outside the proven shape keep the copying `Append`.

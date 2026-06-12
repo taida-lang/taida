@@ -1286,6 +1286,8 @@ int64_t taida_abi_host_cage(int64_t capability, int64_t call) {
 static int64_t taida_cage_builder_pack(int64_t subject, int64_t steps) {
     int64_t pack = taida_pack_new(2);
     taida_pack_set_hash(pack, 0, abi_hash_cstr("__cage_subject"));
+    /* The subject is a HostCapability descriptor pack (final-review #2). */
+    taida_pack_set_tag(pack, 0, ABI_TAG_PACK);
     taida_pack_set(pack, 0, subject);
     taida_pack_set_hash(pack, 1, abi_hash_cstr("__cage_steps"));
     taida_pack_set_tag(pack, 1, ABI_TAG_LIST);
@@ -1296,6 +1298,8 @@ static int64_t taida_cage_builder_pack(int64_t subject, int64_t steps) {
 static int64_t taida_cage_builder_steps_copy(int64_t builder, int64_t extra_step) {
     int64_t old_steps = taida_pack_get(builder, abi_hash_cstr("__cage_steps"));
     int64_t steps = taida_list_new();
+    /* HostStep descriptors are packs (final-review #2). */
+    taida_list_set_elem_tag(steps, ABI_TAG_PACK);
     if (old_steps) {
         int64_t *src = (int64_t *)(intptr_t)old_steps;
         int64_t len = src[1];

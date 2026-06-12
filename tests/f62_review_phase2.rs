@@ -300,3 +300,122 @@ fn custom_mold_unmold_hook_runs_on_native() {
         "native must run the unmold hook"
     );
 }
+
+/// Final-review #1: a schema-passing generic cannot be used as a value
+/// (binding / argument / pipeline) — the hidden schema parameters only
+/// flow through explicit-type-argument call sites.
+#[test]
+fn schema_passing_generic_cannot_be_a_value() {
+    let output = run_interp(
+        "f62rp2_schema_value_ref",
+        concat!(
+            "queryAll[T] db: CageBuilder  sql: Str =\n",
+            "  db => InCage[_, \"q\", @[sql]]() => Uncage[_, \"all\", T]() >=> rows\n",
+            "  rows\n",
+            "=> :T\n",
+            "g <= queryAll\n",
+        ),
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_text(&output).contains("[E1510]")
+            && stderr_text(&output).contains("cannot be used as a value"),
+        "expected the value-reference rejection, got: {}",
+        stderr_text(&output)
+    );
+}
+
+/// Final-review #3: composite Out types (`@[T]`) have no hidden-schema
+/// representation and are rejected at definition with the workaround named.
+#[test]
+fn composite_out_type_param_rejected_at_definition() {
+    let output = run_interp(
+        "f62rp2_composite_out",
+        concat!(
+            "queryAll[T] db: CageBuilder  sql: Str =\n",
+            "  db => InCage[_, \"q\", @[sql]]() => Uncage[_, \"all\", @[T]]() >=> rows\n",
+            "  rows\n",
+            "=> :@[T]\n",
+            "stdout(\"checked\")\n",
+        ),
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_text(&output).contains("[E1510]")
+            && stderr_text(&output).contains("composite host-call Out"),
+        "expected the composite-Out rejection, got: {}",
+        stderr_text(&output)
+    );
+}
+
+/// Final-review #5 (decided as a fixed constraint): explicit-type-argument
+/// calls take exactly the declared parameter count — defaults are not
+/// omittable in the explicit form.
+#[test]
+fn explicit_generic_call_requires_exact_value_arity() {
+    let output = run_interp(
+        "f62rp2_exact_arity",
+        concat!(
+            "pad[T] x: T  suffix: Str <= \"!\" =\n",
+            "  x\n",
+            "=> :T\n",
+            "y <= pad[Int](5)\n",
+        ),
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_text(&output).contains("[E1301]"),
+        "expected the exact-arity rejection, got: {}",
+        stderr_text(&output)
+    );
+}
+
+/// Final-review #11: scalar (non-list) InCage args are rejected.
+#[test]
+fn incage_scalar_args_rejected() {
+    let output = run_interp(
+        "f62rp2_incage_scalar",
+        concat!(
+            "db <= HostCapability[\"DB\", \"mock/kind\"]()\n",
+            "Cage[db]() => InCage[_, \"get\", \"key\"]()\n",
+        ),
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr_text(&output).contains("[E3601]"),
+        "expected the wire-list rejection, got: {}",
+        stderr_text(&output)
+    );
+}
+
+/// Final-review #4: the host-capability surface rejects at JS build time
+/// instead of emitting undefined runtime symbols.
+#[test]
+fn js_backend_rejects_host_capability_surface() {
+    let dir = unique_temp_dir("f62rp2_js_reject");
+    let src = dir.join("main.td");
+    write_file(
+        &src,
+        concat!(
+            "db <= HostCapability[\"DB\", \"mock/kind\"]()\n",
+            "Cage[db]() => InCage[_, \"q\", @[]]() => Uncage[_, \"all\", Str]() >=> rows\n",
+            "stdout(rows)\n",
+        ),
+    );
+    let mjs = dir.join("main.mjs");
+    let build = Command::new(taida_bin())
+        .arg("build")
+        .arg("js")
+        .arg(&src)
+        .arg("-o")
+        .arg(&mjs)
+        .output()
+        .expect("js build");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!build.status.success(), "js build must reject");
+    assert!(
+        String::from_utf8_lossy(&build.stderr).contains("not available on the JS backend"),
+        "expected the JS support-matrix rejection, got: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+}

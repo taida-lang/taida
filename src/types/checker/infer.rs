@@ -426,6 +426,25 @@ impl TypeChecker {
             Expr::TypeLiteral(_, _, _) => Type::Str,
 
             Expr::Ident(name, span) => {
+                // Final-review #1 (F62B-021 follow-up): a schema-passing
+                // generic carries hidden schema parameters that only
+                // explicit-type-argument call sites supply — a value
+                // reference (binding, argument, pipeline stage) would call
+                // it without schemas (undefined behavior on the compiled
+                // backends). Direct calls never reach this arm: the
+                // explicit form is a MoldInst and the call path matches the
+                // callee by name.
+                if self.schema_passing_generic_funcs.contains_key(name) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1510] Generic function '{}' passes type parameter(s) into a host-call Out slot \
+                             and cannot be used as a value — call it directly with explicit type arguments: `{}[...](...)`.",
+                            name, name
+                        ),
+                        span: span.clone(),
+                    });
+                    return Type::Unknown;
+                }
                 // Look up variable in scope
                 if let Some(ty) = self.lookup_var(name) {
                     ty

@@ -149,11 +149,9 @@ impl TypeChecker {
         let generic_names: HashSet<String> =
             fd.type_params.iter().map(|tp| tp.name.clone()).collect();
         let mut bindings = HashMap::<String, Type>::new();
-        let mut ordered = Vec::with_capacity(type_args.len());
         for (tp, ta) in fd.type_params.iter().zip(type_args.iter()) {
             let ty = self.type_arg_expr_to_type(ta);
-            bindings.insert(tp.name.clone(), ty.clone());
-            ordered.push((tp.name.clone(), ty));
+            bindings.insert(tp.name.clone(), ty);
         }
 
         if fields.len() != fd.params.len() {
@@ -198,11 +196,6 @@ impl TypeChecker {
             }
         }
 
-        // Record the bindings for codegen (host-call Out schema dictionary
-        // passing), keyed by this call's AST node id.
-        self.explicit_generic_call_bindings
-            .insert(span.node_id, ordered);
-
         let ret_pattern = fd
             .return_type
             .as_ref()
@@ -216,6 +209,24 @@ impl TypeChecker {
     /// `HostCall[steps, T]()`). Such functions need their schemas supplied
     /// by call sites, so every call must use explicit type arguments.
     pub(super) fn register_schema_passing_generic(&mut self, fd: &FuncDef) {
+        // Final-review #3: a type parameter nested inside a composite Out
+        // (`@[T]` etc.) has no hidden-schema representation — the checker
+        // and the interpreter would accept what native lowering cannot
+        // build. Reject at definition with the workaround named.
+        let composite = crate::parser::fn_composite_out_type_params(fd);
+        if !composite.is_empty() {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1510] Generic function '{}' nests type parameter(s) {} inside a composite host-call Out. \
+                     Only a plain type-parameter Out (`Uncage[b, m, T]`) is supported — declare the composite \
+                     as the parameter itself and pass it at the call site (e.g. `{}[@[Str]](...)`).",
+                    fd.name,
+                    composite.join(", "),
+                    fd.name
+                ),
+                span: fd.span.clone(),
+            });
+        }
         let needed = crate::parser::fn_schema_passing_type_params(fd);
         if !needed.is_empty() {
             self.schema_passing_generic_funcs

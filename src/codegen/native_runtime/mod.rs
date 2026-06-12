@@ -922,7 +922,9 @@ mod tests {
         // 2026-06-12 F62B-034 (core.c): custom mold `__unmold` hook
         //   invocation in taida_generic_unmold: +608.
         //   1,335,699 -> 1,336,307.
-        const EXPECTED_TOTAL_LEN: usize = 1_336_307;
+        // 2026-06-12 final-review #2 (core.c): CageBuilder subject PACK
+        //   tag + steps elem tag: +411. 1,336,307 -> 1,336,718.
+        const EXPECTED_TOTAL_LEN: usize = 1_336_718;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1682,7 +1684,9 @@ mod tests {
         // (F1 420,640 -> 423,646); F2 unchanged.
         // F62B-024: CageBuilder chain helpers (before the marker):
         // 426,011 -> 428,824.
-        const F1_LEN: usize = 428_824;
+        // Final-review #2: builder tag fixes (before the marker):
+        // 428,824 -> 429,235.
+        const F1_LEN: usize = 429_235;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1765,6 +1769,9 @@ mod tests {
             // F62B-034: the custom-mold `__unmold` hook invocation lands in
             // taida_generic_unmold (after the marker): +608.
             // F2 226,461 -> 227,069.
+            // Final-review #2: the CageBuilder tag fixes land next to the
+            // host abi (before the marker): F1 428,824 -> 429,235; F2
+            // unchanged.
             F1_LEN + 227_069,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
