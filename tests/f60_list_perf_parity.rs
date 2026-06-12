@@ -341,12 +341,12 @@ stdout(Sort[nf](reverse <= true))
 needle <= "a" + "a"
 ws <= @["aa", "bb"]
 stdout(ws.contains(needle))
-ws.indexOfLax("bb").getOrDefault(-1) >=> i1
+i1 <= ws.indexOfLax("bb").getOrDefault(-1)
 stdout(i1)
 ps <= @[@(a <= 1), @(a <= 2)]
 stdout(ps.contains(@(a <= 2)))
 ls <= @[@[1, 2], @[3]]
-ls.indexOfLax(@[1, 2]).getOrDefault(-1) >=> i2
+i2 <= ls.indexOfLax(@[1, 2]).getOrDefault(-1)
 stdout(i2)
 stdout(@["x"].lastIndexOf("x"))
 "#,
