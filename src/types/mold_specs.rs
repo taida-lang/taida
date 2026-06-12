@@ -444,7 +444,13 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
         .enforce_checker(),
     MoldSpec::exact("Stub", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::range("TODO", 0, Some(4), ANY4, MoldReturnKind::Pack).with_options(TODO_OPTIONS),
-    MoldSpec::exact("Cage", 2, ANY2, MoldReturnKind::Pack)
+    // F62B-024: `Cage[subject]()` (builder chain entry) or
+    // `Cage[subject, runner]()` (direct call).
+    MoldSpec::range("Cage", 1, Some(2), ANY2, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("InCage", 3, ANY3, MoldReturnKind::Pack)
+        .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
+    MoldSpec::exact("Uncage", 3, ANY3, MoldReturnKind::Pack)
         .with_worker_boundary(WorkerMoldBoundary::HostBoundary),
     MoldSpec::exact("CageRilla", 2, ANY2, MoldReturnKind::Pack)
         .with_worker_boundary(WorkerMoldBoundary::HostBoundary),

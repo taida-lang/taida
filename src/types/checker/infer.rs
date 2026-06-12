@@ -1812,6 +1812,12 @@ impl TypeChecker {
                 match name.as_str() {
                     "HostCapability" => self.infer_host_capability_type(type_args, mold_span),
                     "HostStep" => self.infer_host_step_type(type_args, mold_span),
+                    // F62B-024: builder chain — `Cage[subject]()` opens a
+                    // CageBuilder, `InCage[builder, method, args]()` pushes a
+                    // step, `Uncage[builder, method, Out]()` fires the host
+                    // call as Async[Out].
+                    "InCage" => self.infer_in_cage_type(type_args, mold_span),
+                    "Uncage" => self.infer_uncage_type(type_args, mold_span),
                     "HostCall" => {
                         self.validate_host_call_descriptor(type_args, mold_span);
                         self.cage_runner_type(expr)
@@ -2648,6 +2654,26 @@ impl TypeChecker {
                             return Type::Generic("Gorillax".to_string(), vec![Type::Unknown]);
                         };
                         let subject_type = self.infer_expr_type(subject);
+
+                        // F62B-024: the 1-arg form opens a builder chain.
+                        // The subject must be a host capability — the chain
+                        // joins the Host branch at `Uncage`.
+                        if type_args.len() == 1 {
+                            if !Self::is_host_capability_type(&subject_type)
+                                && subject_type != Type::Unknown
+                            {
+                                self.push_cage_error(
+                                    "[E1517]",
+                                    subject.span(),
+                                    format!(
+                                        "[E1517] Cage builder subject must be HostCapability, got {}. \
+                                         Hint: construct the subject with `HostCapability[name, kind]()`.",
+                                        subject_type
+                                    ),
+                                );
+                            }
+                            return Type::Named("CageBuilder".to_string());
+                        }
 
                         let Some(runner_expr) = type_args.get(1) else {
                             self.push_cage_error(

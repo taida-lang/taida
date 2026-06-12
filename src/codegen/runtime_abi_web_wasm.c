@@ -1277,6 +1277,63 @@ int64_t taida_abi_host_cage(int64_t capability, int64_t call) {
     return taida_async_pending_with_error(abi_host_pending_error_value());
 }
 
+/* F62B-024 — CageBuilder chain (`Cage[subject]() => InCage[...]() => ...
+   => Uncage[...]() >=> rows`). The builder is a plain pack carrying
+   `__cage_subject` + `__cage_steps` and deliberately NO `__type`, so
+   unmolding a builder is the plain-pack gorilla. Steps are copied on push
+   (value semantics — taida_list_push mutates the spine in place, same
+   reason abi_pair_list_copy exists above). */
+static int64_t taida_cage_builder_pack(int64_t subject, int64_t steps) {
+    int64_t pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, abi_hash_cstr("__cage_subject"));
+    taida_pack_set(pack, 0, subject);
+    taida_pack_set_hash(pack, 1, abi_hash_cstr("__cage_steps"));
+    taida_pack_set_tag(pack, 1, ABI_TAG_LIST);
+    taida_pack_set(pack, 1, steps);
+    return pack;
+}
+
+static int64_t taida_cage_builder_steps_copy(int64_t builder, int64_t extra_step) {
+    int64_t old_steps = taida_pack_get(builder, abi_hash_cstr("__cage_steps"));
+    int64_t steps = taida_list_new();
+    if (old_steps) {
+        int64_t *src = (int64_t *)(intptr_t)old_steps;
+        int64_t len = src[1];
+        for (int64_t i = 0; i < len; i++) {
+            steps = taida_list_push(steps, src[4 + i]);
+        }
+    }
+    return taida_list_push(steps, extra_step);
+}
+
+static int taida_cage_builder_ok(int64_t builder) {
+    return taida_pack_get(builder, abi_hash_cstr("__cage_subject")) != 0
+        && taida_pack_get(builder, abi_hash_cstr("__cage_steps")) != 0;
+}
+
+int64_t taida_cage_builder_new(int64_t subject) {
+    return taida_cage_builder_pack(subject, taida_list_new());
+}
+
+int64_t taida_cage_builder_push(int64_t builder, int64_t step) {
+    if (!taida_cage_builder_ok(builder)) {
+        return taida_cage_builder_pack(0, taida_list_new());
+    }
+    int64_t subject = taida_pack_get(builder, abi_hash_cstr("__cage_subject"));
+    return taida_cage_builder_pack(subject, taida_cage_builder_steps_copy(builder, step));
+}
+
+int64_t taida_cage_builder_fire(int64_t builder, int64_t final_step, int64_t out_schema) {
+    if (!taida_cage_builder_ok(builder)) {
+        return taida_async_err(abi_host_error(
+            "Uncage requires a CageBuilder as its first argument (start the chain with `Cage[subject]()`)"));
+    }
+    int64_t subject = taida_pack_get(builder, abi_hash_cstr("__cage_subject"));
+    int64_t steps = taida_cage_builder_steps_copy(builder, final_step);
+    int64_t call = taida_abi_host_call(steps, out_schema);
+    return taida_abi_host_cage(subject, call);
+}
+
 int64_t taida_abi_web_store_pending_host_call_json(int32_t request_ptr, int32_t request_len) {
     if (!abi_host_pending_json) {
         return taida_abi_web_store_error_response_json(

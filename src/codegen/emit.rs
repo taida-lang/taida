@@ -1966,6 +1966,19 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val, Val, Val],
             returns: &[Val],
         },
+        // F62B-024: CageBuilder chain helpers.
+        "taida_cage_builder_new" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Val],
+        },
+        "taida_cage_builder_push" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Val],
+        },
+        "taida_cage_builder_fire" => RuntimeAbi {
+            params: &[Val, Val, Val],
+            returns: &[Val],
+        },
 
         // ── taida-lang/abi response helpers ──
         "taida_abi_response_text" => RuntimeAbi {

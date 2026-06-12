@@ -6068,6 +6068,65 @@ taida_val taida_abi_host_cage(taida_val capability, taida_val call) {
         "host capabilities are not available on the native handler runtime"));
 }
 
+/* F62B-024 — CageBuilder chain (`Cage[subject]() => InCage[...]() => ...
+   => Uncage[...]() >=> rows`). The builder is a plain pack carrying
+   `__cage_subject` + `__cage_steps` and deliberately NO `__type`, so
+   unmolding a builder is the plain-pack gorilla. Steps are copied on push
+   (value semantics: a base chain can be reused as a lightweight prepared
+   statement). */
+static taida_val taida_cage_builder_pack(taida_val subject, taida_val steps) {
+    taida_val pack = taida_pack_new(2);
+    taida_pack_set_hash(pack, 0, taida_str_hash((taida_val)(intptr_t)"__cage_subject"));
+    taida_pack_set(pack, 0, subject);
+    taida_pack_set_hash(pack, 1, taida_str_hash((taida_val)(intptr_t)"__cage_steps"));
+    taida_pack_set_tag(pack, 1, 5 /* LIST */);
+    taida_pack_set(pack, 1, steps);
+    return pack;
+}
+
+static taida_val taida_cage_builder_steps_copy(taida_val builder, taida_val extra_step) {
+    taida_val old_steps = taida_pack_get(builder, taida_str_hash((taida_val)(intptr_t)"__cage_steps"));
+    taida_val steps = (taida_val)taida_list_new();
+    if (old_steps) {
+        taida_val len = taida_list_length(old_steps);
+        for (taida_val i = 0; i < len; i++) {
+            steps = (taida_val)taida_list_push((taida_ptr)steps, taida_list_get(old_steps, i));
+        }
+    }
+    return (taida_val)taida_list_push((taida_ptr)steps, extra_step);
+}
+
+static int taida_cage_builder_check(taida_val builder, const char *mold) {
+    if (taida_pack_get(builder, taida_str_hash((taida_val)(intptr_t)"__cage_subject")) == 0
+        || taida_pack_get(builder, taida_str_hash((taida_val)(intptr_t)"__cage_steps")) == 0) {
+        char msg[160];
+        snprintf(msg, sizeof(msg),
+                 "%s requires a CageBuilder as its first argument (start the chain with `Cage[subject]()`)",
+                 mold);
+        taida_runtime_panic(msg);
+        return 0;
+    }
+    return 1;
+}
+
+taida_val taida_cage_builder_new(taida_val subject) {
+    return taida_cage_builder_pack(subject, (taida_val)taida_list_new());
+}
+
+taida_val taida_cage_builder_push(taida_val builder, taida_val step) {
+    if (!taida_cage_builder_check(builder, "InCage")) return 0;
+    taida_val subject = taida_pack_get(builder, taida_str_hash((taida_val)(intptr_t)"__cage_subject"));
+    return taida_cage_builder_pack(subject, taida_cage_builder_steps_copy(builder, step));
+}
+
+taida_val taida_cage_builder_fire(taida_val builder, taida_val final_step, taida_val out_schema) {
+    if (!taida_cage_builder_check(builder, "Uncage")) return 0;
+    taida_val subject = taida_pack_get(builder, taida_str_hash((taida_val)(intptr_t)"__cage_subject"));
+    taida_val steps = taida_cage_builder_steps_copy(builder, final_step);
+    taida_val call = taida_abi_host_call(steps, out_schema);
+    return taida_abi_host_cage(subject, call);
+}
+
 taida_val taida_abi_response_text(taida_val body_ptr) {
     const char *body = (const char *)body_ptr;
     taida_val bytes = taida_bytes_contig_new((const unsigned char *)(body ? body : ""), body ? (taida_val)strlen(body) : 0);

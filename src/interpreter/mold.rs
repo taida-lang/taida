@@ -2605,6 +2605,36 @@ impl Interpreter {
         matches!(value.get_field("__type"), Some(Value::Str(s)) if s.as_str() == expected)
     }
 
+    /// F62B-024: split a CageBuilder pack (`Cage[subject]()` result) into its
+    /// subject and accumulated steps. The builder is a plain pack carrying
+    /// `__cage_subject` + `__cage_steps` and deliberately no `__type`.
+    fn cage_builder_parts(value: &Value, mold: &str) -> Result<(Value, Vec<Value>), RuntimeError> {
+        let subject = value.get_field("__cage_subject");
+        let steps = value.get_field("__cage_steps");
+        match (subject, steps) {
+            (Some(subject), Some(Value::List(items))) => {
+                Ok((subject.clone(), items.as_ref().clone()))
+            }
+            _ => Err(RuntimeError {
+                message: format!(
+                    "{} requires a CageBuilder as its first argument (start the chain with `Cage[subject]()`), got {}",
+                    mold,
+                    Self::type_name_of(value)
+                ),
+            }),
+        }
+    }
+
+    /// F62B-024: one HostStep descriptor pack — the exact shape the
+    /// `HostStep[method, args]()` constructor produces.
+    fn host_step_pack(method: String, args: Value) -> Value {
+        Value::pack(vec![
+            ("__type".into(), Value::str("HostStep".to_string())),
+            ("method".into(), Value::str(method)),
+            ("args".into(), args),
+        ])
+    }
+
     fn host_descriptor_str_field(
         value: &Value,
         descriptor: &str,
@@ -3165,9 +3195,23 @@ impl Interpreter {
             // longer canonical. Interpreter has no executable CageRilla
             // branch today; JSRilla descriptors are handled by the JS backend.
             "Cage" => {
+                // F62B-024: the 1-arg form returns a CageBuilder — a plain
+                // pack (deliberately no `__type`, so unmolding it is the
+                // plain-pack gorilla) carrying the capability and an empty
+                // step list. `InCage` / `Uncage` extend and fire it.
+                if type_args.len() == 1 {
+                    let subject = match self.eval_expr(&type_args[0])? {
+                        Signal::Value(v) => v,
+                        other => return Ok(Some(other)),
+                    };
+                    return Ok(Some(Signal::Value(Value::pack(vec![
+                        ("__cage_subject".into(), subject),
+                        ("__cage_steps".into(), Value::list(Vec::new())),
+                    ]))));
+                }
                 if type_args.len() < 2 {
                     return Err(RuntimeError {
-                        message: "Cage requires 2 type arguments: Cage[subject, runner]".into(),
+                        message: "Cage requires a subject: Cage[subject]() for a builder chain, or Cage[subject, runner]() for a direct call".into(),
                     });
                 }
                 let cage_value = match self.eval_expr(&type_args[0])? {
@@ -5088,6 +5132,74 @@ impl Interpreter {
                     ("name".into(), Value::str(name)),
                     ("kind".into(), Value::str(kind)),
                 ]))))
+            }
+            "InCage" => {
+                // F62B-024: `InCage[builder, method, args]()` — push one step
+                // onto the builder and return the extended builder (value
+                // semantics: the input builder is untouched, enabling base-
+                // chain reuse).
+                if type_args.len() != 3 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "InCage requires exactly 3 type arguments: InCage[builder, method, args](), got {}",
+                            type_args.len()
+                        ),
+                    });
+                }
+                let builder = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let (subject, steps) = Self::cage_builder_parts(&builder, "InCage")?;
+                let method = self.eval_host_boundary_str_arg(&type_args[1], "InCage method")?;
+                let args_value = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                if !matches!(args_value, Value::List(_)) {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "InCage args must be a list, got {}",
+                            Self::type_name_of(&args_value)
+                        ),
+                    });
+                }
+                let mut steps = steps;
+                steps.push(Self::host_step_pack(method, args_value));
+                Ok(Some(Signal::Value(Value::pack(vec![
+                    ("__cage_subject".into(), subject),
+                    ("__cage_steps".into(), Value::list(steps)),
+                ]))))
+            }
+            "Uncage" => {
+                // F62B-024: `Uncage[builder, method, Out]()` — push the final
+                // (arg-less) step, assemble the HostCall envelope, and fire
+                // the host cage. The chain builds a description; the host
+                // call is issued exactly once, here. `Out` is a type
+                // reference and is not evaluated (same as HostCall's Out).
+                if type_args.len() != 3 {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "Uncage requires exactly 3 type arguments: Uncage[builder, method, Out](), got {}",
+                            type_args.len()
+                        ),
+                    });
+                }
+                let builder = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let (subject, steps) = Self::cage_builder_parts(&builder, "Uncage")?;
+                let method = self.eval_host_boundary_str_arg(&type_args[1], "Uncage method")?;
+                let mut steps = steps;
+                steps.push(Self::host_step_pack(method, Value::list(Vec::new())));
+                let host_call = Value::pack(vec![
+                    ("__type".into(), Value::str("HostCall".to_string())),
+                    ("steps".into(), Value::list(steps)),
+                ]);
+                Ok(Some(Signal::Value(
+                    self.eval_host_call_cage(subject, host_call)?,
+                )))
             }
             "HostStep" => {
                 if type_args.len() != 2 {

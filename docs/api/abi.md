@@ -144,6 +144,40 @@ handle req: WebRequest =
 => :WebResponse
 ```
 
+### Cage チェーン — `Cage[subject]()` / `InCage` / `Uncage`
+
+step が増えるとネストが深くなる `HostCall` 直接形の代わりに、パイプラインで記述を構築できます。
+
+```taida
+>>> taida-lang/abi => @(WebRequest, WebResponse, text, HostCapability)
+
+D1 <= "cloudflare/d1"
+
+handle req: WebRequest =
+  db <= HostCapability["DB", D1]()
+  Cage[db]() => InCage[_, "prepare", @["select * from posts"]]() => Uncage[_, "all", @[Str]]() >=> rows
+  text(rows.first().getOrDefault(""))
+=> :WebResponse
+```
+
+| モールド | 概要 |
+|----------|------|
+| `Cage[subject]()` | 1 引数形は **CageBuilder** (capability + 空 steps) を返す。2 引数形 `Cage[subject, runner]()` は従来どおり。 |
+| `InCage[builder, method, args]()` | step を 1 つ積んだ builder を返す。`method` は compile-time `Str`、`args` の制約は `HostStep` と同一 (`[E3601]` / `[E3603]`)。 |
+| `Uncage[builder, method, Out]()` | 最終 step (引数なし) を積んで envelope 化し、host call を発行して `Async[Out]` を返す。 |
+
+チェーンは**記述の構築**であり、host call は `Uncage` で 1 回だけ発行されます。wire 形 (steps 配列の 1 envelope) は `HostCall` 直接形と同一なので、adapter / glue / fixture は両形で共通です。
+
+builder は一級値で、値セマンティクスを持ちます (`InCage` は元の builder を変更せず拡張コピーを返す)。ベースチェーンを束縛しておけば、軽量な prepared statement として再利用できます。
+
+```taida fragment
+db <= HostCapability["DB", D1]()
+Cage[db]() => InCage[_, "prepare", @["select * from users where id = ?"]]() => findUser
+findUser => InCage[_, "bind", @[7]]() => Uncage[_, "all", @[Str]]() >=> rows
+```
+
+builder 自体をアンモールドすることはできません (取り出す値は `Uncage` が返します)。bare な builder への `>=>` / `<=<` はゴリラです。
+
 HostCall の wire 値では、`Bytes` は標準 base64 の `Str` として運ばれます。
 `WebRequest` / `WebResponse` は handler JSON と同じく body を `bodyBase64`
 で運び、`query` / `headers` は `name` / `value` の出現順リストを維持します。

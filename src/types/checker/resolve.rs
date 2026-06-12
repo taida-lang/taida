@@ -93,6 +93,96 @@ impl TypeChecker {
         Type::Generic("HostCapability".to_string(), vec![Type::Str, Type::Str])
     }
 
+    /// F62B-024: `InCage[builder, method, args]()` — validates the builder /
+    /// method / wire-encodable args and yields the builder type again.
+    pub(super) fn infer_in_cage_type(&mut self, type_args: &[Expr], span: &Span) -> Type {
+        if type_args.len() != 3 {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1505] `InCage[builder, method, args]()` requires exactly 3 `[]` argument(s), got {}.",
+                    type_args.len()
+                ),
+                span: span.clone(),
+            });
+            return Type::Named("CageBuilder".to_string());
+        }
+        self.check_cage_builder_arg("InCage", &type_args[0]);
+        self.check_cage_chain_method("InCage", &type_args[1]);
+        let args = &type_args[2];
+        let (args_ty, args_ok) = self.wire_encodable_expr_type(args);
+        if !args_ok {
+            self.push_wired_constraint_error("InCage args", &args_ty, args.span());
+        }
+        if !matches!(args_ty, Type::List(_)) && !matches!(args_ty, Type::Unknown) && args_ok {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E3601] InCage args must be a wire-encodable list, got {}. \
+                     Hint: pass positional arguments as `@[arg0, arg1, ...]`; use `@[]` for no arguments.",
+                    args_ty
+                ),
+                span: args.span().clone(),
+            });
+        }
+        Type::Named("CageBuilder".to_string())
+    }
+
+    /// F62B-024: `Uncage[builder, method, Out]()` — the final chain step;
+    /// fires the host call and yields `Async[Out]`.
+    pub(super) fn infer_uncage_type(&mut self, type_args: &[Expr], span: &Span) -> Type {
+        if type_args.len() != 3 {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1505] `Uncage[builder, method, Out]()` requires exactly 3 `[]` argument(s), got {}.",
+                    type_args.len()
+                ),
+                span: span.clone(),
+            });
+            return Type::Generic("Async".to_string(), vec![Type::Unknown]);
+        }
+        self.check_cage_builder_arg("Uncage", &type_args[0]);
+        self.check_cage_chain_method("Uncage", &type_args[1]);
+        let out = self.type_arg_expr_to_type(&type_args[2]);
+        Type::Generic("Async".to_string(), vec![out])
+    }
+
+    /// Shared builder-argument check for the chain molds: the first `[]`
+    /// argument must flow from `Cage[subject]()` (typed `CageBuilder`).
+    fn check_cage_builder_arg(&mut self, mold: &str, builder: &Expr) {
+        let builder_ty = self.infer_expr_type(builder);
+        let is_builder = matches!(&builder_ty, Type::Named(n) if n == "CageBuilder");
+        if !is_builder && builder_ty != Type::Unknown {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1517] {} requires a CageBuilder as its first argument (start the chain with `Cage[subject]()`), got {}.",
+                    mold, builder_ty
+                ),
+                span: builder.span().clone(),
+            });
+        }
+    }
+
+    /// Shared method-argument check for the chain molds: compile-time Str,
+    /// mirroring `HostStep[method, args]()`.
+    fn check_cage_chain_method(&mut self, mold: &str, method: &Expr) {
+        let method_ty = self.infer_expr_type(method);
+        if method_ty != Type::Str && method_ty != Type::Unknown {
+            self.errors.push(TypeError {
+                message: format!("[E1506] {} method must be Str, got {}.", mold, method_ty),
+                span: method.span().clone(),
+            });
+        }
+        if method_ty == Type::Str && self.string_const_expr(method).is_none() {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E3603] {} method must be a compile-time Str value. \
+                     Hint: use a string literal or a Str constant for the method name.",
+                    mold
+                ),
+                span: method.span().clone(),
+            });
+        }
+    }
+
     pub(super) fn infer_host_step_type(&mut self, type_args: &[Expr], span: &Span) -> Type {
         if type_args.len() != 2 {
             self.errors.push(TypeError {

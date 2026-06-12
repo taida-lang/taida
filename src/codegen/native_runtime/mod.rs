@@ -916,7 +916,10 @@ mod tests {
         //   compat audit narrowed the rule to machinery-less plain packs
         //   (no __type) — bare values stay identity: +1,360.
         //   1,331,526 -> 1,332,886.
-        const EXPECTED_TOTAL_LEN: usize = 1_332_886;
+        // 2026-06-12 F62B-024 (core.c): CageBuilder chain helpers
+        //   (taida_cage_builder_new/push/fire) next to the host abi:
+        //   +2,813. 1,332,886 -> 1,335,699.
+        const EXPECTED_TOTAL_LEN: usize = 1_335_699;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1674,7 +1677,9 @@ mod tests {
         // land before the marker (F1 419,927 -> 420,640); F2 unchanged.
         // 2026-06-12 host descriptor stubs land before the marker
         // (F1 420,640 -> 423,646); F2 unchanged.
-        const F1_LEN: usize = 426_011;
+        // F62B-024: CageBuilder chain helpers (before the marker):
+        // 426,011 -> 428,824.
+        const F1_LEN: usize = 428_824;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1751,6 +1756,9 @@ mod tests {
             // F62B-026: taida_non_mold_unmold_gorilla + the plain-pack
             // (no __type) gorilla land next to taida_generic_unmold
             // (after the marker): +1,360. F2 225,101 -> 226,461.
+            // F62B-024: CageBuilder chain helpers land next to the host
+            // descriptor stubs (before the marker): F1 426,011 -> 428,824;
+            // F2 unchanged.
             F1_LEN + 226_461,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );

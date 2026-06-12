@@ -876,6 +876,17 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_abi_host_cage" => {
             "int64_t taida_abi_host_cage(int64_t capability, int64_t call);".to_string()
         }
+        // F62B-024: CageBuilder chain helpers (runtime_abi_web fragment).
+        "taida_cage_builder_new" => {
+            "int64_t taida_cage_builder_new(int64_t subject);".to_string()
+        }
+        "taida_cage_builder_push" => {
+            "int64_t taida_cage_builder_push(int64_t builder, int64_t step);".to_string()
+        }
+        "taida_cage_builder_fire" => {
+            "int64_t taida_cage_builder_fire(int64_t builder, int64_t final_step, int64_t out_schema);"
+                .to_string()
+        }
         // W-5: Lax runtime functions
         // F58 P2-4: divisor-proven exact division (fused unmold form).
         "taida_div_exact" => "int64_t taida_div_exact(int64_t a, int64_t b);".to_string(),

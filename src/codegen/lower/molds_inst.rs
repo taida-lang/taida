@@ -2931,6 +2931,70 @@ impl Lowering {
                 ));
                 Ok(result)
             }
+            "InCage" => {
+                // F62B-024: push one step onto the builder. The step is the
+                // exact `taida_abi_host_step` descriptor `HostStep[...]()`
+                // produces (the per-step wire schema resolves statically
+                // from the args expression, like the direct form).
+                if type_args.len() != 3 {
+                    return Err(LowerError {
+                        message: "InCage requires 3 arguments: InCage[builder, method, args]()"
+                            .into(),
+                    });
+                }
+                let builder = self.lower_expr(func, &type_args[0])?;
+                let method = self.lower_expr(func, &type_args[1])?;
+                let args = self.lower_expr(func, &type_args[2])?;
+                let args_schema_desc = self.resolve_wire_schema_descriptor(&type_args[2])?;
+                let args_schema = func.alloc_var();
+                func.push(IrInst::ConstStr(args_schema, args_schema_desc));
+                let step = func.alloc_var();
+                func.push(IrInst::Call(
+                    step,
+                    "taida_abi_host_step".to_string(),
+                    vec![method, args, args_schema],
+                ));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_cage_builder_push".to_string(),
+                    vec![builder, step],
+                ));
+                Ok(result)
+            }
+            "Uncage" => {
+                // F62B-024: final chain step (arg-less) + fire the host cage.
+                if type_args.len() != 3 {
+                    return Err(LowerError {
+                        message: "Uncage requires 3 arguments: Uncage[builder, method, Out]()"
+                            .into(),
+                    });
+                }
+                let builder = self.lower_expr(func, &type_args[0])?;
+                let method = self.lower_expr(func, &type_args[1])?;
+                let empty_args_expr =
+                    crate::parser::Expr::ListLit(Vec::new(), type_args[1].span().clone());
+                let args = self.lower_expr(func, &empty_args_expr)?;
+                let args_schema_desc = self.resolve_wire_schema_descriptor(&empty_args_expr)?;
+                let args_schema = func.alloc_var();
+                func.push(IrInst::ConstStr(args_schema, args_schema_desc));
+                let final_step = func.alloc_var();
+                func.push(IrInst::Call(
+                    final_step,
+                    "taida_abi_host_step".to_string(),
+                    vec![method, args, args_schema],
+                ));
+                let out_schema_desc = self.resolve_json_schema_descriptor(&type_args[2])?;
+                let out_schema = func.alloc_var();
+                func.push(IrInst::ConstStr(out_schema, out_schema_desc));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_cage_builder_fire".to_string(),
+                    vec![builder, final_step, out_schema],
+                ));
+                Ok(result)
+            }
             "HostStep" => {
                 if type_args.len() != 2 {
                     return Err(LowerError {
@@ -2969,9 +3033,20 @@ impl Lowering {
                 Ok(result)
             }
             "Cage" => {
+                // F62B-024: 1-arg form opens a CageBuilder chain.
+                if type_args.len() == 1 {
+                    let subject = self.lower_expr(func, &type_args[0])?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_cage_builder_new".to_string(),
+                        vec![subject],
+                    ));
+                    return Ok(result);
+                }
                 if type_args.len() < 2 {
                     return Err(LowerError {
-                        message: "Cage requires 2 type arguments: Cage[subject, runner]".into(),
+                        message: "Cage requires a subject: Cage[subject]() for a builder chain, or Cage[subject, runner]() for a direct call".into(),
                     });
                 }
                 if matches!(&type_args[1], Expr::MoldInst(name, _, _, _) if name == "HostCall") {

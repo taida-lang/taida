@@ -731,6 +731,8 @@ impl TypeChecker {
                 | "HostCall"
                 | "HostStep"
                 | "HostCapability"
+                | "InCage"
+                | "Uncage"
                 | "Lax"
                 | "Result"
                 | "Async"

@@ -2030,6 +2030,24 @@ impl Parser {
                 return Ok(Statement::Expr(steps.into_iter().next().unwrap()));
             }
 
+            // F62B-024: `data => step => ... >=> name` — a pipeline can end
+            // in an unmold binding. The pipeline result (typically a mold
+            // value, e.g. the Async from `Uncage[...]()`) is unmolded into
+            // the target. `=>` / `>=>` are both rightward, so the
+            // single-direction constraints are satisfied by construction.
+            if self.check(&TokenKind::UnmoldForward) {
+                let span = self.current_span();
+                self.advance();
+                let target = self.expect_ident()?;
+                let type_annotation = self.parse_optional_unmold_target_annotation()?;
+                return Ok(Statement::UnmoldForward(UnmoldForwardStmt {
+                    source: Expr::Pipeline(steps, start_span),
+                    target,
+                    type_annotation,
+                    span,
+                }));
+            }
+
             // Check if the last step is a simple identifier — that's an assignment target
             if let Some(Expr::Ident(name, _)) = steps.last() {
                 let target = name.clone();
