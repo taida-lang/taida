@@ -1179,9 +1179,19 @@ static int64_t _wasm_non_mold_unmold_gorilla(void) {
     const char *gor = "><\n";
     struct { const char *buf; int len; } iov2 = { gor, 3 };
     fd_write(2, &iov2, 1, &nwritten);
+#ifdef TAIDA_WASM_PROFILE_EDGE
+    /* The edge profile runs as an exported handler under a host that
+       provides no WASI proc_exit; a trap surfaces to the host as a
+       WebAssembly.RuntimeError (same contract as the unhandled-throw
+       path in taida_throw). Unlike taida_gorillax_unmold this helper is
+       reachable from every `>=>` lowering, so a hard proc_exit import
+       here broke instantiation under the node harness. */
+    __builtin_trap();
+#else
     extern void proc_exit(int code)
         __attribute__((import_module("wasi_snapshot_preview1"), import_name("proc_exit")));
     proc_exit(1);
+#endif
     return 0;
 }
 

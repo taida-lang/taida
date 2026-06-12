@@ -477,9 +477,10 @@ stdout(flat)
 
 #[test]
 fn test_native_unmold_large_int_matches_interpreter() {
+    // The bare-Int unmold form is rejected by [E1545] now; the large-int
+    // payload keeps its pointer-heuristic coverage through a real mold.
     let source = r#"
-x <= 1234567890123
-x >=> y
+Lax[1234567890123]() >=> y
 stdout(y.toString())
 "#;
     assert_native_matches_interpreter(source, "unmold_large_int");
@@ -534,9 +535,10 @@ stdout(flat)
 
 #[test]
 fn test_native_unmold_negative_boundary_matches_interpreter() {
+    // Same [E1545] migration as the large-int case: the boundary value
+    // unmolds through a real mold.
     let source = r#"
-x <= -2147483648
-x >=> y
+Lax[-2147483648]() >=> y
 stdout(y.toString())
 "#;
     assert_native_matches_interpreter(source, "unmold_negative_boundary");

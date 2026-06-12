@@ -268,7 +268,12 @@ mod tests {
         //   495,406 -> 497,417.
         // 2026-06-12 F62B-034 (01_core): custom mold `__unmold` hook
         //   invocation in generic_unmold: +565. 497,417 -> 497,982.
-        const EXPECTED_TOTAL_LEN: usize = 497_982;
+        // 2026-06-12 F62B-026 follow-up (01_core): the non-mold gorilla
+        //   terminates via __builtin_trap on the edge profile instead of
+        //   importing proc_exit (the helper is reachable from every `>=>`
+        //   lowering, so the hard import broke node instantiation):
+        //   +477. 497,982 -> 498,459.
+        const EXPECTED_TOTAL_LEN: usize = 498_459;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

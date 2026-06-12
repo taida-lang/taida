@@ -39824,9 +39824,9 @@ fn d28b_009_nan_propagation_three_backend_parity() {
 Sqrt[-1.0]() >=> nan
 nan_value: Float <= nan
 debug(nan_value)
-Div[nan_value, 2.0] >=> nan_div
+Div[nan_value, 2.0]() >=> nan_div
 debug(nan_div)
-Mod[nan_value, 3.0] >=> nan_mod
+Mod[nan_value, 3.0]() >=> nan_mod
 debug(nan_mod)
 nan_plus <= nan_value + 1.0
 debug(nan_plus)
@@ -39845,15 +39845,15 @@ fn d28b_009_inf_arithmetic_three_backend_parity() {
         return;
     }
     let src = r#"
-Div[1e308, 1e-308] >=> big
+Div[1e308, 1e-308]() >=> big
 big_value: Float <= big
 debug(big_value)
-Div[-1e308, 1e-308] >=> negbig
+Div[-1e308, 1e-308]() >=> negbig
 negbig_value: Float <= negbig
 debug(negbig_value)
-Mod[1.5, big_value] >=> m_pos
+Mod[1.5, big_value]() >=> m_pos
 debug(m_pos)
-Mod[2.5, negbig_value] >=> m_neg
+Mod[2.5, negbig_value]() >=> m_neg
 debug(m_neg)
 plus_inf <= big_value + 1.0
 debug(plus_inf)
