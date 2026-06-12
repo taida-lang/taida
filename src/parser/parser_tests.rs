@@ -66,6 +66,11 @@ fn collect_expr_node_ids_inner(expr: &Expr, ids: &mut Vec<usize>) {
                 collect_expr_node_ids_inner(&field.value, ids);
             }
         }
+        Expr::Block(stmts, _) => {
+            for stmt in stmts {
+                collect_stmt_expr_node_ids(stmt, ids);
+            }
+        }
         Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
             for item in items {
                 collect_expr_node_ids_inner(item, ids);

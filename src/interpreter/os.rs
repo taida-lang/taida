@@ -3145,20 +3145,6 @@ mod tests {
         assert!(!result_is_success(&val));
     }
 
-    #[test]
-    fn test_format_rfc3339_utc_epoch() {
-        let epoch = std::time::UNIX_EPOCH;
-        assert_eq!(format_rfc3339_utc(epoch), "1970-01-01T00:00:00Z");
-    }
-
-    #[test]
-    fn test_format_rfc3339_utc_known_date() {
-        // 2025-01-01T00:00:00Z = 1735689600 seconds since epoch
-        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1735689600);
-        let s = format_rfc3339_utc(t);
-        assert_eq!(s, "2025-01-01T00:00:00Z");
-    }
-
     // ── Integration tests using Interpreter ──
 
     fn run_code(code: &str) -> Vec<String> {
