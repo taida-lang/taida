@@ -41573,34 +41573,18 @@ stdout(isEven(50000))
         );
     }
 
-    // Native must reject with `[E0700]` before it can lower the
-    // program. The error is surfaced via the build subcommand because
-    // the type-checker runs once we know the compile target.
+    // F62B-002: tail-only mutual cycles are merged into a self-tail
+    // dispatcher at lowering, so native now ACCEPTS this program and must
+    // produce the same answer at 50k depth (the old [E0700] wholesale
+    // reject is retained only for cycles outside the mergeable subset —
+    // pinned by tests/f62b002_mutual_tco_native.rs).
     let tmp = unique_temp_path("taida_parity_e32b_023", "native", "td");
     fs::write(&tmp, source).expect("failed to write E32B-023 source");
-    let native_err = run_native_build_error(&tmp, "e32b_023_native_mutual_recursion_rejected")
-        .expect("native build must fail for E32B-023 mutual recursion");
-    assert!(
-        native_err.contains("[E0700]"),
-        "native rejection must cite [E0700], got: {}",
-        native_err
-    );
-    assert!(
-        native_err.contains("Mutual recursion"),
-        "native rejection must explain mutual recursion, got: {}",
-        native_err
-    );
-
-    // wasm-min covers the wasm lowering pipeline (the same checker runs
-    // for every wasm-* profile via `set_compile_target`, so wasm-min is
-    // sufficient as the canonical wasm reject pin without paying the
-    // wasm-full link cost).
-    let wasm_err = run_wasm_min_build_error(&tmp, "e32b_023_wasm_mutual_recursion_rejected")
-        .expect("wasm-min build must fail for E32B-023 mutual recursion");
-    assert!(
-        wasm_err.contains("[E0700]"),
-        "wasm-min rejection must cite [E0700], got: {}",
-        wasm_err
+    let native_out =
+        run_native(&tmp).expect("native build+run must succeed for tail-only mutual recursion");
+    assert_eq!(
+        native_out, interp,
+        "interpreter/native mismatch for deep tail-only mutual recursion"
     );
 
     let _ = fs::remove_file(&tmp);
@@ -41624,17 +41608,17 @@ fn test_e32b_046_native_mutual_recursion_anchor_points_at_user_func() {
 
 a n: Int =
   | n == 0 |> 1
-  | _ |> b(n - 1)
+  | _ |> 1 + b(n - 1)
 => :Int
 
 b n: Int =
   | n == 0 |> 1
-  | _ |> c(n - 1)
+  | _ |> 1 + c(n - 1)
 => :Int
 
 c n: Int =
   | n == 0 |> 1
-  | _ |> a(n - 1)
+  | _ |> 1 + a(n - 1)
 => :Int
 
 stdout(a(10))

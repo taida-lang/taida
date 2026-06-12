@@ -510,6 +510,12 @@ impl TypeChecker {
                         crate::parser::ClassLikeKind::BuchiPack => {
                             let fields = map_fields(self, &cl.fields);
                             self.registry.register_type(local_name, fields);
+                            // Method fields resolve through mold_field_defs
+                            // (the same registry local definitions feed) —
+                            // without this, registering the type makes
+                            // `item.method()` a strict [E1509] miss.
+                            self.mold_field_defs
+                                .insert(local_name.to_string(), cl.fields.clone());
                             self.declared_concrete_type_names
                                 .insert(local_name.to_string());
                             self.declared_header_arities
@@ -541,6 +547,8 @@ impl TypeChecker {
                                         extra,
                                     );
                                 }
+                                self.mold_field_defs
+                                    .insert(local_name.to_string(), cl.fields.clone());
                                 self.declared_concrete_type_names
                                     .insert(local_name.to_string());
                                 self.declared_header_arities
