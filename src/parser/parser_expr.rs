@@ -816,6 +816,7 @@ impl Parser {
                 crate::parser::ClassLikeKind::BuchiPack => "type definition",
                 crate::parser::ClassLikeKind::Mold { .. } => "mold definition",
                 crate::parser::ClassLikeKind::Inheritance { .. } => "inheritance definition",
+                crate::parser::ClassLikeKind::Alias { .. } => "type alias",
             },
             Statement::FuncDef(_) => "function definition",
             Statement::ErrorCeiling(_) => "error ceiling",

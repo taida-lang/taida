@@ -346,6 +346,21 @@ impl Parser {
                 self.advance(); // consume `=`
 
                 if self.check(&TokenKind::At) {
+                    if matches!(self.peek_at(1).kind, TokenKind::LBracket) {
+                        // List type alias: `Pairs = @[ElemType]`. The rhs is a
+                        // type expression, not fields — `@(` stays the pack
+                        // type-def path below.
+                        let target = self.parse_type_expr()?;
+                        return Ok(Statement::ClassLikeDef(ClassLikeDef {
+                            name,
+                            fields: Vec::new(),
+                            doc_comments,
+                            span: start_span,
+                            kind: ClassLikeKind::Alias { target },
+                            name_args: None,
+                            type_params: Vec::new(),
+                        }));
+                    }
                     // Type definition (E30 Phase 2 Sub-step 2.1: BuchiPack kind の ClassLikeDef)
                     let fields = self.parse_buchi_pack_fields()?;
                     Ok(Statement::ClassLikeDef(ClassLikeDef {

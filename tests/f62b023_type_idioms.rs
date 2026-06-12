@@ -137,3 +137,133 @@ fn untyped_unmold_forms_unchanged() {
     );
     assert_eq!(stdout_text(&output), "3\n4\n");
 }
+
+// ── (b) list type aliases: `Name = @[ElemType]` ─────────────────────
+
+fn run_interp_files(label: &str, files: &[(&str, &str)], entry: &str) -> Output {
+    let dir = unique_temp_dir(label);
+    for (name, source) in files {
+        write_file(&dir.join(name), source);
+    }
+    let output = Command::new(taida_bin())
+        .arg(dir.join(entry))
+        .output()
+        .expect("run taida interpreter");
+    let _ = fs::remove_dir_all(&dir);
+    output
+}
+
+/// (b) the headline idiom: an alias names a list-of-packs type and pins an
+/// empty literal through an annotated binding.
+#[test]
+fn list_type_alias_pins_empty_literal() {
+    let output = run_interp(
+        "f62b023_alias_basic",
+        "Pairs = @[@(name: Str, value: Str)]\nemptyPairs: Pairs <= @[]\nstdout(emptyPairs.length().toString())\n",
+    );
+    assert!(
+        output.status.success(),
+        "alias-annotated empty list must check\nstderr={}",
+        stderr_text(&output)
+    );
+    assert_eq!(stdout_text(&output), "0\n");
+}
+
+/// (b) aliases expand in parameter and return annotations.
+#[test]
+fn list_type_alias_in_function_annotations() {
+    let output = run_interp(
+        "f62b023_alias_fn",
+        "Pairs = @[@(name: Str, value: Str)]\ncountPairs ps: Pairs = ps.length() => :Int\nps: Pairs <= @[@(name <= \"a\", value <= \"b\")]\nstdout(countPairs(ps).toString())\n",
+    );
+    assert!(
+        output.status.success(),
+        "alias in fn annotations must check\nstderr={}",
+        stderr_text(&output)
+    );
+    assert_eq!(stdout_text(&output), "1\n");
+}
+
+/// (b) alias chains expand at registration (`Grid = @[Row]`).
+#[test]
+fn list_type_alias_chain_expands() {
+    let output = run_interp(
+        "f62b023_alias_chain",
+        "Row = @[Int]\nGrid = @[Row]\ng: Grid <= @[@[1, 2], @[3]]\nstdout(g.length().toString())\n",
+    );
+    assert!(
+        output.status.success(),
+        "alias chain must check\nstderr={}",
+        stderr_text(&output)
+    );
+    assert_eq!(stdout_text(&output), "2\n");
+}
+
+/// (b) alias names join the E1501 collision space — both definition orders.
+#[test]
+fn list_type_alias_collision_is_e1501_both_orders() {
+    for (label, source) in [
+        (
+            "f62b023_alias_collide_1",
+            "Pairs = @[Int]\nPairs = @(x: Int)\n",
+        ),
+        (
+            "f62b023_alias_collide_2",
+            "Pairs = @(x: Int)\nPairs = @[Int]\n",
+        ),
+    ] {
+        let output = run_interp(label, source);
+        assert!(
+            !output.status.success(),
+            "{label}: redefinition must be rejected"
+        );
+        let stderr = stderr_text(&output);
+        assert!(
+            stderr.contains("E1501"),
+            "{label}: expected E1501 collision, got: {stderr}"
+        );
+    }
+}
+
+/// (b) a mismatch through an alias reports the expanded structural type.
+#[test]
+fn list_type_alias_mismatch_reports_structural_type() {
+    let output = run_interp(
+        "f62b023_alias_mismatch",
+        "Pairs = @[@(name: Str, value: Str)]\nbad: Pairs <= @[1, 2]\n",
+    );
+    assert!(
+        !output.status.success(),
+        "Int list against pack alias must be rejected"
+    );
+    let stderr = stderr_text(&output);
+    assert!(
+        stderr.contains("expected @[@(name: Str, value: Str)]"),
+        "expected the alias to expand in the diagnostic, got: {stderr}"
+    );
+}
+
+/// (b) aliases cross module boundaries through import lists.
+#[test]
+fn list_type_alias_imports_across_modules() {
+    let output = run_interp_files(
+        "f62b023_alias_xmodule",
+        &[
+            (
+                "lib.td",
+                "Pairs = @[@(name: Str, value: Str)]\n<<< @(Pairs)\n",
+            ),
+            (
+                "main.td",
+                ">>> ./lib.td => @(Pairs)\nps: Pairs <= @[@(name <= \"x\", value <= \"y\")]\nstdout(ps.length().toString())\n",
+            ),
+        ],
+        "main.td",
+    );
+    assert!(
+        output.status.success(),
+        "imported alias must check\nstderr={}",
+        stderr_text(&output)
+    );
+    assert_eq!(stdout_text(&output), "1\n");
+}

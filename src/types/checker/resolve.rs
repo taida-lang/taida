@@ -555,6 +555,13 @@ impl TypeChecker {
                                     .insert(local_name.to_string(), 0);
                             }
                         }
+                        crate::parser::ClassLikeKind::Alias { target } => {
+                            // Type alias: resolve the target through the
+                            // import renames and register under the local
+                            // name. Checker-only, like local aliases.
+                            let resolved = self.resolve_imported_type_expr(target, &type_aliases);
+                            self.registry.register_type_alias(local_name, resolved);
+                        }
                         // Operation molds need their own registration path
                         // (mold_defs + specs); they are not JSON schemas and
                         // stay out of this fix's scope.
@@ -699,7 +706,8 @@ impl TypeChecker {
                 let has_collision = self.registry.type_defs.contains_key(&ed.name)
                     || self.registry.enum_defs.contains_key(&ed.name)
                     || self.func_types.contains_key(&ed.name)
-                    || self.registry.mold_defs.contains_key(&ed.name);
+                    || self.registry.mold_defs.contains_key(&ed.name)
+                    || self.registry.type_aliases.contains_key(&ed.name);
                 if has_collision {
                     self.errors.push(TypeError {
                         message: format!(
@@ -740,7 +748,8 @@ impl TypeChecker {
                     let has_collision = self.registry.type_defs.contains_key(&td.name)
                         || self.registry.enum_defs.contains_key(&td.name)
                         || self.func_types.contains_key(&td.name)
-                        || self.registry.mold_defs.contains_key(&td.name);
+                        || self.registry.mold_defs.contains_key(&td.name)
+                        || self.registry.type_aliases.contains_key(&td.name);
                     if has_collision {
                         self.errors.push(TypeError {
                             message: format!(
@@ -779,6 +788,26 @@ impl TypeChecker {
                     self.mold_field_defs
                         .insert(td.name.clone(), td.fields.clone());
                 }
+                ClassLikeKind::Alias { target } => {
+                    let has_collision = self.registry.type_defs.contains_key(&cl.name)
+                        || self.registry.enum_defs.contains_key(&cl.name)
+                        || self.func_types.contains_key(&cl.name)
+                        || self.registry.mold_defs.contains_key(&cl.name)
+                        || self.registry.type_aliases.contains_key(&cl.name);
+                    if has_collision {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1501] Name '{}' is already defined in this scope. \
+                                 Redefinition in the same scope is not allowed. \
+                                 Hint: Use a different name, or define it in an inner scope (shadowing is allowed).",
+                                cl.name
+                            ),
+                            span: cl.span.clone(),
+                        });
+                    }
+                    let resolved = self.registry.resolve_type(target);
+                    self.registry.register_type_alias(&cl.name, resolved);
+                }
                 ClassLikeKind::Mold { .. } => {
                     let md = cl;
                     // F42 sweep [E1501]: MoldDef collision check (the
@@ -794,7 +823,8 @@ impl TypeChecker {
                     let has_collision = self.registry.type_defs.contains_key(&md.name)
                         || self.registry.enum_defs.contains_key(&md.name)
                         || self.func_types.contains_key(&md.name)
-                        || self.registry.mold_defs.contains_key(&md.name);
+                        || self.registry.mold_defs.contains_key(&md.name)
+                        || self.registry.type_aliases.contains_key(&md.name);
                     if has_collision {
                         self.errors.push(TypeError {
                             message: format!(

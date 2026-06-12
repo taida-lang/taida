@@ -389,6 +389,19 @@ fn lint_class_like_def(cl: &ClassLikeDef, diags: &mut Vec<LintDiagnostic>) {
                 lint_field_def(f, diags);
             }
         }
+        ClassLikeKind::Alias { .. } => {
+            // 型エイリアス — 名前の PascalCase のみ (フィールドは持たない)
+            if !is_pascal_case(&cl.name) {
+                diags.push(LintDiagnostic {
+                    code: "[E1801]",
+                    message: format!(
+                        "クラスライク型 / モールド型 / スキーマ / エラー variant は PascalCase で命名してください: '{}'",
+                        cl.name
+                    ),
+                    span: cl.span.clone(),
+                });
+            }
+        }
         ClassLikeKind::Mold { mold_args } => {
             // 旧 lint_mold_def
             if !is_pascal_case(&cl.name) {

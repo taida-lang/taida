@@ -146,6 +146,10 @@ pub enum ClassLikeKind {
         parent: String,
         parent_args: Option<Vec<MoldHeaderArg>>,
     },
+    /// 型エイリアス: `Pairs = @[@(name: Str, value: Str)]`。
+    /// 右辺が `@[` で始まる場合のみこの kind になる (`@(` は BuchiPack)。
+    /// checker-only: 注釈位置で展開される。`fields` は常に空。
+    Alias { target: TypeExpr },
 }
 
 impl ClassLikeDef {

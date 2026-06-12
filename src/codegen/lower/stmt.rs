@@ -174,6 +174,8 @@ impl Lowering {
                             self.type_method_defs.insert(type_def.name.clone(), methods);
                         }
                     }
+                    // Type aliases are checker-only — no runtime artifact.
+                    crate::parser::ClassLikeKind::Alias { .. } => {}
                     crate::parser::ClassLikeKind::Mold { .. } => {
                         let mold_def = cl;
                         let non_method_field_defs: Vec<crate::parser::FieldDef> = mold_def
@@ -2435,6 +2437,8 @@ impl Lowering {
                     }
                     Ok(())
                 }
+                // Type aliases are checker-only — no runtime artifact.
+                crate::parser::ClassLikeKind::Alias { .. } => Ok(()),
                 crate::parser::ClassLikeKind::Mold { .. } => {
                     let mold_def = cl;
                     let non_method_field_defs: Vec<crate::parser::FieldDef> = mold_def

@@ -1750,6 +1750,7 @@ fn check_stmt_naming(stmt: &Statement, file: &str, findings: &mut Vec<VerifyFind
                 crate::parser::ClassLikeKind::BuchiPack => "Type",
                 crate::parser::ClassLikeKind::Mold { .. } => "Mold",
                 crate::parser::ClassLikeKind::Inheritance { .. } => "Type",
+                crate::parser::ClassLikeKind::Alias { .. } => "Type",
             };
             if !is_excluded_name(&cl.name) && !is_pascal_case(&cl.name) {
                 findings.push(VerifyFinding {

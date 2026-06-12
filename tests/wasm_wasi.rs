@@ -1324,11 +1324,12 @@ fn wasm_wasi_parity_allowlist_guard() {
     // F62B-020: +compile_f62b020_lte_between (ordering molds) -> 75.
     // F62B-022: +compile_f62b022_lambda_blocks (block-bodied lambdas) -> 76.
     // F62B-023: +compile_f62b023_typed_unmold (typed unmold bindings) -> 77.
+    // F62B-023(b): +compile_f62b023_type_alias (list type aliases) -> 78.
     assert_eq!(
         expected_parity_ok,
-        77,
+        78,
         "WW-3: parity-OK count drift — got {} = |fixtures {}| - |skip {}| - |rejected {}| - \
-         |native_fail {}| - |diff {}|. Expected 77. Update this constant deliberately.",
+         |native_fail {}| - |diff {}|. Expected 78. Update this constant deliberately.",
         expected_parity_ok,
         all.len(),
         WASI_SKIP_STEMS.len(),
@@ -1486,9 +1487,10 @@ fn wasm_wasi_superset_of_wasm_min() {
     // F62B-020: compile_f62b020_lte_between added (76 → 77)
     // F62B-022: compile_f62b022_lambda_blocks added (77 → 78)
     // F62B-023: compile_f62b023_typed_unmold added (78 → 79)
+    // F62B-023(b): compile_f62b023_type_alias added (79 → 80)
     assert_eq!(
-        superset_ok, 79,
-        "WW-3: Expected exactly 79 superset-verified examples, got {}. \
+        superset_ok, 80,
+        "WW-3: Expected exactly 80 superset-verified examples, got {}. \
          If superset coverage improved, update the expected count.",
         superset_ok
     );

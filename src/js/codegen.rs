@@ -1330,6 +1330,16 @@ impl JsCodegen {
                 crate::parser::ClassLikeKind::BuchiPack => self.gen_type_def(cl),
                 crate::parser::ClassLikeKind::Mold { .. } => self.gen_mold_def(cl),
                 crate::parser::ClassLikeKind::Inheritance { .. } => self.gen_inheritance_def(cl),
+                crate::parser::ClassLikeKind::Alias { .. } => {
+                    // Checker-only; a sentinel keeps the name importable /
+                    // exportable like other type definitions.
+                    self.write_indent();
+                    self.write(&format!(
+                        "const {} = {{ __type: \"TypeDef\", __name: \"{}\" }};\n",
+                        cl.name, cl.name
+                    ));
+                    Ok(())
+                }
             },
             Statement::ErrorCeiling(ec) => {
                 // Standalone ErrorCeiling (when not handled by gen_statement_sequence)

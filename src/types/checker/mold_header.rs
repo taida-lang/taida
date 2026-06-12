@@ -118,6 +118,8 @@ impl TypeChecker {
                             .insert(cl.name.clone(), header_args.len());
                     }
                     ClassLikeKind::Inheritance { .. } => {}
+                    // Type aliases are not constructible — no header arity.
+                    ClassLikeKind::Alias { .. } => {}
                 }
             }
         }

@@ -613,6 +613,20 @@ impl Interpreter {
                     );
                     Ok(Signal::Value(Value::Unit))
                 }
+                crate::parser::ClassLikeKind::Alias { .. } => {
+                    // Type aliases are checker-only. Define the same name
+                    // sentinel as pack type-defs so the alias can sit in
+                    // export lists / module symbol maps without a special
+                    // case; it carries no constructor or fields.
+                    let _ = self.env.define(
+                        &cl.name,
+                        Value::pack(vec![
+                            ("__type".to_string(), Value::str("TypeDef".to_string())),
+                            ("__name".to_string(), Value::str(cl.name.clone())),
+                        ]),
+                    );
+                    Ok(Signal::Value(Value::Unit))
+                }
                 crate::parser::ClassLikeKind::Mold { .. } => {
                     let md = cl;
                     // Register methods defined in the mold type

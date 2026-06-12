@@ -305,6 +305,15 @@ fn extract_ai_graph(program: &Program, file: &str) -> AiGraph {
                         line: cl.span.line,
                     });
                 }
+                crate::parser::ClassLikeKind::Alias { target } => {
+                    types.push(AiType {
+                        name: cl.name.clone(),
+                        kind: "type_alias",
+                        parent: None,
+                        fields: vec![("=".to_string(), type_expr_to_str(&Some(target.clone())))],
+                        line: cl.span.line,
+                    });
+                }
             },
 
             Statement::FuncDef(fd) => {
@@ -597,6 +606,7 @@ fn summarize_stmt(stmt: &Statement) -> String {
             crate::parser::ClassLikeKind::Inheritance { parent, .. } => {
                 format!("{} => {}", parent, cl.name)
             }
+            crate::parser::ClassLikeKind::Alias { .. } => format!("type {}", cl.name),
         },
         Statement::Import(imp) => {
             let syms: Vec<&str> = imp.symbols.iter().map(|s| s.name.as_str()).collect();

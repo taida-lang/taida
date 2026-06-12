@@ -823,6 +823,7 @@ impl GraphExtractor {
                     crate::parser::ClassLikeKind::BuchiPack => "BuchiPack",
                     crate::parser::ClassLikeKind::Mold { .. } => "Mold",
                     crate::parser::ClassLikeKind::Inheritance { .. } => "Inheritance",
+                    crate::parser::ClassLikeKind::Alias { .. } => "TypeAlias",
                 };
                 let id =
                     Graph::make_id(&self.file, span.line, span.column, &NodeKind::ClassLikeType);
@@ -846,6 +847,9 @@ impl GraphExtractor {
                 match &cl.kind {
                     crate::parser::ClassLikeKind::BuchiPack => {
                         // 単独定義 — inheritance edge なし
+                    }
+                    crate::parser::ClassLikeKind::Alias { .. } => {
+                        // 型エイリアス — inheritance edge なし
                     }
                     crate::parser::ClassLikeKind::Mold { .. } => {
                         // Mold[T] base node + 単一 ClassLikeInheritance edge
