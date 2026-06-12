@@ -409,8 +409,8 @@ stdout(msg)                  // "HTTP Error 404"
 `Lax[Str]` を返すので、通常は `getOrDefault` で unwrap します:
 
 ```taida
-ToRadix[255, 16]().getOrDefault("") >=> hex   // "ff"
-ToRadix[26, 2]().getOrDefault("") >=> bin     // "11010"
+hex <= ToRadix[255, 16]().getOrDefault("")   // "ff"
+bin <= ToRadix[26, 2]().getOrDefault("")     // "11010"
 ```
 
 精度指定など `ToRadix` でカバーできないフォーマットは専用の関数を別途
