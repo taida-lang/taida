@@ -155,7 +155,7 @@ fn slice_bytes_via_interpreter_is_zero_copy_view() {
     let src = "\
 sourceLax <= Bytes[\"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+-=[]{}|;:,.<>/?`~\"]()
 sourceLax >=> source
-view <= Slice[source, 10, 100]
+view <= Slice[source, 10, 100]()
 ";
     let (prog, errs) = parse(src);
     assert!(errs.is_empty(), "parse errors: {:?}", errs);
