@@ -20,12 +20,12 @@ nan_value: Float <= nan
 debug(nan_value)
 
 // (2) NaN propagates through Div: NaN / 2.0 = NaN.
-Div[nan_value, 2.0] >=> nan_div
+Div[nan_value, 2.0]() >=> nan_div
 debug(nan_div)
 
 // (3) NaN propagates through Mod: NaN % 3.0 = NaN. Pre-fix wasi
 // silently produced 0.0 here.
-Mod[nan_value, 3.0] >=> nan_mod
+Mod[nan_value, 3.0]() >=> nan_mod
 debug(nan_mod)
 
 // (4) Float `+` on a NaN-bearing Lax projects the NaN through the
