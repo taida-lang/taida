@@ -211,3 +211,52 @@ fn typed_forward_unmold_reports_e0302_for_mixed_direction() {
         stderr_text(&output)
     );
 }
+
+/// F62B-031: a single-line cond arm body supports pipeline and unmold
+/// continuations — the dangling `=>` used to hit the `=> :Type` recovery
+/// placeholder and break the whole cond parse.
+#[test]
+fn single_line_arm_body_supports_pipe_continuations() {
+    let bind = run_interp(
+        "f62rp2_arm_pipe_bind",
+        concat!(
+            "check x: Int =\n",
+            "  | x > 0 |> stdout(\"pos\") => y\n",
+            "  | _ |> stdout(\"neg\")\n",
+            "=> :Int\n",
+            "check(1)\n",
+        ),
+    );
+    assert!(bind.status.success(), "stderr={}", stderr_text(&bind));
+    assert_eq!(stdout_text(&bind), "pos\n");
+
+    let unmold = run_interp(
+        "f62rp2_arm_unmold",
+        concat!(
+            "pick x: Int =\n",
+            "  | x > 0 |> Div[10, 2]() >=> v\n",
+            "  | _ |> 0\n",
+            "=> :Int\n",
+            "stdout(pick(1).toString())\n",
+        ),
+    );
+    assert!(unmold.status.success(), "stderr={}", stderr_text(&unmold));
+    assert_eq!(stdout_text(&unmold), "5\n");
+
+    // The trailing bare identifier is the tail binding (same rule as the
+    // statement-level pipeline): `x => double => r` binds 6 to r and the
+    // arm yields it.
+    let stages = run_interp(
+        "f62rp2_arm_stages",
+        concat!(
+            "double n: Int = n * 2 => :Int\n",
+            "pick x: Int =\n",
+            "  | x > 0 |> x => double => r\n",
+            "  | _ |> 0\n",
+            "=> :Int\n",
+            "stdout(pick(3).toString())\n",
+        ),
+    );
+    assert!(stages.status.success(), "stderr={}", stderr_text(&stages));
+    assert_eq!(stdout_text(&stages), "6\n");
+}

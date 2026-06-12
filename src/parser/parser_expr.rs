@@ -684,9 +684,72 @@ impl Parser {
             Self::validate_cond_arm_body(&block)?;
             Ok(block)
         } else {
-            // Single-line body: parse expression and wrap
+            // Single-line body: parse expression and wrap.
+            //
+            // F62B-031: a single-line arm body supports the same pipeline /
+            // unmold continuations as a statement (`| c |> log(x) => y` /
+            // `| c |> Div[a, b]() >=> v`). Before this, the dangling `=>`
+            // hit the expression-level `=> :Type` recovery placeholder and
+            // broke the whole cond parse (the second arm was swallowed and
+            // [E1524]/[E1502] fired). Stages stop naturally at `|` (the
+            // next arm) because `|` is not an operator, and a return-type
+            // `=> :T` is left for the enclosing function parser.
+            let first_span = self.current_span();
             let expr = self.parse_expression()?;
-            Ok(vec![Statement::Expr(expr)])
+            let mut steps = vec![expr];
+            loop {
+                if !self.check(&TokenKind::FatArrow) {
+                    break;
+                }
+                if matches!(self.peek_at(1).kind, TokenKind::Colon) {
+                    break; // `=> :Type` — the function's return annotation
+                }
+                self.advance(); // consume `=>`
+                steps.push(self.parse_expression()?);
+            }
+            if self.check(&TokenKind::UnmoldForward) {
+                let span = self.current_span();
+                self.advance(); // consume `>=>`
+                let target = self.expect_ident()?;
+                let type_annotation = self.parse_optional_unmold_target_annotation()?;
+                let source = if steps.len() == 1 {
+                    steps.pop().expect("one step")
+                } else {
+                    Expr::Pipeline(steps, first_span)
+                };
+                let body = vec![Statement::UnmoldForward(UnmoldForwardStmt {
+                    source,
+                    target,
+                    type_annotation,
+                    span,
+                })];
+                Self::validate_cond_arm_body(&body)?;
+                return Ok(body);
+            }
+            if steps.len() == 1 {
+                return Ok(vec![Statement::Expr(steps.pop().expect("one step"))]);
+            }
+            // A trailing bare identifier is the tail binding, exactly like
+            // the statement-level pipeline parse.
+            if let Some(Expr::Ident(name, _)) = steps.last() {
+                let target = name.clone();
+                steps.pop();
+                let value = if steps.len() == 1 {
+                    steps.pop().expect("one step")
+                } else {
+                    Expr::Pipeline(steps, first_span.clone())
+                };
+                let body = vec![Statement::Assignment(Assignment {
+                    target,
+                    type_annotation: None,
+                    value,
+                    doc_comments: Vec::new(),
+                    span: first_span,
+                })];
+                Self::validate_cond_arm_body(&body)?;
+                return Ok(body);
+            }
+            Ok(vec![Statement::Expr(Expr::Pipeline(steps, first_span))])
         }
     }
 
