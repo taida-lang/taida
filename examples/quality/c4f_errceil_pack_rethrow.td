@@ -2,12 +2,12 @@
 Error => E1 = @(code: Int)
 Error => E2 = @(code: Int)
 
-buildMsg err =
-  @(tag <= "mid", detail <= err) >=> info
+buildMsg err: Str =
+  info <= @(tag <= "mid", detail <= err)
   info.tag + ":" + info.detail
 => :Str
 
-test x =
+test x: Int =
   |== outerErr: Error =
     "outer:" + outerErr.message
   => :Str

@@ -268,14 +268,14 @@ fn append_consume_keeps_value_semantics_on_interp_and_js() {
   | _ |> build(Append[acc, i](), i + 1)
 => :@[Int]
 xs <= @[100]
-build(xs, 0) >=> r1
+r1 <= build(xs, 0)
 stdout(xs)
 stdout(r1)
-build(r1, 0) >=> r2
+r2 <= build(r1, 0)
 stdout(r1)
 stdout(r2)
 ys <= xs
-build(xs, 1) >=> r3
+r3 <= build(xs, 1)
 stdout(ys)
 stdout(r3)
 "#,
@@ -320,7 +320,7 @@ fn append_consume_interp_100k_completes() {
   | i >= 100000 |> acc
   | _ |> build(Append[acc, i](), i + 1)
 => :@[Int]
-build(@[], 0) >=> result
+result <= build(@[], 0)
 stdout(result.length())
 "#,
     )

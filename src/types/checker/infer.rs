@@ -2830,6 +2830,7 @@ impl TypeChecker {
                 // The compile-time guard is the primary defence; every backend
                 // runtime also fails closed (`>=>` / `<=<` throws on a sealed value).
                 self.reject_sealed_carrier_unmold(&inner_type, span);
+                self.reject_bare_unmold_source(inner, &inner_type, span);
                 match &inner_type {
                     Type::Generic(name, args) => {
                         match name.as_str() {

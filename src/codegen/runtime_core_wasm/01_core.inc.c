@@ -1161,7 +1161,33 @@ static int _wasm_carrier_kind(int64_t val) {
 
 /* ── generic_unmold — W-5g: Lax/Result/Gorillax-aware, predicate-evaluated ── */
 
+/* F62B-026: unmolding a value that is not a mold is gorilla territory —
+   the old identity fallback was an implicit conversion (pretending a value
+   "came out" when there was nothing to take out). Diagnostic + `><` match
+   the interpreter / native / JS runtimes verbatim; termination mirrors
+   taida_gorillax_unmold (WASI fd_write + proc_exit). */
+static int64_t _wasm_non_mold_unmold_gorilla(void) {
+    extern int fd_write(int fd, const void *iovs, int iovs_len, int *nwritten)
+        __attribute__((import_module("wasi_snapshot_preview1"), import_name("fd_write")));
+    const char *diag = "[E1545] Cannot unmold a non-mold value: `>=>` / `<=<` / `.unmold()` take a mold value (Lax, Gorillax, RelaxedGorillax, Result, Async, Stream, or a custom mold).\n";
+    int len = 0;
+    while (diag[len]) len++;
+    struct { const char *buf; int len; } iov = { diag, len };
+    int nwritten;
+    fd_write(2, &iov, 1, &nwritten);
+    const char *gor = "><\n";
+    struct { const char *buf; int len; } iov2 = { gor, 3 };
+    fd_write(2, &iov2, 1, &nwritten);
+    extern void proc_exit(int code)
+        __attribute__((import_module("wasi_snapshot_preview1"), import_name("proc_exit")));
+    proc_exit(1);
+    return 0;
+}
+
 int64_t taida_generic_unmold(int64_t val) {
+    /* 0 must pass through unchanged: it is the throw-unwind placeholder
+       (an upstream throw yields 0 while unwinding), not a user value. */
+    if (val == 0) return 0;
     /* NTH-4: Guard against non-pointer values (negative integers, small ints, etc.)
        that would cause OOB when dereferenced as pack pointers.
        _wasm_is_valid_ptr already handles this for is_lax/result/gorillax, but
@@ -1257,6 +1283,15 @@ int64_t taida_generic_unmold(int64_t val) {
         if ((uint64_t)(unsigned int)val + need_chk > (uint64_t)mem_chk) return val;
         if (p_chk[1 + fc_chk * 3] != WASM_PACK_MAGIC) return val;
     }
+    /* F62B-026: a machinery-less plain pack (no __type tag at all — e.g. a
+       builder pack or a hand-written pack literal) is not a mold. Unmolding
+       it is a program error, not an identity pass-through. Tagged packs and
+       bare values stay identity — `Mold[...]() >=> x` is the documented
+       binding idiom and the checker enforces the static rule ([E1545]). */
+    if (!taida_pack_has_hash(val, WASM_HASH___TYPE)) {
+        return _wasm_non_mold_unmold_gorilla();
+    }
+
     /* BE-WASM-1: TODO mold unmold — return unm channel, fallback to sol/__default/__value.
        Matches native_runtime.c taida_generic_unmold TODO branch. */
     if (taida_pack_has_hash(val, WASM_HASH___TYPE)) {
@@ -1311,6 +1346,8 @@ int64_t taida_generic_unmold(int64_t val) {
         if (taida_pack_has_hash(val, WASM_HASH___VALUE))
             return taida_pack_get(val, WASM_HASH___VALUE);
     }
+    /* Tagged pack without an extraction channel — pass through unchanged
+       (see the plain-pack comment above). */
     return val;
 }
 

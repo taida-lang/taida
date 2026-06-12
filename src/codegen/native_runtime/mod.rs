@@ -912,7 +912,11 @@ mod tests {
         // 2026-06-12 F62B-019 (core.c): jsonEncode slot-tag precedence.
         // 2026-06-12 native HostCall descriptor stubs + session-less cage
         //   rejection (core.c, before the marker).
-        const EXPECTED_TOTAL_LEN: usize = 1_331_526;
+        // 2026-06-12 F62B-026 (core.c): taida_non_mold_unmold_gorilla;
+        //   compat audit narrowed the rule to machinery-less plain packs
+        //   (no __type) — bare values stay identity: +1,360.
+        //   1,331,526 -> 1,332,886.
+        const EXPECTED_TOTAL_LEN: usize = 1_332_886;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1744,7 +1748,10 @@ mod tests {
             // unchanged. The sys/resource.h include adds +87 to F1 as well.
             // F62B-027 follow-up: the guard base becomes thread-local with
             // lazy per-thread init (before the marker): F1 425,533 -> 426,011.
-            F1_LEN + 225_101,
+            // F62B-026: taida_non_mold_unmold_gorilla + the plain-pack
+            // (no __type) gorilla land next to taida_generic_unmold
+            // (after the marker): +1,360. F2 225,101 -> 226,461.
+            F1_LEN + 226_461,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

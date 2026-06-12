@@ -1028,6 +1028,7 @@ impl TypeChecker {
                 // `expr >=> target` -- target gets the unmolded (inner) value
                 let source_ty = self.infer_expr_type(&uf.source);
                 self.reject_sealed_carrier_unmold(&source_ty, &uf.span);
+                self.reject_bare_unmold_source(&uf.source, &source_ty, &uf.span);
                 let inferred_target = self.unmold_type(&source_ty);
                 let target_ty = self.apply_unmold_target_annotation(
                     &uf.target,
@@ -1046,6 +1047,7 @@ impl TypeChecker {
                 // `target <=< expr` / `target: Type <=< expr`
                 let source_ty = self.infer_expr_type(&ub.source);
                 self.reject_sealed_carrier_unmold(&source_ty, &ub.span);
+                self.reject_bare_unmold_source(&ub.source, &source_ty, &ub.span);
                 let inferred_target = self.unmold_type(&source_ty);
                 let target_ty = self.apply_unmold_target_annotation(
                     &ub.target,
@@ -1119,6 +1121,71 @@ impl TypeChecker {
             });
         }
         expected
+    }
+
+    /// F62B-026 [E1545]: `>=>` / `<=<` / `.unmold()` on a source that is
+    /// statically a bare value (a scalar, list, plain pack type, or enum) is
+    /// rejected — a bare value has nothing to take out, so the old identity
+    /// pass-through was an implicit conversion. Mold-call forms are exempt
+    /// regardless of their result type: every value mold returns its bare
+    /// result and `Mold[...]() >=> x` is the documented binding idiom.
+    pub(super) fn reject_bare_unmold_source(
+        &mut self,
+        source: &Expr,
+        source_ty: &Type,
+        span: &Span,
+    ) {
+        if Self::unmold_source_form_is_mold_like(source) {
+            return;
+        }
+        if !self.type_is_definitely_bare(source_ty) {
+            return;
+        }
+        self.errors.push(TypeError {
+            message: format!(
+                "[E1545] Cannot unmold {source_ty}: `>=>` / `<=<` / `.unmold()` take a mold value \
+                 (Lax, Gorillax, RelaxedGorillax, Result, Async, Stream, or a custom mold). \
+                 A bare value has nothing to take out — bind it with `<=` instead."
+            ),
+            span: span.clone(),
+        });
+    }
+
+    /// Syntactic mold-call exemption for [E1545]. A pipeline is mold-like
+    /// when its final stage is; a cond-branch is exempted conservatively
+    /// (its arms are unified elsewhere and may mix mold calls).
+    fn unmold_source_form_is_mold_like(source: &Expr) -> bool {
+        match source {
+            Expr::MoldInst(_, _, _, _) | Expr::TypeInst(_, _, _) => true,
+            Expr::Pipeline(steps, _) => steps
+                .last()
+                .map(Self::unmold_source_form_is_mold_like)
+                .unwrap_or(false),
+            Expr::CondBranch(_, _) => true,
+            _ => false,
+        }
+    }
+
+    /// A type is "definitely bare" when no mold machinery can be attached
+    /// to a value of that type: scalars, lists, structural packs, pack
+    /// type-defs, and enums. Unknown / unresolved / generic carriers stay
+    /// permissive.
+    fn type_is_definitely_bare(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Int | Type::Float | Type::Num | Type::Str | Type::Bytes | Type::Bool => true,
+            Type::List(_) => true,
+            Type::BuchiPack(_) => true,
+            Type::Named(name) => {
+                // A registered pack type-def or enum is a data value. A
+                // registered mold (or anything unresolved) is not flagged.
+                !self.registry.mold_defs.contains_key(name)
+                    && (self.registry.enum_defs.contains_key(name)
+                        || (self.registry.type_defs.contains_key(name)
+                            && !self.registry.error_types.contains_key(name)
+                            && name != "Error"))
+            }
+            _ => false,
+        }
     }
 
     /// Check a condition branch expression (extracted from `infer_expr_type`).

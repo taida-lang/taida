@@ -11252,7 +11252,20 @@ taida_val taida_async_race(taida_val list_ptr) {
 // Result:   BuchiPack fc=4, hash0=HASH_RES___VALUE → evaluate predicate, check throw, return __value or throw
 // Lax:      BuchiPack fc=4, hash0=HASH_HAS_VALUE → lax_unmold
 // Async:    [ASYNC_MAGIC, status, value, error, thread_handle, value_tag, error_tag]
+// F62B-026: unmolding a value that is not a mold is gorilla territory —
+// the old identity fallback was an implicit conversion (pretending a value
+// "came out" when there was nothing to take out). Diagnostic matches the
+// interpreter / JS runtimes verbatim.
+static taida_val taida_non_mold_unmold_gorilla(void) {
+    fprintf(stderr, "[E1545] Cannot unmold a non-mold value: `>=>` / `<=<` / `.unmold()` take a mold value (Lax, Gorillax, RelaxedGorillax, Result, Async, Stream, or a custom mold).\n");
+    fprintf(stderr, "><\n");
+    exit(1);
+    return 0;  // unreachable
+}
+
 taida_val taida_generic_unmold(taida_val ptr) {
+    // 0 must pass through unchanged: it is the throw-unwind placeholder
+    // (an upstream throw yields 0 while unwinding), not a user value.
     if (ptr == 0) return 0;
 
     // F58 P2-1: one readability probe + one magic load for the whole
@@ -11343,6 +11356,16 @@ taida_val taida_generic_unmold(taida_val ptr) {
         return taida_lax_unmold(ptr);
     }
 
+    // F62B-026: a machinery-less plain pack (no __type tag at all — e.g. a
+    // builder pack or a hand-written pack literal) is not a mold. Unmolding
+    // it is a program error, not an identity pass-through. Tagged packs and
+    // bare values stay identity: every value mold (Map / Trim / Abs / ...)
+    // returns its bare result and `Mold[...]() >=> x` is the documented
+    // binding idiom — the checker enforces the static rule ([E1545]).
+    if (!taida_pack_has_hash(ptr, (taida_val)HASH___TYPE)) {
+        return taida_non_mold_unmold_gorilla();
+    }
+
     // TODO mold unmold — check __type tag and extract via unm/default/sol/value channels.
     // The `unm` channel is returned when present (priority: unm > __default > sol > __value).
     if (taida_pack_has_hash(ptr, (taida_val)HASH___TYPE)) {
@@ -11387,7 +11410,8 @@ taida_val taida_generic_unmold(taida_val ptr) {
     if (unmold_magic == TAIDA_ASYNC_MAGIC) {
         return taida_async_unmold(ptr);
     }
-    // Not a monadic type or Async — return as-is (e.g., list, string, plain value)
+    // Not a monadic type or Async — bare values (list, string, float, ...)
+    // pass through unchanged; see the plain-pack comment above for why.
     return ptr;
 }
 

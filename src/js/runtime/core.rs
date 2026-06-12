@@ -2934,8 +2934,33 @@ function __taida_unmold(v) {
         info.code || 0
       );
     }
+    // Custom mold instance: run its unmold hook — the same path `>=>` /
+    // `<=<` / `.unmold()` take on the interpreter and native backends
+    // (F62B-033: this used to fall through to the identity return below,
+    // yielding the whole mold pack instead of the hook result).
+    if (typeof v.unmold === 'function') return v.unmold();
+    // F62B-026: a machinery-less plain pack (no __type tag, no unmold hook,
+    // no __value channel — e.g. a builder pack or a hand-written literal)
+    // is not a mold. Unmolding it is a program error, not an identity
+    // pass-through. Tagged packs (HashMap / Set / ...) and bare values
+    // (numbers, strings, lists) stay identity: every value mold returns
+    // its bare result and `Mold[...]() >=> x` is the documented binding
+    // idiom — the checker enforces the static rule ([E1545]).
+    if (!Array.isArray(v)
+        && !__taida_isEnumVal(v)
+        && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null)) {
+      if (Object.prototype.hasOwnProperty.call(v, '__value')) return v.__value;
+      if (v.__type === undefined) return __taida_non_mold_unmold_gorilla();
+    }
   }
   return v;
+}
+
+function __taida_non_mold_unmold_gorilla() {
+  console.error('[E1545] Cannot unmold a non-mold value: `>=>` / `<=<` / `.unmold()` take a mold value (Lax, Gorillax, RelaxedGorillax, Result, Async, Stream, or a custom mold).');
+  console.error('><');
+  if (typeof process !== 'undefined') process.exit(1);
+  throw new __NativeError('><');
 }
 
 // Async version of __taida_unmold — handles true Promises (Phase 2 async OS API).

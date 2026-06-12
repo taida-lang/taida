@@ -3715,7 +3715,7 @@ waitBoth p: Int =
 => :Str
 
 out <= waitBoth(0)
-out >=> value
+value <= out
 stdout(value)
 "#;
 
@@ -3736,7 +3736,7 @@ waitWithTimeout p: Int =
 => :Str
 
 out <= waitWithTimeout(0)
-out >=> value
+value <= out
 stdout(value)
 "#;
 
@@ -4192,7 +4192,7 @@ stdout(flat)
             "unmold_negative_boundary",
             r#"
 x <= -2147483648
-x >=> y
+Lax[x]() >=> y
 stdout(y.toString())
 "#,
         ),
@@ -4990,10 +4990,9 @@ stdout(people.get(2).getOrDefault(@(name <= "", age <= 0)).age.toString())
 prefix <= "v:"
 
 data <= @[1, 2, 3, 4, 5]
-filtered <= Filter[data, _ x: Int = x > threshold]()
-filtered >=> fList
+Filter[data, _ x: Int = x > threshold]() >=> fList
 mapped <= Map[fList, _ x: Int = prefix + x.toString()]()
-mapped >=> mList
+mList <= mapped
 stdout(mList)
 "#,
         ),
@@ -5414,7 +5413,7 @@ stdout(test(-1, "T"))
 Error => E2 = @(code: Int)
 
 buildMsg err: Str =
-  @(tag <= "mid", detail <= err) >=> info
+  info <= @(tag <= "mid", detail <= err)
   info.tag + ":" + info.detail
 => :Str
 

@@ -262,7 +262,11 @@ mod tests {
         //   Utf8Decode — the TAIDBYT constructor is core-safe.
         // 2026-06-12 F62B-019: slot-tag precedence in jsonEncode pack fields,
         //   kind-aware list element hints, Split elem tag (02/04).
-        const EXPECTED_TOTAL_LEN: usize = 495_406;
+        // 2026-06-12 F62B-026 (01_core): _wasm_non_mold_unmold_gorilla;
+        //   compat audit narrowed the rule to machinery-less plain packs
+        //   (no __type) — bare values stay identity: +2,011.
+        //   495,406 -> 497,417.
+        const EXPECTED_TOTAL_LEN: usize = 497_417;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),
