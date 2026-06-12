@@ -2297,6 +2297,9 @@ function IndexOf(subject, needle) { return subject.indexOf(needle); }
 function LastIndexOf(subject, needle) { return subject.lastIndexOf(needle); }
 function Contains(subject, needle) { return subject.contains(needle); }
 function ReplaceAll(str, old, rep) { return Replace(str, old, rep, { all: true }); }
+// F62B-020: ordering comparison molds (operand rules mirror `<` / `>`).
+function Lte(a, b) { return a <= b; }
+function Between(x, lo, hi) { return lo <= x && x <= hi; }
 
 // ── Number Mold types ───────────────────────────────────
 function ToFixed(num, digits) {

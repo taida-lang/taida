@@ -110,6 +110,18 @@ impl Lowering {
     }
 
     /// モールド型インスタンス化: `Async[val]()`, `AsyncReject[err]()` etc.
+    /// F62B-020: pick the `>=` runtime entry for an operand pair the same
+    /// way the `<` / `>` operator lowering dispatches kinds.
+    fn ordering_gte_runtime_fn(&self, lhs: &Expr, rhs: &Expr) -> &'static str {
+        if self.expr_is_string_full(lhs) || self.expr_is_string_full(rhs) {
+            "taida_str_gte"
+        } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
+            "taida_float_gte"
+        } else {
+            "taida_int_gte"
+        }
+    }
+
     pub(crate) fn lower_mold_inst(
         &mut self,
         func: &mut IrFunction,
@@ -224,6 +236,48 @@ impl Lowering {
                     result,
                     runtime_fn.to_string(),
                     vec![s, old, new_str],
+                ));
+                Ok(result)
+            }
+            // F62B-020: ordering comparison molds. `a <= b` ≡ `b >= a`, so
+            // both lower onto the existing gte runtime family with swapped
+            // operands (Float NaN semantics included), kind-dispatched the
+            // same way the `<` / `>` operators are.
+            "Lte" => {
+                if type_args.len() < 2 {
+                    return Err(LowerError {
+                        message: "Lte requires 2 arguments: Lte[a, b]()".into(),
+                    });
+                }
+                let a = self.lower_expr(func, &type_args[0])?;
+                let b = self.lower_expr(func, &type_args[1])?;
+                let runtime_fn = self.ordering_gte_runtime_fn(&type_args[0], &type_args[1]);
+                let result = func.alloc_var();
+                func.push(IrInst::Call(result, runtime_fn.to_string(), vec![b, a]));
+                Ok(result)
+            }
+            "Between" => {
+                if type_args.len() < 3 {
+                    return Err(LowerError {
+                        message: "Between requires 3 arguments: Between[x, lo, hi]()".into(),
+                    });
+                }
+                let x = self.lower_expr(func, &type_args[0])?;
+                let lo = self.lower_expr(func, &type_args[1])?;
+                let hi = self.lower_expr(func, &type_args[2])?;
+                let lo_fn = self.ordering_gte_runtime_fn(&type_args[1], &type_args[0]);
+                let hi_fn = self.ordering_gte_runtime_fn(&type_args[0], &type_args[2]);
+                // lo <= x  ≡  x >= lo
+                let lo_ok = func.alloc_var();
+                func.push(IrInst::Call(lo_ok, lo_fn.to_string(), vec![x, lo]));
+                // x <= hi  ≡  hi >= x
+                let hi_ok = func.alloc_var();
+                func.push(IrInst::Call(hi_ok, hi_fn.to_string(), vec![hi, x]));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_bool_and".to_string(),
+                    vec![lo_ok, hi_ok],
                 ));
                 Ok(result)
             }

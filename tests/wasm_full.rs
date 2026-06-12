@@ -884,11 +884,12 @@ fn wasm_full_parity_allowlist_guard() {
     //   F62B-002: compile_mutual_recursion + compile_c12_3_mutual_tail leave
     //   the native-fail list (tail-only mutual cycle dispatcher merge) -> 72.
     //   F62B-003: +compile_f62b003_str_molds (search/replace/pad molds) -> 73.
+    //   F62B-020: +compile_f62b020_lte_between (ordering molds) -> 74.
     assert_eq!(
         expected_parity_ok,
-        73,
+        74,
         "WF-5: parity-OK count drift — got {} = |fixtures {}| - |skip {}| - |rejected {}| - \
-         |native_fail {}| - |diff {}|. Expected 73. Update this constant deliberately.",
+         |native_fail {}| - |diff {}|. Expected 74. Update this constant deliberately.",
         expected_parity_ok,
         all.len(),
         FULL_SKIP_STEMS.len(),

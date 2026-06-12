@@ -532,6 +532,11 @@ pub static MOLD_SPECS: &[MoldSpec] = &[
     MoldSpec::exact("TypeExtends", 2, ANY2, MoldReturnKind::Bool),
     MoldSpec::exact("Exists", 1, ANY1, MoldReturnKind::Pack),
     MoldSpec::exact("Contains", 2, ANY2, MoldReturnKind::Bool),
+    // F62B-020: ordering comparisons. `<=` is the binding operator, so
+    // "less than or equal" lives here; Between is the closed-interval
+    // range check the comparison was usually buried in.
+    MoldSpec::exact("Lte", 2, ANY2, MoldReturnKind::Bool),
+    MoldSpec::exact("Between", 3, ANY3, MoldReturnKind::Bool),
     MoldSpec::exact("SpanEquals", 3, ANY3, MoldReturnKind::Bool),
     MoldSpec::exact("SpanStartsWith", 3, ANY3, MoldReturnKind::Bool),
     MoldSpec::exact("SpanContains", 3, ANY3, MoldReturnKind::Bool),

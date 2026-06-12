@@ -656,6 +656,19 @@ Div[10, 0]().has_value   // false
 | モールド | `[]` 必須 | 戻り値 | 説明 |
 |---------|----------|--------|------|
 | `If[cond, then, else]()` | cond, then, else | `T` | 2 分岐の条件式 (短絡評価) |
+| `Lte[a, b]()` | a, b | `Bool` | `a <= b` (「以下」比較 — `<=` は束縛演算子のためモールドで提供) |
+| `Between[x, lo, hi]()` | x, lo, hi | `Bool` | 閉区間チェック `lo <= x <= hi` |
+
+`Lte` / `Between` のオペランドルールは `<` / `>` / `>=` と同じです
+(numeric 同士、Str 同士 — コードポイント順、同一 Enum 同士 — 宣言順)。
+
+```taida fragment
+// 文字範囲チェック ([a-z]) — Between が直接の表現
+Between[c, "a", "z"]()
+
+// パイプ形
+score => Between[_, 0, 100]() => valid
+```
 
 ```taida fragment
 result <= If[x > 0, "positive", "negative"]()

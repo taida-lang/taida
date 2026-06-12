@@ -1063,6 +1063,49 @@ impl Interpreter {
                 ))))
             }
 
+            // F62B-020: ordering comparisons. `<=` is the binding operator,
+            // so "less than or equal" is a mold; `Between[x, lo, hi]()` is
+            // the closed-interval check (`lo <= x <= hi`). Operand rules
+            // inherit the `<` / `>` comparison semantics (numeric pairs,
+            // Str pairs by code-point order, same-Enum pairs by declaration
+            // order) via Value's ordering.
+            "Lte" => {
+                if type_args.len() < 2 {
+                    return Err(RuntimeError {
+                        message: "Lte requires 2 arguments: Lte[a, b]()".into(),
+                    });
+                }
+                let a = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let b = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Value(Value::Bool(a <= b))))
+            }
+            "Between" => {
+                if type_args.len() < 3 {
+                    return Err(RuntimeError {
+                        message: "Between requires 3 arguments: Between[x, lo, hi]()".into(),
+                    });
+                }
+                let x = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let lo = match self.eval_expr(&type_args[1])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                let hi = match self.eval_expr(&type_args[2])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Value(Value::Bool(lo <= x && x <= hi))))
+            }
+
             // F62B-003: search / replace molds delegate to the string-method
             // implementations so the mold form and the method form can never
             // disagree (`IndexOf[s, n]()` ≡ `s.indexOf(n)`). Previously these
