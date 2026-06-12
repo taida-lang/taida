@@ -104,12 +104,16 @@ fn run_login(args: &[String]) {
         }
     };
 
-    // ステップ2: ユーザーへの案内を表示
+    // ステップ2: ユーザーへの案内を表示 (可能ならブラウザも開く)
     println!("Open this URL in your browser:");
-    println!("  {}", flow.verification_uri);
+    println!("  {}", hyperlink(&flow.verification_uri));
     println!();
     println!("Enter code: {}", flow.user_code);
     println!();
+    if try_open_browser(&flow.verification_uri) {
+        println!("(opened in your browser)");
+        println!();
+    }
     println!("Waiting for authorization...");
 
     // ステップ3: トークンをポーリングで取得
@@ -156,6 +160,59 @@ fn run_login(args: &[String]) {
             eprintln!("Error saving token: {}", e);
             std::process::exit(1);
         }
+    }
+}
+
+/// URL を OSC 8 ハイパーリンクで包む (stdout が TTY のときのみ)。
+/// 対応ターミナルではクリックで開ける。非対応ターミナルはエスケープを
+/// 無視してプレーンな URL を表示する。
+fn hyperlink(url: &str) -> String {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        format!("\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\")
+    } else {
+        url.to_string()
+    }
+}
+
+/// 既定ブラウザで URL を開くことを試みる。ヘッドレス環境や起動失敗は
+/// false を返すだけ — 呼び出し側は URL 表示にフォールバック済みなので
+/// ログインフローは止まらない。
+fn try_open_browser(url: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+            return false;
+        }
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", url])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = url;
+        false
     }
 }
 
