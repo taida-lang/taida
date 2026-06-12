@@ -178,6 +178,21 @@ findUser => InCage[_, "bind", @[7]]() => Uncage[_, "all", @[Str]]() >=> rows
 
 builder 自体をアンモールドすることはできません (取り出す値は `Uncage` が返します)。bare な builder への `>=>` / `<=<` はゴリラです。
 
+#### 汎用ヘルパー — Out の型変数透過
+
+`Uncage` の Out にはジェネリック関数の型変数を書けます。クエリごとに HostCall をベタ書きする代わりに、アクセス層を 1 つの汎用関数に畳み込めます:
+
+```taida
+queryAll[T] db: CageBuilder  sql: Str =
+  db => InCage[_, "prepare", @[sql]]() => Uncage[_, "all", T]() >=> rows
+  rows
+=> :T
+
+rows <= queryAll[@[Str]](base, "select * from posts")
+```
+
+Out スキーマは呼び出しごとの compile-time 値なので、この形の関数は**全ての呼び出しで明示的型引数** (`queryAll[T](...)`) が必要です。推論形の呼び出しは型エラーで拒否されます。
+
 HostCall の wire 値では、`Bytes` は標準 base64 の `Str` として運ばれます。
 `WebRequest` / `WebResponse` は handler JSON と同じく body を `bodyBase64`
 で運び、`query` / `headers` は `name` / `value` の出現順リストを維持します。

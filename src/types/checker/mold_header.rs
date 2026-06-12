@@ -12,6 +12,10 @@ impl TypeChecker {
         format!("[{}] {} Hint: {}", code, message, hint)
     }
 
+    // F62B-021: the definition-time uninferable-param rejection was lifted
+    // (explicit-type-argument calls bind such params directly); kept for
+    // potential lint reuse.
+    #[allow(dead_code)]
     pub(super) fn type_expr_mentions_type_param(ty: &TypeExpr, name: &str) -> bool {
         match ty {
             TypeExpr::Named(type_name) => type_name == name,

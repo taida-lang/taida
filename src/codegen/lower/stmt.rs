@@ -51,6 +51,22 @@ impl Lowering {
                     self.user_funcs.insert(func_def.name.clone());
                     self.func_param_defs
                         .insert(func_def.name.clone(), func_def.params.clone());
+                    // F62B-021: explicit-type-argument call support.
+                    if !func_def.type_params.is_empty() {
+                        self.generic_fn_type_params.insert(
+                            func_def.name.clone(),
+                            func_def
+                                .type_params
+                                .iter()
+                                .map(|tp| tp.name.clone())
+                                .collect(),
+                        );
+                        let schema_params = crate::parser::fn_schema_passing_type_params(func_def);
+                        if !schema_params.is_empty() {
+                            self.generic_schema_params
+                                .insert(func_def.name.clone(), schema_params);
+                        }
+                    }
                     // Track return types for type inference in binary ops
                     if let Some(ref rt) = func_def.return_type {
                         match rt {
@@ -837,7 +853,19 @@ impl Lowering {
     }
 
     pub(super) fn lower_func_def(&mut self, func_def: &FuncDef) -> Result<IrFunction, LowerError> {
-        let params: Vec<String> = func_def.params.iter().map(|p| p.name.clone()).collect();
+        let mut params: Vec<String> = func_def.params.iter().map(|p| p.name.clone()).collect();
+        // F62B-021: a schema-passing generic gains hidden string parameters
+        // carrying the host-call Out schema descriptors. Call sites with
+        // explicit type arguments append the resolved descriptors; the
+        // body's HostCall / Uncage lowering reads them back by name.
+        let prev_schema_params = std::mem::take(&mut self.current_schema_params);
+        if let Some(needed) = self.generic_schema_params.get(&func_def.name).cloned() {
+            for type_param in needed {
+                let hidden = format!("__taida_schema_{type_param}");
+                params.push(hidden.clone());
+                self.current_schema_params.insert(type_param, hidden);
+            }
+        }
         let parent_scope_vars = self.collect_nested_scope_vars(params.clone(), &func_def.body);
 
         let mangled = self.resolve_user_func_symbol(&func_def.name);
@@ -1212,6 +1240,7 @@ impl Lowering {
         }
 
         // Restore net builtin shadow set to pre-function state
+        self.current_schema_params = prev_schema_params;
         self.shadowed_net_builtins = prev_shadowed_net;
         // NB-14: Restore param_tag_vars to pre-function state
         self.param_tag_vars = prev_param_tag_vars;

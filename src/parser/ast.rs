@@ -873,6 +873,111 @@ pub fn expr_contains_placeholder(expr: &Expr) -> bool {
 /// "at most one `_` per pipeline stage" rule (E1543) and the placeholder
 /// rewrite that injects the piped value can never disagree about which
 /// `_` nodes belong to a stage.
+/// F62B-021: scan a generic function body for host-call Out slots that
+/// reference a declared type parameter (`Uncage[b, m, T]()` /
+/// `HostCall[steps, T]()`). Returns the referenced type parameters in
+/// first-appearance order. Shared single definition for the checker
+/// (call-form enforcement) and codegen lowering (hidden schema params) —
+/// the two must never disagree.
+pub fn fn_schema_passing_type_params(fd: &FuncDef) -> Vec<String> {
+    if fd.type_params.is_empty() {
+        return Vec::new();
+    }
+    let params: Vec<String> = fd.type_params.iter().map(|tp| tp.name.clone()).collect();
+    let mut out = Vec::new();
+    for stmt in &fd.body {
+        scan_stmt_schema_params(stmt, &params, &mut out);
+    }
+    out
+}
+
+fn scan_stmt_schema_params(stmt: &Statement, params: &[String], out: &mut Vec<String>) {
+    match stmt {
+        Statement::Expr(e) => scan_expr_schema_params(e, params, out),
+        Statement::Assignment(a) => scan_expr_schema_params(&a.value, params, out),
+        Statement::UnmoldForward(u) => scan_expr_schema_params(&u.source, params, out),
+        Statement::UnmoldBackward(u) => scan_expr_schema_params(&u.source, params, out),
+        Statement::ErrorCeiling(ec) => {
+            for st in &ec.handler_body {
+                scan_stmt_schema_params(st, params, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scan_expr_schema_params(expr: &Expr, params: &[String], out: &mut Vec<String>) {
+    match expr {
+        Expr::MoldInst(name, type_args, fields, _) => {
+            let schema_slot = match name.as_str() {
+                // HostCall[steps, Out] / Uncage[builder, method, Out]
+                "HostCall" => type_args.get(1),
+                "Uncage" => type_args.get(2),
+                _ => None,
+            };
+            if let Some(Expr::Ident(slot_name, _)) = schema_slot
+                && params.iter().any(|p| p == slot_name)
+                && !out.iter().any(|n| n == slot_name)
+            {
+                out.push(slot_name.clone());
+            }
+            for arg in type_args {
+                scan_expr_schema_params(arg, params, out);
+            }
+            for field in fields {
+                scan_expr_schema_params(&field.value, params, out);
+            }
+        }
+        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+            for field in fields {
+                scan_expr_schema_params(&field.value, params, out);
+            }
+        }
+        Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+            for item in items {
+                scan_expr_schema_params(item, params, out);
+            }
+        }
+        Expr::BinaryOp(lhs, _, rhs, _) => {
+            scan_expr_schema_params(lhs, params, out);
+            scan_expr_schema_params(rhs, params, out);
+        }
+        Expr::UnaryOp(_, inner, _)
+        | Expr::Unmold(inner, _)
+        | Expr::Throw(inner, _)
+        | Expr::FieldAccess(inner, _, _)
+        | Expr::Lambda(_, inner, _) => scan_expr_schema_params(inner, params, out),
+        Expr::FuncCall(callee, args, _) => {
+            scan_expr_schema_params(callee, params, out);
+            for arg in args {
+                scan_expr_schema_params(arg, params, out);
+            }
+        }
+        Expr::MethodCall(obj, _, args, _) => {
+            scan_expr_schema_params(obj, params, out);
+            for arg in args {
+                scan_expr_schema_params(arg, params, out);
+            }
+        }
+        Expr::CondBranch(arms, _) => {
+            for arm in arms {
+                if let Some(cond) = &arm.condition {
+                    scan_expr_schema_params(cond, params, out);
+                }
+                for st in &arm.body {
+                    scan_stmt_schema_params(st, params, out);
+                }
+            }
+        }
+        Expr::Block(stmts, _) => {
+            for st in stmts {
+                scan_stmt_schema_params(st, params, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn expr_count_placeholders(expr: &Expr) -> usize {
     match expr {
         Expr::Placeholder(_) => 1,

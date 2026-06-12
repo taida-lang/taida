@@ -783,6 +783,27 @@ impl TypeChecker {
                     self.validate_http_serve_protocol_capability(name, args);
 
                     if let Some(fd) = self.generic_func_defs.get(name).cloned() {
+                        // F62B-021: a generic whose body passes a type
+                        // parameter into a host-call Out slot has no schema
+                        // to send unless the call names the types.
+                        if let Some(needed) = self.schema_passing_generic_funcs.get(name) {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1510] Generic function '{}' passes type parameter(s) {} into a host-call Out slot \
+                                     and requires explicit type arguments at every call site: `{}[{}](...)`.",
+                                    name,
+                                    needed.join(", "),
+                                    name,
+                                    fd.type_params
+                                        .iter()
+                                        .map(|tp| tp.name.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                                span: span.clone(),
+                            });
+                            return Type::Unknown;
+                        }
                         let param_patterns: Vec<Type> = fd
                             .params
                             .iter()
@@ -2789,6 +2810,15 @@ impl TypeChecker {
                             // downstream rule (generic-func E1301 / E1506 /
                             // E1505, non-generic E1301 / E1506, function
                             // value E1301 / E1506 / E1505) fires uniformly.
+                            // F62B-021: for GENERIC functions the bracket
+                            // always carries TYPE arguments — both
+                            // `genfn[T1, T2](args)` and the zero-value-arg
+                            // `genfn[T]()`.
+                            if let Some(fd) = self.generic_func_defs.get(name).cloned() {
+                                return self.infer_explicit_generic_call(
+                                    name, &fd, type_args, fields, mold_span,
+                                );
+                            }
                             if !fields.is_empty() {
                                 self.errors.push(TypeError {
                                     message: format!(

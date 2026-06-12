@@ -359,36 +359,12 @@ impl TypeChecker {
             return false;
         }
 
-        let uninferable: Vec<String> = fd
-            .type_params
-            .iter()
-            .filter(|tp| {
-                !fd.params.iter().any(|param| {
-                    param
-                        .type_annotation
-                        .as_ref()
-                        .is_some_and(|ty| Self::type_expr_mentions_type_param(ty, &tp.name))
-                })
-            })
-            .map(|tp| tp.name.clone())
-            .collect();
-        if uninferable.is_empty() {
-            return true;
-        }
-
-        self.errors.push(TypeError {
-            message: Self::binding_diag(
-                "E1510",
-                format!(
-                    "Generic function '{}' has uninferable type parameter(s): {}",
-                    fd.name,
-                    uninferable.join(", ")
-                ),
-                "In inference-only generic functions, every type parameter must appear in a parameter type annotation.",
-            ),
-            span: fd.span.clone(),
-        });
-        false
+        // F62B-021: a type parameter that appears in no parameter
+        // annotation (e.g. return-position-only, or host-call Out
+        // passthrough) is legal at definition time — explicit-type-argument
+        // calls (`fn[T](args)`) bind it directly. Inference-form calls to
+        // such a function still fail with the call-site [E1510].
+        true
     }
 
     /// Per-symbol argument-shape validator for the generalized

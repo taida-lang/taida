@@ -37,6 +37,19 @@ const OS_NET_DEFAULT_TIMEOUT_MS: i64 = 30_000;
 pub struct Lowering {
     /// ユーザー定義関数名のセット
     pub(crate) user_funcs: std::collections::HashSet<String>,
+    /// F62B-021: generic functions declaring type parameters, in order
+    /// (fn name → declared type-param names). Drives explicit-type-argument
+    /// call lowering.
+    pub(crate) generic_fn_type_params: std::collections::HashMap<String, Vec<String>>,
+    /// F62B-021: generic functions whose body passes a type parameter into
+    /// a host-call Out slot (fn name → schema-needing type params in
+    /// declared order). Such functions gain hidden `__taida_schema_{T}`
+    /// string parameters; explicit call sites append the resolved schema
+    /// descriptors as extra string-literal arguments.
+    pub(crate) generic_schema_params: std::collections::HashMap<String, Vec<String>>,
+    /// F62B-021: while lowering a schema-passing generic body, maps each
+    /// schema-needing type-param name to its hidden parameter name.
+    pub(crate) current_schema_params: std::collections::HashMap<String, String>,
     /// 関数名 → パラメータ定義（実効デフォルト補完/arity診断用）
     func_param_defs: std::collections::HashMap<String, Vec<crate::parser::Param>>,
     /// TypeDef 名 → フィールド名リスト

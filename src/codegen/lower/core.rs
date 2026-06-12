@@ -129,6 +129,9 @@ impl Lowering {
         stdlib_runtime_funcs.insert("Regex".to_string(), "taida_regex_new".to_string());
         Self {
             user_funcs: std::collections::HashSet::new(),
+            generic_fn_type_params: std::collections::HashMap::new(),
+            generic_schema_params: std::collections::HashMap::new(),
+            current_schema_params: std::collections::HashMap::new(),
             func_param_defs: std::collections::HashMap::new(),
             type_fields: std::collections::HashMap::new(),
             type_field_types: std::collections::HashMap::new(),

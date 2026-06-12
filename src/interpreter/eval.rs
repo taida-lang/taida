@@ -708,6 +708,7 @@ impl Interpreter {
             Statement::FuncDef(fd) => {
                 let closure = Arc::new(self.env.snapshot());
                 let func = Value::Function(FuncValue {
+                    type_params_count: fd.type_params.len(),
                     name: fd.name.clone(),
                     params: fd.params.clone(),
                     body: fd.body.clone(),
@@ -1394,7 +1395,27 @@ impl Interpreter {
                 if !self.mold_defs.contains_key(name)
                     && let Some(Value::Function(func)) = self.env.get(name).cloned()
                 {
-                    if !fields.is_empty() {
+                    // F62B-021: for GENERIC functions the bracket always
+                    // carries TYPE arguments (`genfn[T1, T2](args)` /
+                    // `genfn[T]()`) — types erase at runtime, so the `[]`
+                    // entries are skipped and the `()` values are the call
+                    // arguments. Non-generic functions keep the legacy
+                    // positional bracket call (`fn[arg1, arg2]()`).
+                    if func.type_params_count > 0 || !fields.is_empty() {
+                        let mut arg_exprs = Vec::with_capacity(fields.len());
+                        let mut all_positional = true;
+                        for field in fields {
+                            let is_positional = field.name.starts_with('_')
+                                && field.name[1..].chars().all(|c| c.is_ascii_digit());
+                            if !is_positional {
+                                all_positional = false;
+                                break;
+                            }
+                            arg_exprs.push(field.value.clone());
+                        }
+                        if all_positional && (func.type_params_count > 0 || !fields.is_empty()) {
+                            return self.call_function(&func, &arg_exprs);
+                        }
                         return Err(RuntimeError {
                             message: format!(
                                 "User-defined function '{}' called via mold syntax \
@@ -1526,6 +1547,7 @@ impl Interpreter {
                         }
                     }
                     let unmold_func = Value::Function(FuncValue {
+                        type_params_count: 0,
                         name: "__unmold".to_string(),
                         params: func_def.params.clone(),
                         body: func_def.body.clone(),
@@ -1550,6 +1572,7 @@ impl Interpreter {
                     }
                     closure.insert("self".to_string(), instance.clone());
                     let solidify_func = FuncValue {
+                        type_params_count: 0,
                         name: "__solidify".to_string(),
                         params: func_def.params.clone(),
                         body: func_def.body.clone(),
@@ -1583,6 +1606,7 @@ impl Interpreter {
                     other => vec![Statement::Expr(other.clone())],
                 };
                 Ok(Signal::Value(Value::Function(FuncValue {
+                    type_params_count: 0,
                     name: "<lambda>".to_string(),
                     params: params.clone(),
                     body: lambda_body,
@@ -1808,6 +1832,7 @@ impl Interpreter {
                     })
                     .collect();
                 Ok(Value::Function(FuncValue {
+                    type_params_count: 0,
                     name: Self::DEFAULT_FN_SENTINEL_NAME.to_string(),
                     params: synth_params,
                     body: Vec::new(),
@@ -1899,6 +1924,7 @@ impl Interpreter {
         self.env.pop_scope();
 
         Ok(Signal::Value(Value::Function(FuncValue {
+            type_params_count: 0,
             name: "<partial>".to_string(),
             params,
             body,

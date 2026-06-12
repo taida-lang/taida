@@ -122,6 +122,26 @@ impl Lowering {
         }
     }
 
+    /// F62B-021: lower a host-call Out slot into its schema operand. A
+    /// concrete type resolves to a constant descriptor string; a type
+    /// parameter of the enclosing schema-passing generic reads the hidden
+    /// `__taida_schema_{T}` parameter instead (dictionary passing).
+    fn lower_out_schema_operand(
+        &mut self,
+        func: &mut IrFunction,
+        out: &Expr,
+    ) -> Result<IrVar, LowerError> {
+        if let Expr::Ident(name, span) = out
+            && let Some(hidden) = self.current_schema_params.get(name).cloned()
+        {
+            return self.lower_expr(func, &Expr::Ident(hidden, span.clone()));
+        }
+        let desc = self.resolve_json_schema_descriptor(out)?;
+        let var = func.alloc_var();
+        func.push(IrInst::ConstStr(var, desc));
+        Ok(var)
+    }
+
     pub(crate) fn lower_mold_inst(
         &mut self,
         func: &mut IrFunction,
@@ -2984,9 +3004,7 @@ impl Lowering {
                     "taida_abi_host_step".to_string(),
                     vec![method, args, args_schema],
                 ));
-                let out_schema_desc = self.resolve_json_schema_descriptor(&type_args[2])?;
-                let out_schema = func.alloc_var();
-                func.push(IrInst::ConstStr(out_schema, out_schema_desc));
+                let out_schema = self.lower_out_schema_operand(func, &type_args[2])?;
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
@@ -3021,9 +3039,7 @@ impl Lowering {
                     });
                 }
                 let steps = self.lower_expr(func, &type_args[0])?;
-                let schema_desc = self.resolve_json_schema_descriptor(&type_args[1])?;
-                let schema = func.alloc_var();
-                func.push(IrInst::ConstStr(schema, schema_desc));
+                let schema = self.lower_out_schema_operand(func, &type_args[1])?;
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
@@ -3456,7 +3472,76 @@ impl Lowering {
                     // named fields are rejected because functions have no
                     // named-field ABI.
                     if self.user_funcs.contains(type_name) {
-                        if !fields.is_empty() {
+                        let is_generic = self.generic_fn_type_params.contains_key(type_name);
+                        if is_generic || !fields.is_empty() {
+                            // F62B-021: explicit type arguments —
+                            // `genfn[T1, T2](args)`. The `[]` carries type
+                            // arguments (erased except for schema-passing
+                            // type params, whose resolved schema descriptors
+                            // are appended as hidden string arguments) and
+                            // `()` carries the positional value arguments.
+                            let mut arg_exprs = Vec::with_capacity(fields.len());
+                            let mut all_positional = true;
+                            for field in fields {
+                                let is_positional = field.name.starts_with('_')
+                                    && field.name[1..].chars().all(|c| c.is_ascii_digit());
+                                if !is_positional {
+                                    all_positional = false;
+                                    break;
+                                }
+                                arg_exprs.push(field.value.clone());
+                            }
+                            if all_positional
+                                && let Some(needed) =
+                                    self.generic_schema_params.get(type_name).cloned()
+                            {
+                                let declared = self
+                                    .generic_fn_type_params
+                                    .get(type_name)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                for type_param in needed {
+                                    let Some(idx) =
+                                        declared.iter().position(|n| n == &type_param)
+                                    else {
+                                        continue;
+                                    };
+                                    let Some(type_arg) = type_args.get(idx) else {
+                                        return Err(LowerError {
+                                            message: format!(
+                                                "explicit-type-argument call '{}' is missing the type argument for '{}'",
+                                                type_name, type_param
+                                            ),
+                                        });
+                                    };
+                                    // Forward an enclosing hidden param when
+                                    // the type argument is itself an abstract
+                                    // type parameter (recursive generic call);
+                                    // otherwise resolve the schema now.
+                                    let schema_expr = if let Expr::Ident(arg_name, sp) = type_arg
+                                        && let Some(hidden) =
+                                            self.current_schema_params.get(arg_name)
+                                    {
+                                        Expr::Ident(hidden.clone(), sp.clone())
+                                    } else {
+                                        let desc =
+                                            self.resolve_json_schema_descriptor(type_arg)?;
+                                        Expr::StringLit(desc, type_arg.span().clone())
+                                    };
+                                    arg_exprs.push(schema_expr);
+                                }
+                            }
+                            if all_positional {
+                                let mut callee = Expr::Ident(
+                                    type_name.to_string(),
+                                    crate::lexer::Span::new(0, 0, 0, 0),
+                                );
+                                crate::parser::reassign_expr_node_ids(
+                                    &mut callee,
+                                    &mut crate::parser::NodeIdAllocator::new(),
+                                );
+                                return self.lower_func_call(func, &callee, &arg_exprs);
+                            }
                             return Err(LowerError {
                                 message: format!(
                                     "User-defined function '{}' called via mold syntax \

@@ -964,6 +964,10 @@ fn scrub_json(jv: &mut serde_json::Value) {
 pub struct FuncValue {
     pub name: String,
     pub params: Vec<Param>,
+    /// F62B-021: number of declared generic type parameters. Non-zero
+    /// makes the mold-syntax bracket (`fn[..](..)`) carry TYPE arguments
+    /// instead of the legacy positional-value form.
+    pub type_params_count: usize,
     pub body: Vec<Statement>,
     /// Captured environment (lexical scope closure).
     /// Shared to avoid recursive deep-clone blow-up when many functions capture prior functions.

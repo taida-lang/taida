@@ -267,15 +267,26 @@ impl Lowering {
             return Ok(explicit_arg_vars);
         };
 
-        if explicit_arg_vars.len() > params.len() {
+        // F62B-021: schema-passing generics carry hidden schema parameters
+        // appended after the declared ones; explicit call sites supply them.
+        let hidden_schema_count = self
+            .generic_schema_params
+            .get(name)
+            .map(|needed| needed.len())
+            .unwrap_or(0);
+        if explicit_arg_vars.len() > params.len() + hidden_schema_count {
             return Err(LowerError {
                 message: format!(
                     "Function '{}' expected at most {} argument(s), got {}",
                     name,
-                    params.len(),
+                    params.len() + hidden_schema_count,
                     explicit_arg_vars.len()
                 ),
             });
+        }
+        if hidden_schema_count > 0 {
+            // Hidden args are pre-resolved; defaults never apply to them.
+            return Ok(explicit_arg_vars);
         }
 
         // Materialize defaults in parameter order while exposing earlier params

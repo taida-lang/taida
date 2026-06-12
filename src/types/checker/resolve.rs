@@ -93,6 +93,136 @@ impl TypeChecker {
         Type::Generic("HostCapability".to_string(), vec![Type::Str, Type::Str])
     }
 
+    /// F62B-021: explicit-type-argument generic call —
+    /// `genfn[T1, T2](arg0, arg1)`. The `[]` binds the declared type
+    /// parameters directly (no inference), so return-position-only type
+    /// parameters work, and host-call Out schemas resolve per call site.
+    pub(super) fn infer_explicit_generic_call(
+        &mut self,
+        name: &str,
+        fd: &FuncDef,
+        type_args: &[Expr],
+        fields: &[BuchiField],
+        span: &Span,
+    ) -> Type {
+        if type_args.len() != fd.type_params.len() {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1505] `{}[...]` expects {} type argument(s) ({}), got {}. \
+                     Hint: write one type per declared type parameter: `{}[{}](...)`.",
+                    name,
+                    fd.type_params.len(),
+                    fd.type_params
+                        .iter()
+                        .map(|tp| tp.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    type_args.len(),
+                    name,
+                    fd.type_params
+                        .iter()
+                        .map(|tp| tp.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                span: span.clone(),
+            });
+            return Type::Unknown;
+        }
+        // Positional value arguments only — the parser names positional
+        // fields `_0`, `_1`, ... so a user-named field is detectable.
+        for field in fields {
+            let is_positional =
+                field.name.starts_with('_') && field.name[1..].chars().all(|c| c.is_ascii_digit());
+            if !is_positional {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1511] Explicit-type-argument call '{}[...](...)' takes positional \
+                         value arguments, got named field '{}'.",
+                        name, field.name
+                    ),
+                    span: field.span.clone(),
+                });
+            }
+        }
+
+        let generic_names: HashSet<String> =
+            fd.type_params.iter().map(|tp| tp.name.clone()).collect();
+        let mut bindings = HashMap::<String, Type>::new();
+        let mut ordered = Vec::with_capacity(type_args.len());
+        for (tp, ta) in fd.type_params.iter().zip(type_args.iter()) {
+            let ty = self.type_arg_expr_to_type(ta);
+            bindings.insert(tp.name.clone(), ty.clone());
+            ordered.push((tp.name.clone(), ty));
+        }
+
+        if fields.len() != fd.params.len() {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1301] Function '{}' takes {} argument(s), got {}. \
+                     Hint: Pass one value per parameter.",
+                    name,
+                    fd.params.len(),
+                    fields.len()
+                ),
+                span: span.clone(),
+            });
+        }
+        for (i, field) in fields.iter().enumerate() {
+            let Some(param) = fd.params.get(i) else {
+                continue;
+            };
+            let pattern = param
+                .type_annotation
+                .as_ref()
+                .map(|ty| self.registry.resolve_type(ty))
+                .unwrap_or(Type::Unknown);
+            let expected = self.substitute_generic_type(&pattern, &generic_names, &bindings);
+            let actual = self.infer_expr_type_with_expected(&field.value, &expected);
+            if actual != Type::Unknown
+                && expected != Type::Unknown
+                && !Self::contains_unknown(&expected)
+                && !self.registry.is_subtype_of(&actual, &expected)
+            {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1506] Argument {} of '{}' has type {}, expected {}. \
+                         Hint: Pass a value of the correct type, or use an explicit conversion.",
+                        i + 1,
+                        name,
+                        actual,
+                        expected
+                    ),
+                    span: field.value.span().clone(),
+                });
+            }
+        }
+
+        // Record the bindings for codegen (host-call Out schema dictionary
+        // passing), keyed by this call's AST node id.
+        self.explicit_generic_call_bindings
+            .insert(span.node_id, ordered);
+
+        let ret_pattern = fd
+            .return_type
+            .as_ref()
+            .map(|ty| self.registry.resolve_type(ty))
+            .unwrap_or(Type::Unknown);
+        self.instantiate_generic_type(&ret_pattern, &generic_names, &bindings)
+    }
+
+    /// F62B-021: scan a generic function body for host-call Out slots that
+    /// reference a declared type parameter (`Uncage[b, m, T]()` /
+    /// `HostCall[steps, T]()`). Such functions need their schemas supplied
+    /// by call sites, so every call must use explicit type arguments.
+    pub(super) fn register_schema_passing_generic(&mut self, fd: &FuncDef) {
+        let needed = crate::parser::fn_schema_passing_type_params(fd);
+        if !needed.is_empty() {
+            self.schema_passing_generic_funcs
+                .insert(fd.name.clone(), needed);
+        }
+    }
+
     /// F62B-024: `InCage[builder, method, args]()` — validates the builder /
     /// method / wire-encodable args and yields the builder type again.
     pub(super) fn infer_in_cage_type(&mut self, type_args: &[Expr], span: &Span) -> Type {
@@ -1164,6 +1294,7 @@ impl TypeChecker {
                         self.func_param_types.insert(fd.name.clone(), param_types);
                         if !fd.type_params.is_empty() {
                             self.generic_func_defs.insert(fd.name.clone(), fd.clone());
+                            self.register_schema_passing_generic(fd);
                         }
                     } else {
                         self.invalid_func_defs.insert(fd.name.clone());

@@ -374,6 +374,18 @@ pub struct TypeChecker {
     /// every observed `Expr` here so codegen lowering can answer
     /// "is this expression Bool?" by looking up the recorded type.
     pub typed_expr_table: super::typed_hir::TypedExprTable,
+    /// F62B-021: explicit-type-argument generic calls
+    /// (`queryAll[PostRows](db, sql)`), keyed by the call's AST node id.
+    /// Values are the type bindings in declared type-parameter order.
+    /// Consumed by codegen lowering to resolve host-call Out schemas at
+    /// the call site (dictionary passing).
+    pub explicit_generic_call_bindings: HashMap<usize, Vec<(String, Type)>>,
+    /// F62B-021: generic functions whose body passes a type parameter into
+    /// a host-call Out slot (`Uncage[b, m, T]` / `HostCall[steps, T]`).
+    /// Maps function name → the type parameters (declared order) whose
+    /// schemas must be supplied by call sites. Such functions require
+    /// explicit type arguments at every call site.
+    pub schema_passing_generic_funcs: HashMap<String, Vec<String>>,
     /// Bidirectional hints for empty list literals, keyed by AST node id.
     /// Seeded by `seed_empty_literal_hints` when an expected type reaches a
     /// literal tree (annotated bindings, annotated call arguments, type
@@ -482,6 +494,8 @@ impl TypeChecker {
             descriptor_scope_shadows: HashSet::new(),
             pipeline_placeholder_type: None,
             typed_expr_table: super::typed_hir::TypedExprTable::new(),
+            explicit_generic_call_bindings: HashMap::new(),
+            schema_passing_generic_funcs: HashMap::new(),
             empty_literal_hints: HashMap::new(),
         };
         // C19B-002 (import-less): the C19 interactive variants are core-bundled

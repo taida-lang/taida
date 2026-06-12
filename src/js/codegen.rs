@@ -56,6 +56,10 @@ pub struct JsCodegen {
     /// by `is_js_pipeline_callable_ident` to distinguish a callable
     /// intermediate pipeline step from a bind-and-forward target.
     user_funcs: std::collections::HashSet<String>,
+    /// F62B-021: generic user functions — their mold-syntax bracket carries
+    /// TYPE arguments (erased on JS), so `genfn[T](args)` emits a plain
+    /// positional call with the `()` values.
+    generic_funcs: std::collections::HashSet<String>,
     /// User-defined functions declared with `=> :Float` return type.
     /// Used for compile-time Float-origin propagation so that
     /// `stdout(triple(4.0))` renders `12.0` instead of `12` (JS `Number`
@@ -306,6 +310,7 @@ impl JsCodegen {
             shadowed_net_builtins: std::collections::HashSet::new(),
             type_parents: std::collections::HashMap::new(),
             user_funcs: std::collections::HashSet::new(),
+            generic_funcs: std::collections::HashSet::new(),
             float_return_funcs: std::collections::HashSet::new(),
             // C21B-seed-04 re-fix: start with a single top-level scope.
             // gen_func_def pushes/pops nested scopes for function bodies.
@@ -829,6 +834,9 @@ impl JsCodegen {
         for stmt in &program.statements {
             if let Statement::FuncDef(fd) = stmt {
                 self.user_funcs.insert(fd.name.clone());
+                if !fd.type_params.is_empty() {
+                    self.generic_funcs.insert(fd.name.clone());
+                }
                 if matches!(&fd.return_type, Some(TypeExpr::Named(n)) if n == "Float") {
                     self.float_return_funcs.insert(fd.name.clone());
                 }
@@ -4234,6 +4242,28 @@ impl JsCodegen {
                     }
                     self.write(")");
                     return Ok(());
+                }
+                // F62B-021: explicit type arguments on a user function —
+                // `genfn[T1, T2](args)` / `genfn[T]()`. Types erase on JS;
+                // emit a plain positional call with the `()` values. For
+                // GENERIC functions the bracket always carries types.
+                if self.user_funcs.contains(name.as_str())
+                    && (self.generic_funcs.contains(name.as_str()) || !fields.is_empty())
+                {
+                    let all_positional = fields.iter().all(|f| {
+                        f.name.starts_with('_') && f.name[1..].chars().all(|c| c.is_ascii_digit())
+                    });
+                    if all_positional {
+                        self.write(&format!("{}(", name));
+                        for (i, field) in fields.iter().enumerate() {
+                            if i > 0 {
+                                self.write(", ");
+                            }
+                            self.gen_expr(&field.value)?;
+                        }
+                        self.write(")");
+                        return Ok(());
+                    }
                 }
                 self.write("__taida_solidify(");
                 self.write(&format!("{}(", name));
