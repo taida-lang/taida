@@ -12,7 +12,7 @@ mod common;
 
 use common::{taida_bin, unique_temp_dir, write_file};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn write_td(label: &str, source: &str) -> (PathBuf, PathBuf) {
@@ -22,14 +22,14 @@ fn write_td(label: &str, source: &str) -> (PathBuf, PathBuf) {
     (dir, td)
 }
 
-fn run_interp(td: &PathBuf) -> Output {
+fn run_interp(td: &Path) -> Output {
     Command::new(taida_bin())
         .arg(td)
         .output()
         .expect("run interpreter")
 }
 
-fn build_and_run_native(dir: &PathBuf, td: &PathBuf) -> Result<Output, String> {
+fn build_and_run_native(dir: &Path, td: &Path) -> Result<Output, String> {
     let bin = dir.join("main_bin");
     let build = Command::new(taida_bin())
         .args(["build", "native"])

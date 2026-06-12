@@ -1461,11 +1461,10 @@ fn native_expected_reject_list() -> Vec<&'static str> {
 }
 
 /// Per-fixture expected reject substring. Falls back to the
-/// historical Stream capability message for fixtures not listed here.
-fn native_reject_expected_substring(stem: &str) -> &'static str {
-    match stem {
-        _ => "unsupported mold type: Stream",
-    }
+/// historical Stream capability message for fixtures not listed here
+/// (per-fixture overrides hang off `_stem` when one diverges).
+fn native_reject_expected_substring(_stem: &str) -> &'static str {
+    "unsupported mold type: Stream"
 }
 
 // =========================================================================
